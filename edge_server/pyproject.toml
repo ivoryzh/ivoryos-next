@@ -1,0 +1,19 @@
+[project]
+name = "ivoryos-edge"
+version = "0.1.0"
+description = "IvoryOS Edge Server"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-socketio[client]",
+    "pydantic",
+    "python-dotenv",
+    "aiohttp",
+    "sqlalchemy",
+    "aiosqlite"
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

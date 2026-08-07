@@ -1,0 +1,15 @@
+/Users/ivoryzhang/PycharmProjects/ivoryos/ivoryos/optimizer 
+
+the optimizer is still gonna be predefined at least for those that already exist, 
+and frontend should auto find all param and return (objectives) 
+create config panel to set params range, and then click run how many times (experiment budget)
+
+error recover, think about what to do if error happens during a sequence, how to recover, like retry, skip (continue) or just stop
+
+
+for spreadsheet execution, frontend default is 5 rows, for easy visual,
+but upon submission, empty rows should be eliminated, or not executed during execution
+i saw error and pending in data history, which shouldn't be
+
+I still see can't load page when click run spreadsheet, go back or refresh does fix, but still,
+and should be fine not having log panel there in execution, is that why it failed 

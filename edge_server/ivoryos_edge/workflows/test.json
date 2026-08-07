@@ -1,0 +1,62 @@
+{
+    "prep": [],
+    "script": [
+        {
+            "id": 1,
+            "uuid": 554625,
+            "instrument": "my_pump",
+            "action": "set_flow_rate",
+            "args": {
+                "rate": 4
+            },
+            "arg_types": {
+                "rate": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 23416651,
+            "instrument": "my_pump",
+            "action": "long_running_task",
+            "args": {
+                "duration": 5
+            },
+            "arg_types": {
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 3,
+            "uuid": 423269195,
+            "instrument": "my_pump",
+            "action": "stop_pump",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 4,
+            "uuid": 254752096,
+            "instrument": "another_pump",
+            "action": "long_running_task",
+            "args": {
+                "duration": 8
+            },
+            "arg_types": {
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "cleanup": []
+}

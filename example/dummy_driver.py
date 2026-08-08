@@ -1,4 +1,6 @@
 import time
+import asyncio
+import threading
 
 class PumpDriver:
     """A dummy pump driver for testing introspection and execution."""
@@ -73,3 +75,49 @@ class DummyMathDriver:
         result = -((x - 3) ** 2) - ((y - 2) ** 2) + 10
         print(f"[MathDriver] Result: {result}")
         return result
+
+class AsyncPumpDriver:
+    """A dummy pump driver with async methods to test async execution."""
+    
+    def __init__(self):
+        self.flow_rate = 0.0
+        self.is_running = False
+
+    async def async_start_pump(self) -> dict:
+        """Starts the pump asynchronously."""
+        print("[AsyncPump] Starting pump asynchronously...")
+        await asyncio.sleep(1)
+        self.is_running = True
+        print("[AsyncPump] Pump started.")
+        return {"status": "success", "running": True}
+
+    async def async_long_task(self, duration: int) -> dict:
+        """An async long running task."""
+        print(f"[AsyncPump] Starting async long task for {duration} seconds...")
+        for i in range(duration):
+            print(f"[AsyncPump] Async task running... {i+1}/{duration}")
+            await asyncio.sleep(1)
+        print("[AsyncPump] Async long task finished.")
+        return {"status": "success", "duration": duration}
+
+    def sync_to_async_thread_test(self) -> dict:
+        """A regular synchronous method that runs an async function inside a new thread."""
+        print("[AsyncPump] Running sync_to_async_thread_test...")
+        
+        result = {}
+        def run_in_thread():
+            async def inner_async():
+                print("[AsyncPump Thread] Inside inner async function...")
+                await asyncio.sleep(2)
+                return "thread_success"
+            
+            # This creates a new event loop for this thread
+            res = asyncio.run(inner_async())
+            result["data"] = res
+            print(f"[AsyncPump Thread] Finished with result: {res}")
+
+        t = threading.Thread(target=run_in_thread)
+        t.start()
+        t.join()  # Wait for the thread to complete for the sake of returning a result
+
+        return {"status": "success", "result": result.get("data")}

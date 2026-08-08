@@ -2,14 +2,15 @@ import sys
 import os
 
 # Add edge_server to path so we can import ivoryos_edge
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "edge_server"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "edge_server"))
 
-from dummy_driver import PumpDriver, DummyMathDriver
+from dummy_driver import PumpDriver, DummyMathDriver, AsyncPumpDriver
 import ivoryos_edge
 
 # Initialize instruments in global scope
 my_pump = PumpDriver()
 another_pump = PumpDriver()
+async_pump = AsyncPumpDriver()
 math_driver = DummyMathDriver()
 
 # Run edge server

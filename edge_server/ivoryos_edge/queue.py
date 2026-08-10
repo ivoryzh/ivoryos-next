@@ -19,6 +19,7 @@ class WorkflowQueueManager:
         self.error_action: Optional[str] = None
         
         self.current_task: Optional[asyncio.Task] = None
+        self.current_step_task: Optional[asyncio.Future] = None
         self._runner_lock: Optional[asyncio.Lock] = None
         
         # WebSocket tracking: run_id -> list of WebSockets
@@ -36,21 +37,21 @@ class WorkflowQueueManager:
         from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
         from datetime import datetime
         async with async_session() as session:
-            # Fix stuck runs
+            # Fix stuck and pending runs
             runs = await session.execute(
-                select(WorkflowRun).where(WorkflowRun.status == "running")
+                select(WorkflowRun).where(WorkflowRun.status.in_(["running", "pending"]))
             )
             for run in runs.scalars():
                 run.status = "error"
                 run.end_time = datetime.utcnow()
             
-            # Fix stuck steps
+            # Fix stuck and pending steps
             steps = await session.execute(
-                select(WorkflowStep).where(WorkflowStep.status == "running")
+                select(WorkflowStep).where(WorkflowStep.status.in_(["running", "pending"]))
             )
             for step in steps.scalars():
                 step.status = "error"
-                step.error = "Server crashed during execution."
+                step.error = "Server crashed or restarted before execution."
                 step.end_time = datetime.utcnow()
                 
             await session.commit()
@@ -81,9 +82,12 @@ class WorkflowQueueManager:
             
             # Immediate UI feedback for active runs
             if self.active_run_id == run_id:
+                has_error = any(s['status'] == 'error' for s in run_dict['steps'])
                 if self.cancelled:
                     run_dict['status'] = 'cancelling'
-                elif self.paused:
+                elif has_error:
+                    run_dict['status'] = 'error'
+                elif self.paused and run_dict.get('status') == 'running':
                     run_dict['status'] = 'paused'
                     
             return run_dict
@@ -139,8 +143,9 @@ class WorkflowQueueManager:
         
     def cancel(self):
         self.cancelled = True
+        if self.current_step_task and not self.current_step_task.done():
+            self.current_step_task.cancel()
         self.resume() # Make sure it wakes up to cancel
-
     async def subscribe(self, run_id: int, websocket: Any):
         if run_id not in self.active_connections:
             self.active_connections[run_id] = []
@@ -204,8 +209,11 @@ class WorkflowQueueManager:
                     .limit(1)
                 )
                 recent = recent_query.scalar_one_or_none()
-                if recent:
-                    payload["recent_run"] = await self.get_run_status(recent.id)
+                if recent and recent.end_time:
+                    # Only send recent run if it finished in the last 10 seconds
+                    # This ensures the status bar auto-dismisses gracefully instead of lingering
+                    if (datetime.utcnow() - recent.end_time).total_seconds() < 10:
+                        payload["recent_run"] = await self.get_run_status(recent.id)
                 
         dead_conns = []
         for ws in self.global_connections:
@@ -250,6 +258,7 @@ class WorkflowQueueManager:
                     )
                     steps = [s[0] for s in steps_query]
                     
+                    workflow_context = {}
                     index = 0
                     while index < len(steps):
                         step = steps[index]
@@ -277,6 +286,172 @@ class WorkflowQueueManager:
                         await self.broadcast_updates(run_id)
                         
                         try:
+                            if step.instrument in ("Flow_Control", "Flow Control"):
+                                method = step.method
+                                args = step.parameters or {}
+                                
+                                if method == "Sleep":
+                                    duration = float(args.get("duration_seconds", 0))
+                                    await asyncio.sleep(duration)
+                                    step.status = "completed"
+                                    step.end_time = datetime.utcnow()
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+                                    index += 1
+                                    continue
+                                    
+                                elif method == "If":
+                                    condition = args.get("condition", "False")
+                                    try:
+                                        # Safe evaluation using only workflow variables
+                                        result = eval(condition, {"__builtins__": {}}, workflow_context)
+                                    except Exception as e:
+                                        raise Exception(f"Failed to evaluate If condition: {e}")
+                                        
+                                    if result:
+                                        # True: just proceed into the block normally
+                                        step.status = "completed"
+                                        step.end_time = datetime.utcnow()
+                                        await session.commit()
+                                        index += 1
+                                    else:
+                                        # False: skip to matching Else or End_If
+                                        depth = 0
+                                        found = False
+                                        for i in range(index + 1, len(steps)):
+                                            s = steps[i]
+                                            s.status = "skipped"
+                                            if s.instrument in ("Flow_Control", "Flow Control"):
+                                                if s.method == "If":
+                                                    depth += 1
+                                                elif s.method == "End_If":
+                                                    if depth == 0:
+                                                        s.status = "pending"
+                                                        index = i
+                                                        found = True
+                                                        break
+                                                    else:
+                                                        depth -= 1
+                                                elif s.method == "Else" and depth == 0:
+                                                    s.status = "pending"
+                                                    index = i
+                                                    found = True
+                                                    break
+                                                    
+                                        if not found:
+                                            raise Exception("Matching Else or End_If not found for If statement")
+                                            
+                                        # Mark the If statement itself as completed
+                                        step.status = "completed"
+                                        step.end_time = datetime.utcnow()
+                                        await session.commit()
+                                        
+                                elif method == "Else":
+                                    # If we hit an Else normally, it means the preceding If was True.
+                                    # So we skip to the End_If.
+                                    depth = 0
+                                    found = False
+                                    for i in range(index + 1, len(steps)):
+                                        s = steps[i]
+                                        s.status = "skipped"
+                                        if s.instrument in ("Flow_Control", "Flow Control"):
+                                            if s.method == "If":
+                                                depth += 1
+                                            elif s.method == "End_If":
+                                                if depth == 0:
+                                                    s.status = "pending"
+                                                    index = i
+                                                    found = True
+                                                    break
+                                                else:
+                                                    depth -= 1
+                                                    
+                                    if not found:
+                                        raise Exception("Matching End_If not found for Else statement")
+                                        
+                                    step.status = "completed"
+                                    step.end_time = datetime.utcnow()
+                                    await session.commit()
+                                    
+                                elif method == "End_If":
+                                    # Nothing to do, just pass
+                                    step.status = "completed"
+                                    step.end_time = datetime.utcnow()
+                                    await session.commit()
+                                    index += 1
+                                    
+                                elif method == "While":
+                                    condition = args.get("condition", "False")
+                                    try:
+                                        result = eval(condition, {"__builtins__": {}}, workflow_context)
+                                    except Exception as e:
+                                        raise Exception(f"Failed to evaluate While condition: {e}")
+                                        
+                                    if result:
+                                        # Enter loop
+                                        step.status = "completed"
+                                        step.end_time = datetime.utcnow()
+                                        await session.commit()
+                                        index += 1
+                                    else:
+                                        # Skip loop
+                                        depth = 0
+                                        found = False
+                                        for i in range(index + 1, len(steps)):
+                                            s = steps[i]
+                                            s.status = "skipped"
+                                            if s.instrument in ("Flow_Control", "Flow Control"):
+                                                if s.method == "While":
+                                                    depth += 1
+                                                elif s.method == "End_While":
+                                                    if depth == 0:
+                                                        index = i + 1 # jump past the end
+                                                        found = True
+                                                        break
+                                                    else:
+                                                        depth -= 1
+                                        if not found:
+                                            raise Exception("Matching End_While not found for While statement")
+                                            
+                                        step.status = "completed"
+                                        step.end_time = datetime.utcnow()
+                                        await session.commit()
+                                        
+                                elif method == "End_While":
+                                    # Loop iteration completed, jump back to While
+                                    depth = 0
+                                    found = False
+                                    while_idx = -1
+                                    for i in range(index - 1, -1, -1):
+                                        s = steps[i]
+                                        if s.instrument in ("Flow_Control", "Flow Control"):
+                                            if s.method == "End_While":
+                                                depth += 1
+                                            elif s.method == "While":
+                                                if depth == 0:
+                                                    while_idx = i
+                                                    found = True
+                                                    break
+                                                else:
+                                                    depth -= 1
+                                                    
+                                    if not found:
+                                        raise Exception("Matching While not found for End_While statement")
+                                        
+                                    # Mark End_While complete for this iteration (optional but good)
+                                    step.status = "completed"
+                                    step.end_time = datetime.utcnow()
+                                    
+                                    # Reset statuses for the next iteration (including the While loop itself and End_While!)
+                                    for i in range(while_idx, index + 1):
+                                        steps[i].status = "pending"
+                                        
+                                    await session.commit()
+                                    index = while_idx
+                                    
+                                await self.broadcast_updates(run_id)
+                                continue
+
                             instruments = getattr(self.app.state, "instruments", {})
                             if step.instrument not in instruments:
                                 raise Exception(f"Instrument {step.instrument} not found")
@@ -288,20 +463,39 @@ class WorkflowQueueManager:
                             method = getattr(instance, step.method)
                             args = step.parameters or {}
                             
+                            from ivoryos_edge.introspection import cast_arguments
+                            args = cast_arguments(method, args)
+                            
                             if inspect.iscoroutinefunction(method):
-                                result = await method(**args)
+                                self.current_step_task = asyncio.create_task(method(**args))
                             else:
                                 loop = asyncio.get_running_loop()
-                                result = await loop.run_in_executor(None, lambda: method(**args))
+                                self.current_step_task = loop.run_in_executor(None, lambda: method(**args))
+                                
+                            result = await self.current_step_task
+                            self.current_step_task = None
                                 
                             step.status = "completed"
                             step.outputs = {"result": result}
                             
+                            if step.parameters and "_return_var" in step.parameters:
+                                workflow_context[step.parameters["_return_var"]] = result
+                                
                             step.end_time = datetime.utcnow()
                             await session.commit()
                             await self.broadcast_updates(run_id)
                             index += 1
                             
+                        except asyncio.CancelledError:
+                            self.current_step_task = None
+                            step.status = "error"
+                            step.error = "Step execution cancelled"
+                            step.end_time = datetime.utcnow()
+                            await session.commit()
+                            if self.cancelled:
+                                break
+                            else:
+                                raise
                         except Exception as e:
                             step.status = "error"
                             step.error = str(e) + "\n" + traceback.format_exc()
@@ -400,6 +594,85 @@ class WorkflowQueueManager:
         
         step_index = 0
         
+        async def execute_template_block(template, suggestion_args=None):
+            nonlocal step_index, run
+            iteration_steps = []
+            for tmpl_step in template:
+                args = {}
+                for k, v in tmpl_step.get("params", {}).items():
+                    if isinstance(v, str) and v.startswith("#") and suggestion_args:
+                        var_name = v[1:]
+                        args[k] = suggestion_args.get(var_name, v)
+                    else:
+                        args[k] = v
+                        
+                db_step = WorkflowStep(
+                    run_id=run_id,
+                    sequence_index=step_index,
+                    instrument=tmpl_step.get("instrument", tmpl_step.get("module")),
+                    method=tmpl_step.get("method", tmpl_step.get("action")),
+                    parameters=args,
+                    status="pending"
+                )
+                session.add(db_step)
+                iteration_steps.append((db_step, tmpl_step.get("returnVar", tmpl_step.get("return"))))
+                step_index += 1
+                
+            await session.commit()
+            await self.broadcast_updates(run_id)
+            
+            for db_step, return_var in iteration_steps:
+                if self.cancelled:
+                    return False, {}
+                await self.pause_event.wait()
+                
+                db_step.status = "running"
+                db_step.start_time = datetime.utcnow()
+                await session.commit()
+                await self.broadcast_updates(run_id)
+                
+                try:
+                    from ivoryos_edge.server import app, run_and_track_task
+                    instruments = getattr(app.state, "instruments", {})
+                    instance = instruments.get(db_step.instrument)
+                    method = getattr(instance, db_step.method)
+                    
+                    task_id = str(uuid.uuid4())
+                    from ivoryos_edge.introspection import cast_arguments
+                    casted_args = cast_arguments(method, db_step.parameters or {})
+                    self.current_step_task = asyncio.create_task(
+                        run_and_track_task(task_id, method, casted_args)
+                    )
+                    result = await self.current_step_task
+                    
+                    db_step.status = "completed"
+                    db_step.end_time = datetime.utcnow()
+                    
+                    # Very simple return var handling for optimization loop objective feedback
+                    if return_var:
+                        return True, {return_var: result}
+                        
+                    await session.commit()
+                    await self.broadcast_updates(run_id)
+                except Exception as e:
+                    db_step.status = "error"
+                    db_step.end_time = datetime.utcnow()
+                    run.status = "error"
+                    await session.commit()
+                    await self.broadcast_updates(run_id)
+                    return False, {}
+            return True, {}
+
+        # 1. Execute Prep Phase
+        prep_template = parameters.get("prep_template", [])
+        if prep_template:
+            success, _ = await execute_template_block(prep_template)
+            if not success:
+                run.status = "error"
+                await session.commit()
+                await self.broadcast_updates(run_id)
+                return
+
         for iteration in range(budget):
             if self.cancelled:
                 break
@@ -464,10 +737,13 @@ class WorkflowQueueManager:
                     method = getattr(instance, db_step.method)
                     
                     if inspect.iscoroutinefunction(method):
-                        result = await method(**(db_step.parameters or {}))
+                        self.current_step_task = asyncio.create_task(method(**(db_step.parameters or {})))
                     else:
                         loop = asyncio.get_running_loop()
-                        result = await loop.run_in_executor(None, lambda: method(**(db_step.parameters or {})))
+                        self.current_step_task = loop.run_in_executor(None, lambda: method(**(db_step.parameters or {})))
+                        
+                    result = await self.current_step_task
+                    self.current_step_task = None
                         
                     db_step.status = "completed"
                     db_step.outputs = {"result": result}
@@ -480,7 +756,13 @@ class WorkflowQueueManager:
                                 objective_values[return_var] = float(result)
                             except:
                                 pass
+                except asyncio.CancelledError:
+                    self.current_step_task = None
+                    db_step.status = "error"
+                    db_step.error = "Step execution cancelled"
+                    iteration_failed = True
                 except Exception as e:
+                    self.current_step_task = None
                     db_step.status = "error"
                     import traceback
                     db_step.error = str(e) + "\n" + traceback.format_exc()

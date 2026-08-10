@@ -1,0 +1,23 @@
+{
+    "prep": [],
+    "script": [
+        {
+            "id": 1,
+            "uuid": 691670056,
+            "instrument": "math_driver",
+            "action": "evaluate_function",
+            "args": {
+                "x": 1,
+                "y": 1
+            },
+            "arg_types": {
+                "x": "<class 'float'>",
+                "y": "<class 'float'>"
+            },
+            "return": "objective",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "cleanup": []
+}

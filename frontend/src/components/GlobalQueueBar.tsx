@@ -1,7 +1,7 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
-import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward } from 'lucide-react';
+import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy } from 'lucide-react';
 
 export default function GlobalQueueBar() {
   const [activeRun, setActiveRun] = useState<any>(null);
@@ -60,6 +60,12 @@ export default function GlobalQueueBar() {
 
   const handleRunControl = async (action: 'pause' | 'resume' | 'cancel') => {
     if (!activeRun) return;
+    
+    // Optimistic UI update
+    if (action === 'pause') setActiveRun({ ...activeRun, status: 'pausing' });
+    else if (action === 'resume') setActiveRun({ ...activeRun, status: 'running' });
+    else if (action === 'cancel') setActiveRun({ ...activeRun, status: 'cancelling' });
+
     try {
       await fetch(`${API_BASE}/api/queue/runs/${activeRun.id}/${action}`, { method: 'POST' });
     } catch (e) {
@@ -83,9 +89,18 @@ export default function GlobalQueueBar() {
   if (!activeRun) return null; // Only show if there's an active run
 
   // Calculate Progress
-  const totalSteps = activeRun.steps?.length || 0;
-  const completedSteps = activeRun.steps?.filter((s: any) => s.status === 'completed' || s.status === 'error').length || 0;
-  const progressPercent = totalSteps > 0 ? (completedSteps / totalSteps) * 100 : 0;
+  let totalSteps = activeRun.steps?.length || 0;
+  let startedSteps = activeRun.status === 'completed' ? totalSteps : (activeRun.steps?.filter((s: any) => s.status !== 'pending').length || 0);
+
+  if (activeRun.parameters?.type === 'Optimization') {
+      const budget = activeRun.parameters?.budget || 1;
+      const seqTemplateLen = activeRun.parameters?.sequence_template?.length || 1;
+      const prepLen = activeRun.parameters?.prep_template?.length || 0;
+      const cleanLen = activeRun.parameters?.cleanup_template?.length || 0;
+      totalSteps = prepLen + cleanLen + (budget * seqTemplateLen);
+  }
+
+  const progressPercent = activeRun.status === 'completed' ? 100 : (totalSteps > 0 ? (startedSteps / totalSteps) * 100 : 0);
   
   const currentStep = activeRun.steps?.find((s: any) => s.status === 'running' || s.status === 'pending');
 
@@ -106,13 +121,13 @@ export default function GlobalQueueBar() {
            onClick={() => setExpanded(!expanded)}
         >
             <div className="flex items-center space-x-3 truncate">
-                <div className={`p-1.5 rounded-full ${activeRun.status === 'paused' ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 animate-pulse'}`}>
+                <div className={`p-1.5 rounded-full ${['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 animate-pulse'}`}>
                    <Activity className="w-4 h-4" />
                 </div>
                 <div className="flex flex-col truncate">
                     <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeRun.name}</span>
                     <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">
-                       {activeRun.status === 'cancelling' ? 'Cancelling...' : activeRun.status} • {['completed', 'error', 'cancelled'].includes(activeRun.status) ? completedSteps : Math.min(completedSteps + 1, totalSteps)}/{totalSteps} Tasks
+                       {activeRun.status === 'cancelling' ? 'Cancelling...' : activeRun.status === 'pausing' ? 'Pausing...' : activeRun.status} • {startedSteps}/{totalSteps} Tasks
                     </span>
                 </div>
             </div>
@@ -123,12 +138,22 @@ export default function GlobalQueueBar() {
         {expanded && (
             <div className="px-4 pb-4 pt-1 border-t border-gray-100 dark:border-white/5">
                 {activeRun.status === 'error' ? (
-                    <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-500/30 text-xs font-mono text-red-700 dark:text-red-400 overflow-y-auto max-h-32 whitespace-pre-wrap">
+                    <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-500/30 text-xs font-mono text-red-700 dark:text-red-400 overflow-y-auto max-h-32 whitespace-pre-wrap relative group">
                         {activeRun.steps?.find((s:any) => s.status === 'error')?.error || 'Unknown error occurred.'}
+                        <button
+                            onClick={() => {
+                                const errorText = activeRun.steps?.find((s:any) => s.status === 'error')?.error || 'Unknown error occurred.';
+                                navigator.clipboard.writeText(errorText);
+                            }}
+                            className="absolute top-2 right-2 p-1.5 bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-200 dark:hover:bg-red-900/60"
+                            title="Copy Error"
+                        >
+                            <Copy className="w-3.5 h-3.5" />
+                        </button>
                     </div>
                 ) : currentStep ? (
                     <div className="mb-4 p-3 bg-gray-50 dark:bg-black/20 rounded-lg border border-gray-200 dark:border-white/10">
-                        <div className="text-[10px] uppercase font-bold text-gray-500 mb-1">Current Task</div>
+                        <div className="text-[10px] uppercase font-bold text-gray-500 mb-1">Current Task {currentStep.parameters?._phase ? `(${currentStep.parameters._phase} phase)` : ''}</div>
                         <div className="text-sm font-mono text-gray-800 dark:text-gray-200 truncate">
                             {currentStep.instrument}.{currentStep.method}
                         </div>
@@ -142,6 +167,8 @@ export default function GlobalQueueBar() {
                 <div className="flex items-center justify-end space-x-2">
                     {activeRun.status === 'cancelling' ? (
                         <div className="text-xs font-bold text-red-500 animate-pulse px-3 py-1.5">Waiting for current task to abort...</div>
+                    ) : activeRun.status === 'pausing' ? (
+                        <div className="text-xs font-bold text-yellow-600 dark:text-yellow-400 animate-pulse px-3 py-1.5">Pausing after current task...</div>
                     ) : (
                       <>
                         {activeRun.status === 'paused' ? (

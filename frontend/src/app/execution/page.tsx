@@ -19,6 +19,7 @@ export default function ExecutionPage() {
   }>({ isRunning: false, currentRow: -1, results: [] });
 
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
 
   useEffect(() => {
@@ -27,6 +28,17 @@ export default function ExecutionPage() {
     setTheme(savedTheme as 'light' | 'dark');
     if (savedTheme === 'dark') document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
+
+
+    fetch(`${API_BASE}/api/queue/runs`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.runs) {
+            const hasPending = data.runs.some((r: any) => r.status === 'pending');
+            const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
+            setHasPendingRuns(hasPending || hasActive);
+        }
+      });
 
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
@@ -239,6 +251,11 @@ export default function ExecutionPage() {
               if (typeof val === 'string' && val.startsWith('#')) {
                   const varName = val.substring(1);
                   let subVal: any = rowData[varName];
+                  if (subVal === undefined || subVal === null || subVal === '') {
+                      alert(`Missing value for variable '${varName}' in row ${r + 1}`);
+                      setExecutionState({ isRunning: false, currentRow: -1, results: [] });
+                      return;
+                  }
                   const typeHint = block.schema.parameters[key]?.type || '';
                   if (typeHint.includes('int') || typeHint.includes('float')) {
                       if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
@@ -322,7 +339,12 @@ export default function ExecutionPage() {
               </button>
             )}
             <button 
-                onClick={executeSpreadsheet}
+                onClick={() => {
+                    if (hasPendingRuns) {
+                        if (!confirm("A task is already running. Add this sequence to the execution queue?")) return;
+                    }
+                    executeSpreadsheet();
+                }}
                 disabled={variables.length === 0}
                 className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
                   variables.length === 0
@@ -331,7 +353,7 @@ export default function ExecutionPage() {
                 }`}
               >
                 <Play className="w-4 h-4" />
-                <span>Add to Queue</span>
+                <span>{hasPendingRuns ? 'Add to Queue' : 'Run Sequence'}</span>
               </button>
           </div>
         </header>

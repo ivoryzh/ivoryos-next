@@ -2,7 +2,7 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Sun, Moon } from 'lucide-react';
+import { Sun, Moon, Info } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
 type LogEntry = {
@@ -187,38 +187,54 @@ export default function InstrumentsPage() {
                     const key = `${instName}.${methodName}`;
                     return (
                       <div key={methodName} className="p-5 rounded-2xl bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 flex flex-col shadow-sm dark:shadow-none">
-                        <div className="flex items-center justify-between mb-2">
-                          <h4 className="font-semibold text-blue-600 dark:text-blue-400 truncate pr-2 capitalize">{methodName.replace(/_/g, ' ')}</h4>
+                        <div className="flex items-center justify-between mb-5">
+                          <div className="flex items-center space-x-2">
+                            <h4 className="font-semibold text-blue-600 dark:text-blue-400 break-all capitalize">{methodName.replace(/_/g, ' ')}</h4>
+                            {methodData.description && (
+                              <div className="relative group">
+                                <Info className="w-4 h-4 text-gray-400 hover:text-blue-500 cursor-help" />
+                                <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-64 p-3 bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 whitespace-pre-wrap max-h-48 overflow-y-auto">
+                                  {methodData.description}
+                                </div>
+                              </div>
+                            )}
+                          </div>
                           {methodData.is_coroutine && <span className="text-[10px] bg-purple-100 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Async</span>}
                         </div>
-                        
-                        {methodData.description && (
-                          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4 line-clamp-2">{methodData.description}</p>
-                        )}
                         
                         <div className="flex-1 space-y-3 mb-5">
                           {Object.entries(methodData.parameters).map(([param, pData]: [string, any]) => (
                             <div key={param} className="space-y-1">
-                              <label className="text-[11px] text-gray-600 dark:text-gray-400 capitalize flex items-center justify-between font-medium">
-                                <span>{param} <span className="text-gray-400 dark:text-gray-600 lowercase font-normal">({pData.type})</span></span>
-                                {pData.required && <span className="text-red-500/80 dark:text-red-400/70 text-[9px] uppercase tracking-wider">Req</span>}
+                              <label className="text-[11px] text-gray-600 dark:text-gray-400 capitalize flex items-center font-medium mb-1">
+                                {param}
+                                {pData.required && <span className="text-red-500/80 dark:text-red-400/70 ml-1 text-sm leading-none">*</span>}
                               </label>
-                              <input 
-                                type="text"
-                                value={formValues[key]?.[param] !== undefined ? formValues[key][param] : (pData.default !== undefined ? pData.default : '')}
-                                className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-blue-500 transition-colors text-gray-900 dark:text-white"
-                                placeholder={`Enter ${param}...`}
-                                onChange={(e) => {
-                                  let val: any = e.target.value;
-                                  if (pData.type.includes('bool')) {
-                                    if (val.toLowerCase() === 'true') val = true;
-                                    else if (val.toLowerCase() === 'false') val = false;
-                                  } else if (pData.type.includes('int') || pData.type.includes('float')) {
-                                    if (val !== '' && !isNaN(Number(val))) val = Number(val);
-                                  }
-                                  handleInputChange(instName, methodName, param, val);
-                                }}
-                              />
+                              {pData.type.includes('bool') ? (
+                                <select
+                                  value={formValues[key]?.[param] !== undefined ? formValues[key][param].toString() : (pData.default !== undefined ? pData.default.toString() : '')}
+                                  className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-blue-500 transition-colors text-gray-900 dark:text-white"
+                                  onChange={(e) => handleInputChange(instName, methodName, param, e.target.value === 'true')}
+                                >
+                                  <option value="">Select boolean...</option>
+                                  <option value="true">True</option>
+                                  <option value="false">False</option>
+                                </select>
+                              ) : (
+                                <input 
+                                  type={pData.type.includes('int') || pData.type.includes('float') ? 'number' : 'text'}
+                                  step={pData.type.includes('float') ? 'any' : '1'}
+                                  value={formValues[key]?.[param] !== undefined ? formValues[key][param] : (pData.default !== undefined ? pData.default : '')}
+                                  className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-blue-500 transition-colors text-gray-900 dark:text-white"
+                                  placeholder={pData.type}
+                                  onChange={(e) => {
+                                    let val: any = e.target.value;
+                                    if (pData.type.includes('int') || pData.type.includes('float')) {
+                                      if (val !== '' && !isNaN(Number(val))) val = Number(val);
+                                    }
+                                    handleInputChange(instName, methodName, param, val);
+                                  }}
+                                />
+                              )}
                             </div>
                           ))}
                         </div>

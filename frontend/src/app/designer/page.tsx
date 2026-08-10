@@ -3,7 +3,7 @@ import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { Play, GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, Sun, Moon, Save, Code, Download, LayoutTemplate, X, Zap } from 'lucide-react';
+import { Play, GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
 type SequenceBlock = {
@@ -18,7 +18,10 @@ type SequenceBlock = {
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
+  const [prepSequence, setPrepSequence] = useState<SequenceBlock[]>([]);
   const [sequence, setSequence] = useState<SequenceBlock[]>([]);
+  const [cleanupSequence, setCleanupSequence] = useState<SequenceBlock[]>([]);
+  const [currentWorkflowName, setCurrentWorkflowName] = useState<string>('');
   const [executionState, setExecutionState] = useState<{
     isRunning: boolean;
     currentIndex: number;
@@ -32,6 +35,7 @@ export default function DesignerPage() {
   const [expandedToolbox, setExpandedToolbox] = useState<Record<string, boolean>>({});
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
+  const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
   const [showOptimizer, setShowOptimizer] = useState(false);
   const [optConfig, setOptConfig] = useState<any>({
@@ -42,8 +46,71 @@ export default function DesignerPage() {
     objectives: {}
   });
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        
+        // Auto-migrate legacy sequence format
+        const migrateBlocks = (blocks: any[]): SequenceBlock[] => {
+          return blocks.map(b => ({
+            id: String(b.uuid || b.id || Math.random()),
+            instrument: b.instrument ? b.instrument.replace('deck.', '') : 'unknown',
+            method: b.action || b.method || 'unknown',
+            params: b.args || b.params || {},
+            returnVar: b.return || b.returnVar || '',
+            schema: {},
+            isExpanded: false
+          }));
+        };
+
+        let newPrep, newSeq, newClean, name = '';
+
+        if (json.script_dict) {
+          // Legacy format detected
+          newPrep = migrateBlocks(json.script_dict.prep || []);
+          newSeq = migrateBlocks(json.script_dict.script || []);
+          newClean = migrateBlocks(json.script_dict.cleanup || []);
+          name = json.name || '';
+        } else {
+          // New format
+          newPrep = json.prep || [];
+          newSeq = json.sequence || json.script || [];
+          newClean = json.cleanup || [];
+          name = json.name || '';
+        }
+
+        setPrepSequence(newPrep);
+        setSequence(newSeq);
+        setCleanupSequence(newClean);
+        if (name) setCurrentWorkflowName(name);
+
+      } catch (error) {
+        console.error("Failed to parse JSON file", error);
+        alert("Failed to parse JSON file.");
+      }
+      
+      // Reset input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const exportJSON = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(sequence, null, 2));
+    const payload = {
+      prep: prepSequence,
+      script: sequence,
+      cleanup: cleanupSequence
+    };
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(payload, null, 2));
     const dlAnchorElem = document.createElement('a');
     dlAnchorElem.setAttribute("href", dataStr);
     dlAnchorElem.setAttribute("download", "ivoryos_sequence.json");
@@ -52,7 +119,10 @@ export default function DesignerPage() {
 
   const generatePythonCode = () => {
     let code = "";
-    let instruments = Array.from(new Set(sequence.map(s => s.instrument)));
+    const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+    const hasSleep = allBlocks.some(b => (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'Sleep');
+    if (hasSleep) code += "import time\n";
+    let instruments = Array.from(new Set(sequence.map(s => s.instrument))).filter(i => i !== 'Flow_Control' && i !== 'Flow Control');
     
     // Generate real imports for the instances directly
     if (instruments.length > 0) {
@@ -77,15 +147,62 @@ export default function DesignerPage() {
       code += "    pass\n";
     }
 
-    sequence.forEach((block) => {
-      let params = Object.entries(block.params).map(([k, v]) => {
-         if (typeof v === 'string' && !v.startsWith('#')) return `${k}="${v}"`;
-         return `${k}=${v}`;
-      }).join(', ');
-      
-      let returnStr = block.returnVar ? `${block.returnVar} = ` : "";
-      code += `    ${returnStr}${block.instrument}.${block.method}(${params})\n`;
-    });
+    const genBlocks = (blocks: SequenceBlock[], phase: string) => {
+      if (blocks.length > 0) code += `\n    # ${phase} phase\n`;
+      let indent = 1;
+      blocks.forEach((block, idx) => {
+        const pad = '    '.repeat(indent);
+        const isFlow = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
+        
+        if (isFlow) {
+          if (block.method === 'If') {
+            code += `${pad}if ${block.params.condition || 'True'}:\n`;
+            indent++;
+            // Check if next block is Else or End_If (empty body)
+            const next = blocks[idx + 1];
+            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && (next.method === 'Else' || next.method === 'End_If')) {
+              code += `${'    '.repeat(indent)}pass\n`;
+            }
+          } else if (block.method === 'Else') {
+            indent = Math.max(1, indent - 1);
+            code += `${'    '.repeat(indent)}else:\n`;
+            indent++;
+            // Check if next block is End_If (empty else body)
+            const next = blocks[idx + 1];
+            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && next.method === 'End_If') {
+              code += `${'    '.repeat(indent)}pass\n`;
+            }
+          } else if (block.method === 'End_If') {
+            indent = Math.max(1, indent - 1);
+          } else if (block.method === 'While') {
+            code += `${pad}while ${block.params.condition || 'True'}:\n`;
+            indent++;
+            // Check if next block is End_While (empty body)
+            const next = blocks[idx + 1];
+            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && next.method === 'End_While') {
+              code += `${'    '.repeat(indent)}pass\n`;
+            }
+          } else if (block.method === 'End_While') {
+            indent = Math.max(1, indent - 1);
+          } else if (block.method === 'Sleep') {
+            code += `${pad}time.sleep(${block.params.duration_seconds || 0})\n`;
+          }
+          return;
+        }
+        
+        let params = Object.entries(block.params).map(([k, v]) => {
+           if (typeof v === 'string' && !v.startsWith('#')) return `${k}="${v}"`;
+           return `${k}=${v}`;
+        }).join(', ');
+        
+        let returnStr = block.returnVar ? `${block.returnVar} = ` : "";
+        code += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;
+      });
+    };
+    
+    genBlocks(prepSequence, "Prep");
+    genBlocks(sequence, "Main");
+    genBlocks(cleanupSequence, "Cleanup");
     
     code += "\nif __name__ == '__main__':\n    run_workflow()\n";
     return code;
@@ -94,6 +211,28 @@ export default function DesignerPage() {
   // Fetch status on mount
   useEffect(() => {
     // Theme init
+    const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.runs) {
+                const hasPending = data.runs.some((r: any) => r.status === 'pending');
+                const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
+                setHasPendingRuns(hasPending || hasActive);
+            }
+        } catch(e) {}
+    };
+    
+    fetch(`${API_BASE}/api/queue/runs`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.runs) {
+            const hasPending = data.runs.some((r: any) => r.status === 'pending');
+            const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
+            setHasPendingRuns(hasPending || hasActive);
+        }
+      });
+      
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme as 'light' | 'dark');
     if (savedTheme === 'dark') document.documentElement.classList.add('dark');
@@ -105,13 +244,79 @@ export default function DesignerPage() {
       try {
         setSequence(JSON.parse(savedSeq));
       } catch (e) {
-        console.error("Failed to parse saved sequence", e);
+        console.error(e);
       }
+    }
+    const savedPrepSeq = localStorage.getItem('ivoryos_prep_sequence');
+    if (savedPrepSeq) {
+      try { setPrepSequence(JSON.parse(savedPrepSeq)); } catch (e) { console.error(e); }
+    }
+    const savedCleanupSeq = localStorage.getItem('ivoryos_cleanup_sequence');
+    if (savedCleanupSeq) {
+      try { setCleanupSequence(JSON.parse(savedCleanupSeq)); } catch (e) { console.error(e); }
+    }
+    const editingWf = localStorage.getItem('ivoryos_editing_workflow');
+    if (editingWf) {
+      setCurrentWorkflowName(editingWf);
     }
 
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
-      .then(data => {
+      .then(async data => {
+        // Fetch workflows
+        try {
+            const wfRes = await fetch(`${API_BASE}/api/workflows`);
+            const wfData = await wfRes.json();
+            if (wfData.workflows && wfData.workflows.length > 0) {
+
+                if (!data.instruments) data.instruments = {};
+                
+                // Inject Flow Control
+                data.instruments["Flow Control"] = {
+                    If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
+                    While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
+                    Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
+                };
+
+                data.instruments["Library Workflows"] = {};
+                
+                for (const wf of wfData.workflows) {
+                    const wfJsonRes = await fetch(`${API_BASE}/api/workflows/${wf}`);
+                    const wfJson = await wfJsonRes.json();
+                    
+                    const dynamicParams: any = {};
+                    const scanBlocks = (blocks: any[]) => {
+                        blocks.forEach((b: any) => {
+                            if (b.args) {
+                                Object.entries(b.args).forEach(([k, val]) => {
+                                    if (typeof val === 'string' && val.startsWith('#')) {
+                                        const paramName = val.substring(1);
+                                        const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
+                                        dynamicParams[paramName] = { type: paramType, required: true };
+                                    }
+                                });
+                            }
+                        });
+                    };
+                    scanBlocks(wfJson.prep || []);
+                    scanBlocks(wfJson.script || []);
+                    scanBlocks(wfJson.cleanup || []);
+                    
+                    if (wf === editingWf) {
+                        continue; // Prevent recursion by hiding current workflow
+                    }
+                    
+                    data.instruments["Library Workflows"][wf] = {
+                        description: "Saved Workflow from Library",
+                        parameters: dynamicParams,
+                        return_type: "None"
+                    };
+                }
+            }
+        } catch (e) {
+            console.error("Failed to load workflows for toolbox", e);
+        }
+
         setStatusData(data);
         if (data.instrument_meta) setInstrumentMeta(data.instrument_meta);
         
@@ -125,10 +330,12 @@ export default function DesignerPage() {
       .catch(err => console.error(err));
   }, []);
 
-  // Save sequence on change
+  // Save sequences on change
   useEffect(() => {
     localStorage.setItem('ivoryos_sequence', JSON.stringify(sequence));
-  }, [sequence]);
+    localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
+    localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
+  }, [sequence, prepSequence, cleanupSequence]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -138,11 +345,26 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
   };
 
+  const getSequenceList = (id: string) => {
+    if (id === 'prep') return prepSequence;
+    if (id === 'canvas') return sequence;
+    if (id === 'cleanup') return cleanupSequence;
+    return [];
+  };
+  const setSequenceList = (id: string, list: SequenceBlock[]) => {
+    if (id === 'prep') setPrepSequence(list);
+    if (id === 'canvas') setSequence(list);
+    if (id === 'cleanup') setCleanupSequence(list);
+  };
+
   const onDragEnd = (result: DropResult) => {
     const { source, destination } = result;
     if (!destination) return;
 
-    if (source.droppableId === 'toolbox' && destination.droppableId === 'canvas') {
+    const destId = destination.droppableId;
+    const sourceId = source.droppableId;
+
+    if (sourceId === 'toolbox' && ['prep', 'canvas', 'cleanup'].includes(destId)) {
       const [instrument, method] = result.draggableId.split('::');
       const methodSchema = statusData.instruments[instrument][method];
       
@@ -155,84 +377,125 @@ export default function DesignerPage() {
         });
       }
 
-      const newBlock: SequenceBlock = {
-        id: `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        instrument,
-        method,
-        schema: methodSchema,
-        params: defaultParams,
-        returnVar: ""
+      const destList = Array.from(getSequenceList(destId));
+      
+      const createBlock = (m_inst: string, m_method: string, m_params: any = {}) => {
+          const m_schema = statusData.instruments[m_inst] && statusData.instruments[m_inst][m_method] 
+                            ? statusData.instruments[m_inst][m_method] 
+                            : { parameters: m_params };
+          return {
+            id: `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            instrument: m_inst,
+            method: m_method,
+            schema: m_schema,
+            params: m_params,
+            returnVar: ""
+          };
       };
 
-      const newSequence = Array.from(sequence);
-      newSequence.splice(destination.index, 0, newBlock);
-      setSequence(newSequence);
+      if (instrument === "Flow Control" && method === "If_Else_Block") {
+          destList.splice(destination.index, 0, 
+              createBlock("Flow_Control", "If", { condition: "True" }),
+              createBlock("Flow_Control", "Else", {}),
+              createBlock("Flow_Control", "End_If", {})
+          );
+      } else if (instrument === "Flow Control" && method === "While_Loop") {
+          destList.splice(destination.index, 0, 
+              createBlock("Flow_Control", "While", { condition: "True" }),
+              createBlock("Flow_Control", "End_While", {})
+          );
+      } else {
+          // Normal block
+          const newBlock = createBlock(instrument, method, defaultParams);
+          if (instrument === "Flow Control" && method === "Sleep") {
+              newBlock.instrument = "Flow_Control"; // standardise the instrument name for backend
+          }
+          destList.splice(destination.index, 0, newBlock);
+      }
+
+      setSequenceList(destId, destList);
       return;
     }
 
-    if (source.droppableId === 'canvas' && destination.droppableId === 'canvas') {
-      const newSequence = Array.from(sequence);
-      const [removed] = newSequence.splice(source.index, 1);
-      newSequence.splice(destination.index, 0, removed);
-      setSequence(newSequence);
+    if (['prep', 'canvas', 'cleanup'].includes(sourceId) && ['prep', 'canvas', 'cleanup'].includes(destId)) {
+      const sourceList = Array.from(getSequenceList(sourceId));
+      const destList = sourceId === destId ? sourceList : Array.from(getSequenceList(destId));
+      
+      const [removed] = sourceList.splice(source.index, 1);
+      destList.splice(destination.index, 0, removed);
+      
+      setSequenceList(sourceId, sourceList);
+      if (sourceId !== destId) {
+        setSequenceList(destId, destList);
+      }
     }
   };
 
-  const handleParamChange = (blockId: string, param: string, value: any, type: string) => {
-    setSequence(prev => prev.map(block => {
-      if (block.id !== blockId) return block;
+  const updateBlock = (listId: string, blockId: string, updater: (block: SequenceBlock) => SequenceBlock) => {
+    const list = getSequenceList(listId);
+    setSequenceList(listId, list.map(b => b.id === blockId ? updater(b) : b));
+  };
+
+  const handleParamChange = (blockId: string, param: string, value: any, type: string, listId: string) => {
+    updateBlock(listId, blockId, block => {
       let parsedValue = value;
-      // Do not cast to Number if it's a dynamic variable string (starts with #)
       if (typeof value === 'string' && !value.startsWith('#')) {
         if (type.includes('bool')) {
           if (value.toLowerCase() === 'true') parsedValue = true;
           else if (value.toLowerCase() === 'false') parsedValue = false;
         } else if (type.includes('int') || type.includes('float')) {
-          if (!isNaN(Number(value)) && value !== '') {
-            parsedValue = Number(value);
-          }
+          if (!isNaN(Number(value)) && value !== '') parsedValue = Number(value);
         }
       }
       return { ...block, params: { ...block.params, [param]: parsedValue } };
-    }));
+    });
   };
 
-  const handleReturnVarChange = (blockId: string, value: string) => {
-    setSequence(prev => prev.map(block => {
-      if (block.id !== blockId) return block;
-      return { ...block, returnVar: value };
-    }));
+  const handleReturnVarChange = (blockId: string, value: string, listId: string) => {
+    updateBlock(listId, blockId, block => ({ ...block, returnVar: value }));
   };
 
-  const toggleExpand = (blockId: string) => {
-    setSequence(prev => prev.map(block => 
-      block.id === blockId ? { ...block, isExpanded: !block.isExpanded } : block
-    ));
+  const toggleExpand = (blockId: string, listId: string) => {
+    updateBlock(listId, blockId, block => ({ ...block, isExpanded: !block.isExpanded }));
   };
 
   const toggleToolbox = (instName: string) => {
     setExpandedToolbox(prev => ({ ...prev, [instName]: !prev[instName] }));
   };
 
-  const removeBlock = (index: number) => {
-    setSequence(prev => {
-      const next = [...prev];
-      next.splice(index, 1);
-      return next;
-    });
+  const removeBlock = (index: number, listId: string) => {
+    const list = Array.from(getSequenceList(listId));
+    list.splice(index, 1);
+    setSequenceList(listId, list);
+  };
+
+  const clearCanvas = () => {
+    if (confirm("Are you sure you want to clear the canvas? All blocks will be removed.")) {
+        setSequence([]);
+        setPrepSequence([]);
+        setCleanupSequence([]);
+        setCurrentWorkflowName("");
+        localStorage.removeItem('ivoryos_sequence');
+        localStorage.removeItem('ivoryos_prep_sequence');
+        localStorage.removeItem('ivoryos_cleanup_sequence');
+        localStorage.removeItem('ivoryos_editing_workflow');
+    }
   };
 
   const saveWorkflow = async () => {
-    const name = prompt("Enter a name for this workflow:");
-    if (!name) return;
+    let name = currentWorkflowName;
+    if (!name) {
+        const inputName = prompt("Enter a name for this workflow:");
+        if (!inputName) return;
+        name = inputName;
+    }
 
-    // Convert sequence to Legacy IvoryOS JSON
-    const legacyFormat = {
-      prep: [],
-      script: sequence.map((block, idx) => {
+    const formatBlocks = (blocks: SequenceBlock[]) => blocks.map((block, idx) => {
         const argTypes: Record<string, string> = {};
-        for (const [key, paramObj] of Object.entries(block.schema.parameters)) {
-            argTypes[key] = (paramObj as any).type || "str";
+        if (block.schema && block.schema.parameters) {
+            for (const [key, paramObj] of Object.entries(block.schema.parameters)) {
+                argTypes[key] = (paramObj as any).type || "str";
+            }
         }
         
         return {
@@ -246,8 +509,13 @@ export default function DesignerPage() {
           batch_action: false,
           consolidate_batch_args: false
         };
-      }),
-      cleanup: []
+    });
+
+    // Convert sequence to Legacy IvoryOS JSON
+    const legacyFormat = {
+      prep: formatBlocks(prepSequence),
+      script: formatBlocks(sequence),
+      cleanup: formatBlocks(cleanupSequence)
     };
 
     try {
@@ -258,6 +526,8 @@ export default function DesignerPage() {
       });
       const data = await res.json();
       if (data.status === 'success') {
+        setCurrentWorkflowName(name);
+        localStorage.setItem('ivoryos_editing_workflow', name);
         alert("Workflow saved to Library!");
       } else {
         alert("Failed to save workflow: " + data.error);
@@ -267,33 +537,47 @@ export default function DesignerPage() {
     }
   };
 
-  const runSequence = async () => {
-    if (sequence.length === 0) return;
-
-    // Validate required parameters
+  
+  const validateSequence = () => {
     for (const block of sequence) {
       if (block.schema?.parameters) {
         for (const [key, param] of Object.entries(block.schema.parameters)) {
-          if (block.params[key] === undefined || block.params[key] === '') {
+          const val = block.params[key];
+          // Allow dynamic variables (strings starting with #) to pass through here, they are checked in execution/optimizer
+          if (typeof val === 'string' && val.startsWith('#')) continue;
+          
+          if (val === undefined || val === '') {
             alert(`Missing parameter '${key}' in ${block.instrument}.${block.method}`);
-            return;
+            return false;
           }
         }
       }
     }
+    return true;
+  };
+
+  const runSequence = async () => {
+    if (!validateSequence()) return;
+    if (sequence.length === 0) return;
+
+
 
     setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
 
     try {
+      const blockToPayload = (s: SequenceBlock) => ({
+          instrument: s.instrument,
+          method: s.method,
+          params: s.params
+      });
+
       // 1. Submit Sequence to Edge Queue
       const payload = {
         name: "Designer Run",
         parameters: { type: 'Sequence' },
-        sequence: sequence.map(s => ({
-          instrument: s.instrument,
-          method: s.method,
-          params: s.params
-        }))
+        prep: prepSequence.map(blockToPayload),
+        sequence: sequence.map(blockToPayload),
+        cleanup: cleanupSequence.map(blockToPayload)
       };
 
       const res = await fetch(`${API_BASE}/api/queue/runs`, {
@@ -321,6 +605,179 @@ export default function DesignerPage() {
   if (!statusData) return <div className="p-8 text-gray-900 dark:text-white bg-gray-50 dark:bg-[#0a0a0a] min-h-screen">Loading designer...</div>;
 
   const instruments = statusData.instruments || {};
+            
+  const renderSequenceList = (listId: string, title: string, sequenceList: SequenceBlock[]) => (
+    <div className="mb-6">
+      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 px-2 uppercase tracking-wide flex items-center justify-between">
+        <span>{title}</span>
+        <span className="bg-gray-200 dark:bg-white/10 text-gray-500 dark:text-gray-400 text-xs px-2 py-0.5 rounded-full">{sequenceList.length}</span>
+      </h3>
+      <Droppable droppableId={listId}>
+        {(provided, snapshot) => (
+          <div 
+            ref={provided.innerRef}
+            {...provided.droppableProps}
+            className={`min-h-[100px] border-2 border-dashed rounded-xl p-2 transition-colors ${snapshot.isDraggingOver ? 'bg-blue-50/50 border-blue-300 dark:bg-white/[0.02] dark:border-blue-500/50' : 'border-gray-200 dark:border-white/10'}`}
+          >
+            {sequenceList.length === 0 ? (
+              <div className="h-24 flex flex-col items-center justify-center text-gray-400 dark:text-gray-500">
+                <p className="text-xs font-medium">Drag blocks here</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {(() => {
+                  // Pre-compute nesting depth for each block
+                  const nestColors = [
+                    'border-l-blue-500', 'border-l-purple-500', 'border-l-amber-500',
+                    'border-l-emerald-500', 'border-l-rose-500', 'border-l-cyan-500'
+                  ];
+                  const nestBgs = [
+                    'bg-blue-50/30 dark:bg-blue-900/10', 'bg-purple-50/30 dark:bg-purple-900/10',
+                    'bg-amber-50/30 dark:bg-amber-900/10', 'bg-emerald-50/30 dark:bg-emerald-900/10',
+                    'bg-rose-50/30 dark:bg-rose-900/10', 'bg-cyan-50/30 dark:bg-cyan-900/10'
+                  ];
+                  let depth = 0;
+                  const depths: number[] = [];
+                  for (const b of sequenceList) {
+                    if (b.instrument === 'Flow_Control') {
+                      if (b.method === 'End_If' || b.method === 'End_While' || b.method === 'Else') depth = Math.max(0, depth - 1);
+                      depths.push(depth);
+                      if (b.method === 'If' || b.method === 'While' || b.method === 'Else') depth++;
+                    } else {
+                      depths.push(depth);
+                    }
+                  }
+
+                  return (<>{sequenceList.map((block, index) => {
+                  const isExpanded = block.isExpanded !== false;
+                  const blockDepth = depths[index] || 0;
+                  const nestColor = blockDepth > 0 ? nestColors[(blockDepth - 1) % nestColors.length] : '';
+                  const nestBg = blockDepth > 0 ? nestBgs[(blockDepth - 1) % nestBgs.length] : '';
+                  const isFlowBlock = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
+                  const isMissing = !isFlowBlock && (!instrumentMeta[block.instrument] || !instrumentMeta[block.instrument]?.methods?.includes(block.method));
+                  let borderClass = blockDepth > 0 ? `border-gray-200 dark:border-white/10 border-l-4 ${nestColor}` : 'border-gray-200 dark:border-white/10';
+                  if (isMissing) borderClass = `border-red-400 dark:border-red-500/50 shadow-[0_0_0_1px_rgba(248,113,113,0.5)] ${blockDepth > 0 ? 'border-l-4' : ''}`;
+                  let bgClass = isFlowBlock ? 'bg-indigo-50/60 dark:bg-indigo-900/20' : (blockDepth > 0 ? `bg-white dark:bg-black/40 ${nestBg}` : 'bg-white dark:bg-black/40');
+                  const indent = blockDepth > 0 ? { marginLeft: `${blockDepth * 20}px` } : {};
+                  
+                  return (
+                    <Draggable key={block.id} draggableId={block.id} index={index}>
+                            {(provided, snapshot) => (
+                              <div
+                                ref={provided.innerRef}
+                                {...provided.draggableProps}
+                                style={{ ...provided.draggableProps.style, ...indent }}
+                                className={`rounded-xl border ${borderClass} ${bgClass} shadow-sm overflow-hidden transition-all ${
+                                  snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-500 scale-[1.02]' : ''
+                                }`}
+                              >
+                                  {/* Top Row: Info & Controls */}
+                                  <div className="flex items-center justify-between bg-gray-50/50 dark:bg-white/[0.02] border-b border-gray-100 dark:border-white/5 h-10">
+                                    <div className="flex items-center h-full">
+                                      <div {...provided.dragHandleProps} className="px-3 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-white cursor-grab h-full flex items-center border-r border-gray-100 dark:border-white/5">
+                                        <GripVertical className="w-4 h-4" />
+                                      </div>
+                                      <div className="flex items-center space-x-2 px-3 overflow-hidden">
+                                        {!isFlowBlock && (
+                                          <span className="text-[10px] font-bold px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 rounded capitalize whitespace-nowrap">
+                                            {block.instrument.replace(/_/g, ' ')}
+                                          </span>
+                                        )}
+                                        <span className={`text-sm font-medium whitespace-nowrap ${isFlowBlock ? 'text-indigo-700 dark:text-indigo-300 font-bold' : isMissing ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-800 dark:text-gray-100'}`}>
+                                          {block.method.replace(/_/g, ' ')}
+                                        </span>
+                                        {isMissing && (
+                                          <span className="flex items-center text-red-500 bg-red-50 dark:bg-red-900/30 px-2 py-0.5 rounded text-xs ml-2" title={`Instrument or method not found in current setup.`}>
+                                            <AlertTriangle className="w-3 h-3 mr-1" />
+                                            Missing from Setup
+                                          </span>
+                                        )}
+                                        {isFlowBlock && (block.method === 'If' || block.method === 'While') && (
+                                          <input
+                                            type="text"
+                                            value={block.params.condition !== undefined ? block.params.condition : ''}
+                                            placeholder="condition"
+                                            onChange={(e) => handleParamChange(block.id, 'condition', e.target.value, 'str', listId)}
+                                            className="w-40 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-500/30 rounded px-2 py-0.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-indigo-900 dark:text-indigo-100"
+                                          />
+                                        )}
+                                        {isFlowBlock && block.method === 'Sleep' && (
+                                          <input
+                                            type="number"
+                                            value={block.params.duration_seconds !== undefined ? block.params.duration_seconds : ''}
+                                            placeholder="seconds"
+                                            onChange={(e) => handleParamChange(block.id, 'duration_seconds', parseFloat(e.target.value) || 0, 'float', listId)}
+                                            className="w-24 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-500/30 rounded px-2 py-0.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-indigo-900 dark:text-indigo-100"
+                                          />
+                                        )}
+                                      </div>
+                                      {!isFlowBlock && block.schema.return_type !== 'None' && (
+                                        <div className="flex items-center space-x-2 px-3 border-l border-gray-100 dark:border-white/5 h-full">
+                                          <span className="text-xs font-mono text-purple-600 dark:text-purple-400">
+                                            Return
+                                          </span>
+                                          <input
+                                            type="text"
+                                            value={block.returnVar || ''}
+                                            placeholder="var_name"
+                                            onChange={(e) => handleReturnVarChange(block.id, e.target.value, listId)}
+                                            className="w-24 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-500/30 rounded px-1.5 py-0.5 text-xs focus:outline-none focus:border-purple-500 text-purple-900 dark:text-purple-100 placeholder-purple-300 dark:placeholder-purple-700"
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="px-3 flex items-center space-x-3 border-l border-gray-100 dark:border-white/5 h-full">
+
+                                      <button onClick={() => removeBlock(index, listId)} className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* Bottom Row: Params (hidden when no params or flow control with inline condition) */}
+                                  {(() => {
+                                    const allParams = Object.keys(block.schema.parameters || {});
+                                    const visibleParams = isFlowBlock 
+                                      ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds')
+                                      : allParams;
+                                    if (visibleParams.length === 0) return null;
+                                    return (
+                                    <div className="p-2 px-3 flex flex-wrap gap-x-4 gap-y-2 items-center bg-white dark:bg-transparent min-h-[3rem]">
+                                      {visibleParams.map((param) => {
+                                        const pData = (block.schema.parameters as any)[param];
+                                        return (
+                                        <div key={param} className="flex flex-col space-y-0.5 shrink-0">
+                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-center space-x-1">
+                                            <span>{param.replace(/_/g, ' ')}</span>
+                                            {pData.required && <span className="text-red-500/80 text-sm">*</span>}
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={block.params[param] !== undefined ? block.params[param] : ''}
+                                            placeholder={pData.type}
+                                            onChange={(e) => handleParamChange(block.id, param, e.target.value, pData.type, listId)}
+                                            className="w-28 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                                          />
+                                        </div>
+                                        );
+                                      })}
+                                    </div>
+                                    );
+                                  })()}
+                              </div>
+                            )}
+                          </Draggable>
+                  );
+                })}</>)})()}
+                {provided.placeholder}
+              </div>
+            )}
+          </div>
+        )}
+      </Droppable>
+    </div>
+  );
+
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
@@ -338,10 +795,14 @@ export default function DesignerPage() {
             </header>
             
             <Droppable droppableId="toolbox" isDropDisabled={true}>
-              {(provided) => (
-                <div ref={provided.innerRef} {...provided.droppableProps} className="flex-1 overflow-y-auto p-4 space-y-4">
-                  {Object.entries(instruments).map(([instName, schema]: [string, any]) => (
-                    <div key={instName} className="border border-gray-200 dark:border-white/10 rounded-lg overflow-hidden bg-gray-50 dark:bg-white/[0.02]">
+              {(provided) => {
+                const allEntries = Object.entries(instruments);
+                const flowControl = allEntries.filter(([k]) => k === 'Flow Control');
+                const drivers = allEntries.filter(([k]) => k !== 'Flow Control' && k !== 'Library Workflows');
+                const workflows = allEntries.filter(([k]) => k === 'Library Workflows');
+                
+                const renderSection = (entries: [string, any][], accentClass: string, iconClass: string) => entries.map(([instName, schema]: [string, any]) => (
+                    <div key={instName} className={`border rounded-lg overflow-hidden ${accentClass}`}>
                       <button 
                         onClick={() => toggleToolbox(instName)}
                         className="w-full px-4 py-2 flex items-center justify-between bg-white dark:bg-white/5 hover:bg-gray-50 dark:hover:bg-white/10 transition-colors border-b border-gray-200 dark:border-white/5"
@@ -349,7 +810,6 @@ export default function DesignerPage() {
                         <span className="text-xs font-bold text-gray-700 dark:text-gray-300 tracking-wider capitalize">{instName.replace(/_/g, ' ')}</span>
                         {expandedToolbox[instName] ? <ChevronUp className="w-3 h-3 text-gray-500" /> : <ChevronDown className="w-3 h-3 text-gray-500" />}
                       </button>
-                      
                       {expandedToolbox[instName] && (
                         <div className="p-2 space-y-2">
                           {Object.keys(schema).map((methodName, idx) => (
@@ -364,7 +824,7 @@ export default function DesignerPage() {
                                       ? 'bg-blue-100 dark:bg-blue-600 border-blue-300 dark:border-blue-500 shadow-xl' 
                                       : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-100 dark:hover:bg-white/10'}`}
                                 >
-                                  <Settings2 className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
+                                  <Settings2 className={`w-3.5 h-3.5 shrink-0 ${iconClass}`} />
                                   <span className="font-medium text-gray-700 dark:text-gray-200 truncate">{methodName.replace(/_/g, ' ')}</span>
                                 </div>
                               )}
@@ -373,48 +833,97 @@ export default function DesignerPage() {
                         </div>
                       )}
                     </div>
-                  ))}
+                ));
+                
+                return (
+                <div ref={provided.innerRef} {...provided.droppableProps} className="flex-1 overflow-y-auto p-4 space-y-3">
+                  {flowControl.length > 0 && (
+                    <>
+                      {/* <h3 className="text-[10px] font-extrabold text-gray-400 dark:text-gray-500 uppercase tracking-widest px-1">Flow Control</h3> */}
+                      {renderSection(flowControl, 'border-indigo-200 dark:border-indigo-500/30 bg-indigo-50/30 dark:bg-indigo-900/10', 'text-indigo-500 dark:text-indigo-400')}
+                    </>
+                  )}
+                  {drivers.length > 0 && (
+                    <>
+                      <div className="border-t border-gray-200 dark:border-white/10 my-2"></div>
+                      {/* <h3 className="text-[10px] font-extrabold text-gray-400 dark:text-gray-500 uppercase tracking-widest px-1">Connected Drivers</h3> */}
+                      {renderSection(drivers, 'border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.02]', 'text-blue-500 dark:text-blue-400')}
+                    </>
+                  )}
+                  {workflows.length > 0 && (
+                    <>
+                      <div className="border-t border-gray-200 dark:border-white/10 my-2"></div>
+                      {/* <h3 className="text-[10px] font-extrabold text-gray-400 dark:text-gray-500 uppercase tracking-widest px-1">Library Workflows</h3> */}
+                      {renderSection(workflows, 'border-emerald-200 dark:border-emerald-500/30 bg-emerald-50/30 dark:bg-emerald-900/10', 'text-emerald-500 dark:text-emerald-400')}
+                    </>
+                  )}
                   {provided.placeholder}
                 </div>
-              )}
+              );}}
             </Droppable>
           </div>
 
           {/* Sequence Canvas (Right) */}
           <div className="flex-1 flex flex-col bg-gray-100 dark:bg-[#0f0f0f] relative">
             <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-              <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">Execution Sequence</h2>
-              <div className="flex items-center space-x-3">
+              <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">
+                Execution Sequence {currentWorkflowName ? ` - ${currentWorkflowName}` : ''}
+              </h2>
+              <div className="flex items-center space-x-2">
                 <button 
-                  onClick={saveWorkflow}
-                  disabled={sequence.length === 0}
-                  className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
-                    sequence.length === 0
-                      ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500 cursor-not-allowed'
-                      : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'
-                  }`}
+                  onClick={clearCanvas}
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>Save</span>
+                  <Trash2 className="w-4 h-4" />
+                  <span className="hidden sm:inline">Clear</span>
                 </button>
-                <button 
-                  onClick={exportJSON}
-                  disabled={sequence.length === 0}
-                  className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
-                    sequence.length === 0
-                      ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500 cursor-not-allowed'
-                      : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'
-                  }`}
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Export JSON</span>
-                </button>
+                
+                <div className="relative group">
+                  <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
+                    <Settings2 className="w-4 h-4" />
+                    <span className="hidden sm:inline">Manage</span>
+                  </button>
+                  <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
+                    <button 
+                      onClick={saveWorkflow}
+                      disabled={sequence.length === 0}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+                    >
+                      <Save className="w-4 h-4" />
+                      <span>Save to Library</span>
+                    </button>
+                    <button 
+                      onClick={exportJSON}
+                      disabled={sequence.length === 0}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 border-t border-gray-100 dark:border-white/5"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Export JSON</span>
+                    </button>
+                    <button 
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 flex items-center space-x-2 border-t border-gray-100 dark:border-white/5"
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span>Import JSON</span>
+                    </button>
+                  </div>
+                </div>
+
+                <input
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                />
+
                 <button 
                   onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
-                  className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
                   {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
-                  <span>{viewMode === 'canvas' ? 'View Python' : 'Back to Designer'}</span>
+                  <span className="hidden sm:inline">{viewMode === 'canvas' ? 'View Python' : 'Back'}</span>
                 </button>
                 {(() => {
                   const hasDynamicParams = sequence.some(block => 
@@ -423,7 +932,16 @@ export default function DesignerPage() {
                   return (
                     <>
                     <button 
-                      onClick={hasDynamicParams ? () => window.location.href = '/execution' : runSequence}
+                      onClick={() => {
+                        if (!validateSequence()) return;
+                        if (hasPendingRuns) {
+                            if (!confirm("A task is already running. Add this sequence to the execution queue?")) {
+                                return;
+                            }
+                        }
+                        if (hasDynamicParams) window.location.href = '/execution';
+                        else runSequence();
+                      }}
                       disabled={sequence.length === 0}
                       className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
                         sequence.length === 0
@@ -434,7 +952,7 @@ export default function DesignerPage() {
                       }`}
                     >
                       {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                      <span>{hasDynamicParams ? 'Configure Execution' : 'Add to Queue'}</span>
+                      <span>{hasDynamicParams ? 'Configure Execution' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
                     </button>
                     {hasDynamicParams && sequence.some(s => s.returnVar) && (
                       <button 
@@ -457,104 +975,12 @@ export default function DesignerPage() {
                     </pre>
                 </div>
             ) : (
-            <Droppable droppableId="canvas">
-              {(provided, snapshot) => (
-                <div 
-                  ref={provided.innerRef}
-                  {...provided.droppableProps}
-                  className={`flex-1 overflow-y-auto p-6 ${snapshot.isDraggingOver ? 'bg-blue-50/50 dark:bg-white/[0.02]' : ''}`}
-                >
-                  {sequence.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-gray-400 dark:text-gray-500 border-2 border-dashed border-gray-300 dark:border-white/10 rounded-2xl">
-                      <Settings2 className="w-10 h-10 mb-4 opacity-30" />
-                      <p className="text-sm font-medium">Drag methods from the toolbox to build a sequence.</p>
-                    </div>
-                  ) : (
-                    <div className="max-w-4xl mx-auto space-y-2 pb-48">
-                      {sequence.map((block, index) => {
-                        const isExpanded = block.isExpanded !== false;
-                        
-                        let borderClass = 'border-gray-200 dark:border-white/10';
-                        let bgClass = 'bg-white dark:bg-black/40';
-                        
-                        return (
-                          <Draggable key={block.id} draggableId={block.id} index={index}>
-                            {(provided, snapshot) => (
-                              <div
-                                ref={provided.innerRef}
-                                {...provided.draggableProps}
-                                className={`rounded-xl border ${borderClass} ${bgClass} shadow-sm overflow-hidden transition-all ${
-                                  snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-500 scale-[1.02]' : ''
-                                }`}
-                              >
-                                  {/* Top Row: Info & Controls */}
-                                  <div className="flex items-center justify-between bg-gray-50/50 dark:bg-white/[0.02] border-b border-gray-100 dark:border-white/5 h-10">
-                                    <div className="flex items-center h-full">
-                                      <div {...provided.dragHandleProps} className="px-3 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-white cursor-grab h-full flex items-center border-r border-gray-100 dark:border-white/5">
-                                        <GripVertical className="w-4 h-4" />
-                                      </div>
-                                      <div className="flex items-center space-x-2 px-3 overflow-hidden">
-                                        <span className="text-[10px] font-bold px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 rounded capitalize whitespace-nowrap">
-                                          {block.instrument.replace(/_/g, ' ')}
-                                        </span>
-                                        <span className="text-sm font-medium text-gray-800 dark:text-gray-100 whitespace-nowrap">{block.method.replace(/_/g, ' ')}</span>
-                                      </div>
-                                      {block.schema.return_type !== 'None' && (
-                                        <div className="flex items-center space-x-2 px-3 border-l border-gray-100 dark:border-white/5 h-full">
-                                          <label className="text-[9px] text-purple-600 dark:text-purple-400 font-bold tracking-wider uppercase">
-                                            Return:
-                                          </label>
-                                          <input
-                                            type="text"
-                                            value={block.returnVar || ''}
-                                            placeholder="var_name"
-                                            onChange={(e) => handleReturnVarChange(block.id, e.target.value)}
-                                            className="w-24 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-500/30 rounded px-1.5 py-0.5 text-xs focus:outline-none focus:border-purple-500 text-purple-900 dark:text-purple-100 placeholder-purple-300 dark:placeholder-purple-700"
-                                          />
-                                        </div>
-                                      )}
-                                    </div>
-                                    <div className="px-3 flex items-center space-x-3 border-l border-gray-100 dark:border-white/5 h-full">
+            <div className="flex-1 overflow-y-auto p-6 max-w-5xl mx-auto w-full pb-48">
+              {renderSequenceList('prep', 'Prep Phase', prepSequence)}
+              {renderSequenceList('canvas', 'Main Workflow', sequence)}
+              {renderSequenceList('cleanup', 'Cleanup Phase', cleanupSequence)}
+            </div>
 
-                                      <button onClick={() => removeBlock(index)} className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
-                                        <Trash2 className="w-4 h-4" />
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  {/* Bottom Row: Params */}
-                                  <div className="p-2 px-3 flex flex-wrap gap-x-4 gap-y-2 items-center bg-white dark:bg-transparent min-h-[3rem]">
-                                    {Object.keys(block.schema.parameters).length === 0 ? (
-                                      <span className="text-xs text-gray-500 dark:text-gray-600 italic">No parameters required.</span>
-                                    ) : (
-                                      Object.entries(block.schema.parameters).map(([param, pData]: [string, any]) => (
-                                        <div key={param} className="flex flex-col space-y-0.5 shrink-0">
-                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-center space-x-1">
-                                            <span>{param.replace(/_/g, ' ')}</span>
-                                            {pData.required && <span className="text-red-500/80 text-[8px] uppercase">Req</span>}
-                                          </label>
-                                          <input
-                                            type="text"
-                                            value={block.params[param] !== undefined ? block.params[param] : ''}
-                                            placeholder={pData.type}
-                                            onChange={(e) => handleParamChange(block.id, param, e.target.value, pData.type)}
-                                            className="w-28 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
-                                          />
-                                        </div>
-                                      ))
-                                    )}
-                                  </div>
-                              </div>
-                            )}
-                          </Draggable>
-                        );
-                      })}
-                      {provided.placeholder}
-                    </div>
-                  )}
-                </div>
-              )}
-            </Droppable>
             )}
 
 
@@ -728,6 +1154,18 @@ export default function DesignerPage() {
                                   returnVar: s.returnVar
                               }))
                           },
+                          prep: prepSequence.map(s => ({
+                              instrument: s.instrument,
+                              method: s.method,
+                              params: s.params,
+                              returnVar: s.returnVar
+                          })),
+                          cleanup: cleanupSequence.map(s => ({
+                              instrument: s.instrument,
+                              method: s.method,
+                              params: s.params,
+                              returnVar: s.returnVar
+                          })),
                           sequence: []
                       };
                       

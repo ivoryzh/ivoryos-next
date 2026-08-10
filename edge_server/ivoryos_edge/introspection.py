@@ -49,3 +49,29 @@ def inspect_device_module(device_instance):
             print(f"Failed to inspect method {name}: {e}")
             
     return schema
+
+def cast_arguments(method, args):
+    if not args:
+        return {}
+    sig = inspect.signature(method)
+    casted_args = {}
+    for param_name, param in sig.parameters.items():
+        if param_name in args:
+            val = args[param_name]
+            if param.annotation != inspect.Parameter.empty and val is not None:
+                try:
+                    # check if the annotation is a type we can cast to
+                    if isinstance(param.annotation, type):
+                        if param.annotation == bool and isinstance(val, str):
+                            val = val.lower() == 'true'
+                        else:
+                            val = param.annotation(val)
+                except Exception:
+                    pass # fallback to original value
+            casted_args[param_name] = val
+    # Also include any args that aren't in signature (kwargs etc)
+    # Exclude internal metadata arguments which start with '_'
+    for k, v in args.items():
+        if k not in casted_args and not k.startswith('_'):
+            casted_args[k] = v
+    return casted_args

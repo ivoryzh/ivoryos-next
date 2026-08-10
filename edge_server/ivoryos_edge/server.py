@@ -6,6 +6,7 @@ import sys
 import uuid
 from typing import Dict, Any
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -115,23 +116,110 @@ async def list_runs():
     runs = await queue_manager.get_all_runs()
     return {"runs": runs}
 
+import json
+
+def expand_workflow_blocks(sequence_list, workflows_dir, default_phase="main"):
+    expanded = []
+    for block in sequence_list:
+        if block.get("instrument") == "Library Workflows":
+            wf_name = block.get("method")
+            try:
+                with open(os.path.join(workflows_dir, f"{wf_name}.json"), "r") as wf_file:
+                    wf_data = json.load(wf_file)
+                
+                # Replace dynamic params (#var) with the values provided in the block
+                params = block.get("params", {})
+                
+                def instantiate_blocks(blocks, phase, parent=None):
+                    inst_blocks = []
+                    for b in blocks:
+                        # Copy the block
+                        new_b = dict(b)
+                        new_b["instrument"] = new_b.get("instrument", new_b.get("module"))
+                        new_b["method"] = new_b.get("method", new_b.get("action"))
+                        if "args" in new_b:
+                            new_b["params"] = new_b.pop("args")
+                        
+                        # Replace # variables and inject metadata
+                        new_args = {}
+                        for k, v in new_b.get("params", {}).items():
+                            if isinstance(v, str) and v.startswith("#"):
+                                var_name = v[1:]
+                                new_args[k] = params.get(var_name, v)
+                            else:
+                                new_args[k] = v
+                        
+                        new_args["_phase"] = phase
+                        if parent:
+                            new_args["_parent_workflow"] = parent
+                            
+                        ret_val = b.get("returnVar") or b.get("return")
+                        if ret_val:
+                            new_args["_return_var"] = ret_val
+                            
+                        new_b["params"] = new_args
+                        inst_blocks.append(new_b)
+                    return inst_blocks
+                
+                expanded.extend(instantiate_blocks(wf_data.get("prep", []), default_phase, wf_name))
+                expanded.extend(instantiate_blocks(wf_data.get("script", []), default_phase, wf_name))
+                expanded.extend(instantiate_blocks(wf_data.get("cleanup", []), default_phase, wf_name))
+            except Exception as e:
+                print(f"Failed to expand workflow {wf_name}: {e}")
+                # Fallback: add original block
+                expanded.append(block)
+        else:
+            new_b = dict(block)
+            params = dict(new_b.get("params", {}))
+            if "_phase" not in params:
+                params["_phase"] = default_phase
+                
+            ret_val = block.get("returnVar") or block.get("return")
+            if ret_val:
+                params["_return_var"] = ret_val
+                
+            new_b["params"] = params
+            expanded.append(new_b)
+    return expanded
+
 @app.post("/api/queue/runs")
 async def create_run(req: Request):
     data = await req.json()
     name = data.get("name", "Unnamed Workflow")
-    sequence = data.get("sequence", [])
     parameters = data.get("parameters", {})
+    
+    prep = data.get("prep", [])
+    sequence = data.get("sequence", [])
+    cleanup = data.get("cleanup", [])
+    
     try:
-        run_id = await queue_manager.submit_sequence(name, sequence, parameters)
+        prep = expand_workflow_blocks(prep, WORKFLOWS_DIR, "prep")
+        sequence = expand_workflow_blocks(sequence, WORKFLOWS_DIR, "main")
+        cleanup = expand_workflow_blocks(cleanup, WORKFLOWS_DIR, "cleanup")
+        
+        if parameters.get("type") == "Optimization":
+            parameters["prep_template"] = prep
+            parameters["cleanup_template"] = cleanup
+            # The sequence_template is already inside parameters, but it's not expanded!
+            if "sequence_template" in parameters:
+                parameters["sequence_template"] = expand_workflow_blocks(parameters["sequence_template"], WORKFLOWS_DIR)
+            
+            # Send empty sequence because loop handles the sequence_template
+            run_id = await queue_manager.submit_sequence(name, [], parameters)
+        else:
+            # Flatten everything into a single sequence
+            combined_sequence = prep + sequence + cleanup
+            run_id = await queue_manager.submit_sequence(name, combined_sequence, parameters)
+            
         return {"status": "started", "run_id": run_id}
     except Exception as e:
-        return {"error": str(e)}, 400
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/queue/runs/{run_id}")
 async def get_run(run_id: int):
     status = await queue_manager.get_run_status(run_id)
     if not status:
-        return {"error": "Not found"}, 404
+        return JSONResponse(status_code=404, content={"error": "Not found"})
     return status
 
 @app.post("/api/queue/runs/{run_id}/resolve")
@@ -167,14 +255,14 @@ async def pause_run(run_id: int):
     if queue_manager.active_run_id == run_id:
         queue_manager.pause()
         return {"status": "paused"}
-    return {"error": "Workflow not active"}, 400
+    return JSONResponse(status_code=400, content={"error": "Workflow not active"})
 
 @app.post("/api/queue/runs/{run_id}/resume")
 async def resume_run(run_id: int):
     if queue_manager.active_run_id == run_id:
         queue_manager.resume()
         return {"status": "running"}
-    return {"error": "Workflow not active"}, 400
+    return JSONResponse(status_code=400, content={"error": "Workflow not active"})
 
 @app.post("/api/queue/runs/{run_id}/cancel")
 async def cancel_run(run_id: int):
@@ -186,12 +274,12 @@ async def cancel_run(run_id: int):
     from ivoryos_edge.models import async_session, WorkflowRun
     async with async_session() as session:
         run = await session.get(WorkflowRun, run_id)
-        if run and run.status == "pending":
+        if run and run.status in ["pending", "error"]:
             run.status = "cancelled"
             await session.commit()
             return {"status": "cancelled"}
             
-    return {"error": "Workflow not active"}, 400
+    return JSONResponse(status_code=400, content={"error": "Workflow not active"})
 
 @app.put("/api/steps/{step_id}")
 async def update_step(step_id: int, req: Request):
@@ -201,7 +289,7 @@ async def update_step(step_id: int, req: Request):
         await queue_manager.update_step_parameters(step_id, parameters)
         return {"status": "updated"}
     except Exception as e:
-        return {"error": str(e)}, 400
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 # --- Single Action Endpoints (Legacy support for Designer / Manual tests) ---
 
@@ -238,13 +326,16 @@ async def run_and_track_task(task_id: str, method, args):
 async def execute_method(req: ExecuteRequest):
     instruments = getattr(app.state, "instruments", {})
     if req.module not in instruments:
-        return {"error": f"Module {req.module} not found"}, 404
+        return JSONResponse(status_code=404, content={"error": f"Module {req.module} not found"})
         
     instance = instruments[req.module]
     if not hasattr(instance, req.method):
-        return {"error": f"Method {req.method} not found on {req.module}"}, 404
+        return JSONResponse(status_code=404, content={"error": f"Method {req.method} not found on {req.module}"})
         
     method = getattr(instance, req.method)
+    
+    from ivoryos_edge.introspection import cast_arguments
+    req.args = cast_arguments(method, req.args or {})
     
     # Generate task ID and run in background
     task_id = str(uuid.uuid4())
@@ -262,12 +353,12 @@ async def get_execution_status(task_id: str):
     if task_id in task_results:
         return task_results[task_id]
         
-    return {"error": "Task not found"}, 404
+    return JSONResponse(status_code=404, content={"error": "Task not found"})
 
 @app.delete("/api/execute/{task_id}")
 async def kill_execution(task_id: str):
     if task_id not in active_tasks:
-        return {"error": "Task not found or already completed"}, 404
+        return JSONResponse(status_code=404, content={"error": "Task not found or already completed"})
         
     task = active_tasks[task_id]
     task.cancel()
@@ -284,11 +375,15 @@ def list_workflows():
     except Exception as e:
         return {"error": str(e)}, 500
 
+@app.get("/api/plugins")
+def list_plugins():
+    return {"plugins": getattr(app.state, "plugins", [])}
+
 @app.get("/api/workflows/{name}")
 def get_workflow(name: str):
     filepath = os.path.join(WORKFLOWS_DIR, f"{name}.json")
     if not os.path.exists(filepath):
-        return {"error": "Workflow not found"}, 404
+        return JSONResponse(status_code=404, content={"error": "Workflow not found"})
     import json
     try:
         with open(filepath, 'r') as f:
@@ -302,7 +397,7 @@ async def save_workflow(name: str, req: Request):
     try:
         data = await req.json()
     except Exception as e:
-        return {"error": "Invalid JSON"}, 400
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
         
     filepath = os.path.join(WORKFLOWS_DIR, f"{name}.json")
     import json
@@ -313,19 +408,48 @@ async def save_workflow(name: str, req: Request):
     except Exception as e:
         return {"error": str(e)}, 500
 
-# Serve the static Next.js export
-frontend_out = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend/out")
-if os.path.exists(frontend_out):
-    app.mount("/", StaticFiles(directory=frontend_out, html=True), name="static")
-else:
-    print(f"Warning: Frontend build directory not found at {frontend_out}")
+# Frontend mounting is deferred to run() to ensure plugins are mounted first
 
 
-def run(module_name: str, port: int = 8080):
+
+def run(module_name: str, port: int = 8080, plugins: list = None):
     """
     Entry point to start the Edge Server. 
     It inspects the caller module for initialized instruments.
     """
+    app.state.plugins = []
+    
+    # Auto-discover static plugins from a 'plugins' directory next to the caller script
+    if module_name in sys.modules:
+        caller_mod = sys.modules[module_name]
+        if hasattr(caller_mod, '__file__') and caller_mod.__file__:
+            caller_dir = os.path.dirname(os.path.abspath(caller_mod.__file__))
+            plugins_dir = os.path.join(caller_dir, "plugins")
+            if os.path.exists(plugins_dir) and os.path.isdir(plugins_dir):
+                for folder in os.listdir(plugins_dir):
+                    folder_path = os.path.join(plugins_dir, folder)
+                    if os.path.isdir(folder_path):
+                        if plugins is None:
+                            plugins = []
+                        # Avoid duplicates if user explicitly passed it
+                        if not any(p.get("id") == folder for p in plugins):
+                            plugins.append({
+                                "id": folder,
+                                "name": folder.replace("_", " ").title(),
+                                "path": folder_path
+                            })
+
+    if plugins:
+        for p in plugins:
+            if "path" in p:
+                if not os.path.exists(p["path"]):
+                    print(f"Warning: Plugin path '{p['path']}' does not exist.")
+                    continue
+                app.mount(f"/plugins/{p['id']}", StaticFiles(directory=p["path"], html=True), name=f"plugin_{p['id']}")
+                app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html"})
+            elif "url" in p:
+                app.state.plugins.append(p)
+                
     instruments = {}
     
     if module_name in sys.modules:
@@ -344,6 +468,13 @@ def run(module_name: str, port: int = 8080):
     
     # Bind to app state
     app.state.instruments = instruments
+    
+    # Serve the static Next.js export last so it doesn't intercept plugin routes
+    frontend_out = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend/out")
+    if os.path.exists(frontend_out):
+        app.mount("/", StaticFiles(directory=frontend_out, html=True), name="static")
+    else:
+        print(f"Warning: Frontend build directory not found at {frontend_out}")
     
     # Start uvicorn
     print(f"Starting IvoryOS Edge Server on port {port}...")

@@ -13,12 +13,22 @@ interface SidebarProps {
 
 export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
+  const [plugins, setPlugins] = useState<any[]>([]);
   const pathname = usePathname();
 
   useEffect(() => {
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
       .then(data => setEdgeStatus(data))
+      .catch(err => console.error(err));
+
+    fetch(`${API_BASE}/api/plugins`)
+      .then(res => res.json())
+      .then(data => {
+          if (data.plugins) {
+              setPlugins(data.plugins);
+          }
+      })
       .catch(err => console.error(err));
   }, []);
 
@@ -50,7 +60,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         </button>
       </div>
 
-      <nav className="flex-1 space-y-4 text-sm font-medium text-gray-600 dark:text-gray-400">
+      <nav className="flex-1 space-y-4 text-sm font-medium text-gray-600 dark:text-gray-400 overflow-y-auto">
         {navItem('/', 'Dashboard')}
         {navItem('/library', 'Library')}
         {navItem('/designer', 'Designer')}
@@ -58,6 +68,15 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         {navItem('/queue', 'Queue')}
         {navItem('/data', 'Data History')}
         {navItem('/instruments', 'Instruments')}
+        
+        {plugins.length > 0 && (
+            <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">
+                <div className="px-4 mb-2 text-[10px] font-bold tracking-wider uppercase text-gray-400">Plugins</div>
+                <div className="space-y-4">
+                    {plugins.map(p => navItem(`/plugin?id=${p.id}`, p.name))}
+                </div>
+            </div>
+        )}
       </nav>
 
       {/* Status indicator */}

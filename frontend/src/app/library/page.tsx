@@ -57,20 +57,26 @@ export default function LibraryPage() {
       const instruments = statusData.instruments || {};
 
       // 3. Rebuild sequence
-      const scriptArr = legacyData.script || [];
-      const newSequence = scriptArr.map((action: any) => {
+      const mapScriptToBlocks = (arr: any[]) => arr.map((action: any) => {
         const schema = instruments[action.instrument]?.[action.action] || { parameters: {} };
         return {
           id: `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           instrument: action.instrument,
           method: action.action,
           schema: schema,
-          params: action.args || {}
+          params: action.args || {},
+          returnVar: action.return || ""
         };
       });
 
+      const prepSequence = mapScriptToBlocks(legacyData.prep || []);
+      const newSequence = mapScriptToBlocks(legacyData.script || []);
+      const cleanupSequence = mapScriptToBlocks(legacyData.cleanup || []);
       // 4. Save and redirect
       localStorage.setItem('ivoryos_sequence', JSON.stringify(newSequence));
+      localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
+      localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
+      localStorage.setItem('ivoryos_editing_workflow', name);
       window.location.href = '/designer';
     } catch (e: any) {
       alert("Failed to load workflow: " + e.message);

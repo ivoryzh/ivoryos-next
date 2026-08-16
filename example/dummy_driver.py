@@ -1,6 +1,20 @@
 import time
 import asyncio
 import threading
+from enum import Enum
+from dataclasses import dataclass
+from typing import Literal
+
+class PumpDirection(Enum):
+    FORWARD = "forward"
+    BACKWARD = "backward"
+    OSCILLATING = "oscillating"
+
+@dataclass
+class PumpConfig:
+    target_speed: float
+    direction: PumpDirection
+    enable_safety_valves: bool = True
 
 class PumpDriver:
     """A dummy pump driver for testing introspection and execution."""
@@ -62,6 +76,15 @@ class PumpDriver:
             raise ValueError("This is a simulated driver error!")
         else:
             return {"status": "success", "message": "Did not fail"}
+
+    def test_enum_and_literal(self, direction: PumpDirection, mode: Literal["fast", "slow", "eco"] = "eco"):
+        """Test method for Enum and Literal parsing."""
+        return {"direction": direction.value, "mode": mode}
+
+    def test_nested_dataclass(self, config: PumpConfig, duration: int = 5):
+        """Test method for nested dataclass introspection."""
+        print(f"[Pump] Running with config: speed={config.target_speed}, dir={config.direction}, safety={config.enable_safety_valves} for {duration}s")
+        return {"status": "success", "config_used": str(config)}
 
 class DummyMathDriver:
     """A dummy driver for testing the optimizer with a simulated mathematical function."""

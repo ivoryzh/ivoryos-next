@@ -69,6 +69,17 @@ async def startup_event():
         print(f"Introspected module '{name}': {list(app.state.instrument_schemas[name].keys())}")
         
     try:
+        import json
+        with open("ivoryos_schema.json", "w") as f:
+            json.dump({
+                "instruments": app.state.instrument_schemas,
+                "instrument_meta": app.state.instrument_meta
+            }, f, indent=2)
+        print("Dumped introspected schema to ivoryos_schema.json for local version control.")
+    except Exception as e:
+        print(f"Failed to dump ivoryos_schema.json: {e}")
+        
+    try:
         print(f"Connecting to Cloud Orchestrator at {CLOUD_URL}...")
         await sio.connect(CLOUD_URL, auth={"token": REGISTRATION_KEY})
         print("Connected to Cloud Orchestrator successfully.")
@@ -370,8 +381,28 @@ os.makedirs(WORKFLOWS_DIR, exist_ok=True)
 @app.get("/api/workflows")
 def list_workflows():
     try:
-        files = [f for f in os.listdir(WORKFLOWS_DIR) if f.endswith(".json")]
-        return {"workflows": [f.replace(".json", "") for f in files]}
+        import json
+        workflows = []
+        for f in os.listdir(WORKFLOWS_DIR):
+            if f.endswith(".json"):
+                filepath = os.path.join(WORKFLOWS_DIR, f)
+                name = f.replace(".json", "")
+                desc = ""
+                created_at = os.path.getctime(filepath)
+                updated_at = os.path.getmtime(filepath)
+                try:
+                    with open(filepath, 'r') as fp:
+                        data = json.load(fp)
+                        desc = data.get("description", "")
+                except:
+                    pass
+                workflows.append({
+                    "name": name,
+                    "description": desc,
+                    "created_at": created_at * 1000, # Return JS timestamp
+                    "updated_at": updated_at * 1000
+                })
+        return {"workflows": workflows}
     except Exception as e:
         return {"error": str(e)}, 500
 

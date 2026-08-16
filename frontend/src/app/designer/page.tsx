@@ -3,7 +3,7 @@ import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { Play, GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
+import { Play, GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, Eye, EyeOff, Info } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
 type SequenceBlock = {
@@ -14,6 +14,7 @@ type SequenceBlock = {
   params: Record<string, any>;
   isExpanded?: boolean;
   returnVar?: string;
+  isHidden?: boolean;
 };
 
 export default function DesignerPage() {
@@ -22,6 +23,9 @@ export default function DesignerPage() {
   const [sequence, setSequence] = useState<SequenceBlock[]>([]);
   const [cleanupSequence, setCleanupSequence] = useState<SequenceBlock[]>([]);
   const [currentWorkflowName, setCurrentWorkflowName] = useState<string>('');
+  const [isUnsaved, setIsUnsaved] = useState(false);
+  const isInitialMount = useRef(true);
+  const [currentWorkflowDescription, setCurrentWorkflowDescription] = useState<string>('');
   const [executionState, setExecutionState] = useState<{
     isRunning: boolean;
     currentIndex: number;
@@ -37,14 +41,7 @@ export default function DesignerPage() {
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
-  const [showOptimizer, setShowOptimizer] = useState(false);
-  const [optConfig, setOptConfig] = useState<any>({
-    budget: 5,
-    optimizer: 'baybe',
-    error_recovery: 'stop',
-    bounds: {},
-    objectives: {}
-  });
+  const [isOffline, setIsOffline] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -90,6 +87,7 @@ export default function DesignerPage() {
         setSequence(newSeq);
         setCleanupSequence(newClean);
         if (name) setCurrentWorkflowName(name);
+        if (json.description) setCurrentWorkflowDescription(json.description);
 
       } catch (error) {
         console.error("Failed to parse JSON file", error);
@@ -106,6 +104,8 @@ export default function DesignerPage() {
 
   const exportJSON = () => {
     const payload = {
+      name: currentWorkflowName,
+      description: currentWorkflowDescription,
       prep: prepSequence,
       script: sequence,
       cleanup: cleanupSequence
@@ -190,9 +190,18 @@ export default function DesignerPage() {
           return;
         }
         
+        const formatValue = (v: any): string => {
+            if (typeof v === 'string' && !v.startsWith('#')) return `"${v}"`;
+            if (typeof v === 'object' && v !== null) {
+                // Return a valid python dict literal, preserving variable tokens if any exist
+                const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
+                return `{${dictEntries.join(', ')}}`;
+            }
+            return String(v);
+        };
+        
         let params = Object.entries(block.params).map(([k, v]) => {
-           if (typeof v === 'string' && !v.startsWith('#')) return `${k}="${v}"`;
-           return `${k}=${v}`;
+           return `${k}=${formatValue(v)}`;
         }).join(', ');
         
         let returnStr = block.returnVar ? `${block.returnVar} = ` : "";
@@ -259,10 +268,16 @@ export default function DesignerPage() {
     if (editingWf) {
       setCurrentWorkflowName(editingWf);
     }
+    const editingWfDesc = localStorage.getItem('ivoryos_editing_workflow_desc');
+    if (editingWfDesc) {
+      setCurrentWorkflowDescription(editingWfDesc);
+    }
+    const unsaved = localStorage.getItem('ivoryos_is_unsaved');
+    if (unsaved === 'true') {
+      setIsUnsaved(true);
+    }
 
-    fetch(`${API_BASE}/api/status`)
-      .then(res => res.json())
-      .then(async data => {
+    const processStatusData = async (data: any) => {
         // Fetch workflows
         try {
             const wfRes = await fetch(`${API_BASE}/api/workflows`);
@@ -314,7 +329,7 @@ export default function DesignerPage() {
                 }
             }
         } catch (e) {
-            console.error("Failed to load workflows for toolbox", e);
+            console.error("Failed to load workflows for toolbox (might be offline)", e);
         }
 
         setStatusData(data);
@@ -326,8 +341,31 @@ export default function DesignerPage() {
           Object.keys(data.instruments).forEach(k => insts[k] = false);
         }
         setExpandedToolbox(insts);
+    };
+
+    fetch(`${API_BASE}/api/status`)
+      .then(res => res.json())
+      .then(async data => {
+          localStorage.setItem('ivoryos_cached_schema', JSON.stringify(data));
+          await processStatusData(data);
       })
-      .catch(err => console.error(err));
+      .catch(err => {
+          console.error("Backend offline, loading cached schema...", err);
+          setIsOffline(true);
+          const cached = localStorage.getItem('ivoryos_cached_schema');
+          if (cached) {
+              try {
+                  const data = JSON.parse(cached);
+                  processStatusData(data);
+              } catch (e) {
+                  console.error("Failed to parse cached schema", e);
+                  setStatusData({ instruments: {} });
+              }
+          } else {
+              // No cached schema available
+              setStatusData({ instruments: {} });
+          }
+      });
   }, []);
 
   // Save sequences on change
@@ -335,7 +373,14 @@ export default function DesignerPage() {
     localStorage.setItem('ivoryos_sequence', JSON.stringify(sequence));
     localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
     localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
-  }, [sequence, prepSequence, cleanupSequence]);
+    
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+    } else {
+      setIsUnsaved(true);
+      localStorage.setItem('ivoryos_is_unsaved', 'true');
+    }
+  }, [sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -447,6 +492,17 @@ export default function DesignerPage() {
           if (!isNaN(Number(value)) && value !== '') parsedValue = Number(value);
         }
       }
+      if (param.includes('.')) {
+          const keys = param.split('.');
+          const newParams = JSON.parse(JSON.stringify(block.params || {}));
+          let curr = newParams;
+          for (let i = 0; i < keys.length - 1; i++) {
+              if (!curr[keys[i]]) curr[keys[i]] = {};
+              curr = curr[keys[i]];
+          }
+          curr[keys[keys.length - 1]] = parsedValue;
+          return { ...block, params: newParams };
+      }
       return { ...block, params: { ...block.params, [param]: parsedValue } };
     });
   };
@@ -457,6 +513,10 @@ export default function DesignerPage() {
 
   const toggleExpand = (blockId: string, listId: string) => {
     updateBlock(listId, blockId, block => ({ ...block, isExpanded: !block.isExpanded }));
+  };
+
+  const toggleHideBlock = (blockId: string, listId: string) => {
+    updateBlock(listId, blockId, block => ({ ...block, isHidden: !block.isHidden }));
   };
 
   const toggleToolbox = (instName: string) => {
@@ -475,10 +535,15 @@ export default function DesignerPage() {
         setPrepSequence([]);
         setCleanupSequence([]);
         setCurrentWorkflowName("");
+        setCurrentWorkflowDescription("");
         localStorage.removeItem('ivoryos_sequence');
         localStorage.removeItem('ivoryos_prep_sequence');
         localStorage.removeItem('ivoryos_cleanup_sequence');
         localStorage.removeItem('ivoryos_editing_workflow');
+        localStorage.removeItem('ivoryos_editing_workflow_desc');
+        localStorage.removeItem('ivoryos_is_unsaved');
+        setIsUnsaved(false);
+        isInitialMount.current = true;
     }
   };
 
@@ -513,6 +578,8 @@ export default function DesignerPage() {
 
     // Convert sequence to Legacy IvoryOS JSON
     const legacyFormat = {
+      name: name,
+      description: currentWorkflowDescription,
       prep: formatBlocks(prepSequence),
       script: formatBlocks(sequence),
       cleanup: formatBlocks(cleanupSequence)
@@ -528,6 +595,9 @@ export default function DesignerPage() {
       if (data.status === 'success') {
         setCurrentWorkflowName(name);
         localStorage.setItem('ivoryos_editing_workflow', name);
+        localStorage.setItem('ivoryos_editing_workflow_desc', currentWorkflowDescription);
+        localStorage.setItem('ivoryos_is_unsaved', 'false');
+        setIsUnsaved(false);
         alert("Workflow saved to Library!");
       } else {
         alert("Failed to save workflow: " + data.error);
@@ -573,11 +643,11 @@ export default function DesignerPage() {
 
       // 1. Submit Sequence to Edge Queue
       const payload = {
-        name: "Designer Run",
+        name: `${currentWorkflowName || 'Designer'} Run - ${new Date().toLocaleString()}`,
         parameters: { type: 'Sequence' },
-        prep: prepSequence.map(blockToPayload),
-        sequence: sequence.map(blockToPayload),
-        cleanup: cleanupSequence.map(blockToPayload)
+        prep: prepSequence.filter(b => !b.isHidden).map(blockToPayload),
+        sequence: sequence.filter(b => !b.isHidden).map(blockToPayload),
+        cleanup: cleanupSequence.filter(b => !b.isHidden).map(blockToPayload)
       };
 
       const res = await fetch(`${API_BASE}/api/queue/runs`, {
@@ -624,7 +694,7 @@ export default function DesignerPage() {
                 <p className="text-xs font-medium">Drag blocks here</p>
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 {(() => {
                   // Pre-compute nesting depth for each block
                   const nestColors = [
@@ -654,7 +724,7 @@ export default function DesignerPage() {
                   const nestColor = blockDepth > 0 ? nestColors[(blockDepth - 1) % nestColors.length] : '';
                   const nestBg = blockDepth > 0 ? nestBgs[(blockDepth - 1) % nestBgs.length] : '';
                   const isFlowBlock = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
-                  const isMissing = !isFlowBlock && (!instrumentMeta[block.instrument] || !instrumentMeta[block.instrument]?.methods?.includes(block.method));
+                  const isMissing = !isFlowBlock && (!statusData.instruments[block.instrument] || !statusData.instruments[block.instrument][block.method]);
                   let borderClass = blockDepth > 0 ? `border-gray-200 dark:border-white/10 border-l-4 ${nestColor}` : 'border-gray-200 dark:border-white/10';
                   if (isMissing) borderClass = `border-red-400 dark:border-red-500/50 shadow-[0_0_0_1px_rgba(248,113,113,0.5)] ${blockDepth > 0 ? 'border-l-4' : ''}`;
                   let bgClass = isFlowBlock ? 'bg-indigo-50/60 dark:bg-indigo-900/20' : (blockDepth > 0 ? `bg-white dark:bg-black/40 ${nestBg}` : 'bg-white dark:bg-black/40');
@@ -667,17 +737,17 @@ export default function DesignerPage() {
                                 ref={provided.innerRef}
                                 {...provided.draggableProps}
                                 style={{ ...provided.draggableProps.style, ...indent }}
-                                className={`rounded-xl border ${borderClass} ${bgClass} shadow-sm overflow-hidden transition-all ${
+                                className={`rounded-xl border ${borderClass} ${bgClass} shadow-sm transition-all ${
                                   snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-500 scale-[1.02]' : ''
                                 }`}
                               >
                                   {/* Top Row: Info & Controls */}
-                                  <div className="flex items-center justify-between bg-gray-50/50 dark:bg-white/[0.02] border-b border-gray-100 dark:border-white/5 h-10">
+                                  <div className="flex items-center justify-between bg-gray-50/50 dark:bg-white/[0.02] border-b border-gray-100 dark:border-white/5 h-[34px] rounded-t-xl">
                                     <div className="flex items-center h-full">
                                       <div {...provided.dragHandleProps} className="px-3 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-white cursor-grab h-full flex items-center border-r border-gray-100 dark:border-white/5">
                                         <GripVertical className="w-4 h-4" />
                                       </div>
-                                      <div className="flex items-center space-x-2 px-3 overflow-hidden">
+                                      <div className="flex items-center space-x-2 px-3">
                                         {!isFlowBlock && (
                                           <span className="text-[10px] font-bold px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 rounded capitalize whitespace-nowrap">
                                             {block.instrument.replace(/_/g, ' ')}
@@ -686,6 +756,15 @@ export default function DesignerPage() {
                                         <span className={`text-sm font-medium whitespace-nowrap ${isFlowBlock ? 'text-indigo-700 dark:text-indigo-300 font-bold' : isMissing ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-800 dark:text-gray-100'}`}>
                                           {block.method.replace(/_/g, ' ')}
                                         </span>
+                                        {block.schema?.description && (
+                                          <div className="group relative flex items-center ml-2">
+                                            <Info className="w-3.5 h-3.5 text-gray-400 hover:text-blue-500 transition-colors cursor-help" />
+                                            <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 p-2 bg-gray-800 dark:bg-gray-700 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 whitespace-pre-wrap pointer-events-none">
+                                              {block.schema.description}
+                                              <div className="absolute left-1/2 -bottom-1 -translate-x-1/2 w-2 h-2 bg-gray-800 dark:bg-gray-700 transform rotate-45"></div>
+                                            </div>
+                                          </div>
+                                        )}
                                         {isMissing && (
                                           <span className="flex items-center text-red-500 bg-red-50 dark:bg-red-900/30 px-2 py-0.5 rounded text-xs ml-2" title={`Instrument or method not found in current setup.`}>
                                             <AlertTriangle className="w-3 h-3 mr-1" />
@@ -711,23 +790,64 @@ export default function DesignerPage() {
                                           />
                                         )}
                                       </div>
-                                      {!isFlowBlock && block.schema.return_type !== 'None' && (
-                                        <div className="flex items-center space-x-2 px-3 border-l border-gray-100 dark:border-white/5 h-full">
-                                          <span className="text-xs font-mono text-purple-600 dark:text-purple-400">
-                                            Return
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={block.returnVar || ''}
-                                            placeholder="var_name"
-                                            onChange={(e) => handleReturnVarChange(block.id, e.target.value, listId)}
-                                            className="w-24 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-500/30 rounded px-1.5 py-0.5 text-xs focus:outline-none focus:border-purple-500 text-purple-900 dark:text-purple-100 placeholder-purple-300 dark:placeholder-purple-700"
-                                          />
-                                        </div>
-                                      )}
                                     </div>
-                                    <div className="px-3 flex items-center space-x-3 border-l border-gray-100 dark:border-white/5 h-full">
+                                    <div className="px-3 flex items-center space-x-2 border-l border-gray-100 dark:border-white/5 h-full">
+                                      {(() => {
+                                        const returnType = block.schema?.return_type || 'None';
+                                        const returnInfo = block.schema?.return_info;
+                                        const isNone = returnType === 'None' || returnType === 'NoneType';
+                                        const isTuple = returnType.toLowerCase().startsWith('tuple[');
+                                        const isObject = returnInfo?.is_object;
 
+                                        let numReturns = 1;
+                                        let returnLabels: string[] = [];
+
+                                        if (isTuple) {
+                                          const inner = returnType.match(/tuple\[(.*)\]/i);
+                                          if (inner && inner[1]) {
+                                            numReturns = inner[1].split(',').length;
+                                          }
+                                        } else if (isObject && returnInfo.fields) {
+                                          returnLabels = Object.keys(returnInfo.fields);
+                                          numReturns = returnLabels.length;
+                                        }
+
+                                        if (isFlowBlock || isNone) return null;
+                                        return (
+                                          <div className="flex items-center space-x-2 mr-2">
+                                            <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                                              Return
+                                            </span>
+                                            <div className="flex space-x-1 items-center">
+                                              {Array.from({ length: numReturns }).map((_, i) => {
+                                                const parts = (block.returnVar || '').split(',').map(s => s.trim());
+                                                return (
+                                                  <div key={i} className="flex items-center space-x-1">
+                                                    {returnLabels[i] && (
+                                                        <span className="text-[10px] text-gray-400 font-mono">{returnLabels[i]}:</span>
+                                                    )}
+                                                    <input
+                                                      type="text"
+                                                      value={parts[i] || ''}
+                                                      placeholder={`var_${i+1}`}
+                                                      onChange={(e) => {
+                                                        const newParts = [...parts];
+                                                        while(newParts.length < numReturns) newParts.push('');
+                                                        newParts[i] = e.target.value;
+                                                        handleReturnVarChange(block.id, newParts.join(', '), listId);
+                                                      }}
+                                                      className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                                                    />
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        );
+                                      })()}
+                                      <button onClick={() => toggleHideBlock(block.id, listId)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" title={block.isHidden ? "Unhide Block" : "Hide Block"}>
+                                        {block.isHidden ? <EyeOff className="w-4 h-4 text-gray-400" /> : <Eye className="w-4 h-4" />}
+                                      </button>
                                       <button onClick={() => removeBlock(index, listId)} className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
                                         <Trash2 className="w-4 h-4" />
                                       </button>
@@ -742,24 +862,52 @@ export default function DesignerPage() {
                                       : allParams;
                                     if (visibleParams.length === 0) return null;
                                     return (
-                                    <div className="p-2 px-3 flex flex-wrap gap-x-4 gap-y-2 items-center bg-white dark:bg-transparent min-h-[3rem]">
+                                    <div className="p-1.5 px-2.5 flex flex-wrap gap-x-4 gap-y-1.5 items-center bg-white dark:bg-transparent min-h-[2.5rem]">
                                       {visibleParams.map((param) => {
+                                        const renderParam = (pData: any, paramKey: string, paramName: string, bId: string, lId: string, paramsObj: any): React.ReactNode => {
+                                            if (pData.is_object && pData.fields) {
+                                                return (
+                                                    <div key={paramKey} className="flex flex-col space-y-1 shrink-0 p-1.5 border border-gray-200 dark:border-white/10 rounded bg-gray-50 dark:bg-white/5">
+                                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider px-1">{paramName}</span>
+                                                        <div className="flex flex-wrap gap-x-2 gap-y-1.5 pl-1 border-l-2 border-gray-300 dark:border-white/20">
+                                                            {Object.keys(pData.fields).map(subKey => 
+                                                                renderParam(pData.fields[subKey], `${paramKey}.${subKey}`, subKey, bId, lId, paramsObj)
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
+
+                                            const displayType = (pData.type || '').replace(/<class '([^']+)'>/, '$1').replace('typing.', '');
+                                            const val = paramKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, paramsObj);
+                                            
+                                            return (
+                                                <div key={paramKey} className="flex flex-col space-y-0.5 shrink-0">
+                                                  <label className="h-4 text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-end space-x-1 whitespace-nowrap">
+                                                    <span>{paramName.replace(/_/g, ' ')}</span>
+                                                    {pData.required && <span className="text-red-500/80 leading-none">*</span>}
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    list={pData.options ? `datalist-${bId}-${paramKey}` : undefined}
+                                                    value={val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '')}
+                                                    placeholder={pData.default !== undefined ? `Default: ${pData.default}` : displayType}
+                                                    onChange={(e) => handleParamChange(bId, paramKey, e.target.value, pData.type, lId)}
+                                                    className="w-28 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                                                  />
+                                                  {pData.options && (
+                                                    <datalist id={`datalist-${bId}-${paramKey}`}>
+                                                      {pData.options.map((opt: any) => (
+                                                        <option key={String(opt)} value={String(opt)} />
+                                                      ))}
+                                                    </datalist>
+                                                  )}
+                                                </div>
+                                            );
+                                        };
+
                                         const pData = (block.schema.parameters as any)[param];
-                                        return (
-                                        <div key={param} className="flex flex-col space-y-0.5 shrink-0">
-                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-center space-x-1">
-                                            <span>{param.replace(/_/g, ' ')}</span>
-                                            {pData.required && <span className="text-red-500/80 text-sm">*</span>}
-                                          </label>
-                                          <input
-                                            type="text"
-                                            value={block.params[param] !== undefined ? block.params[param] : ''}
-                                            placeholder={pData.type}
-                                            onChange={(e) => handleParamChange(block.id, param, e.target.value, pData.type, listId)}
-                                            className="w-28 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
-                                          />
-                                        </div>
-                                        );
+                                        return renderParam(pData, param, param, block.id, listId, block.params);
                                       })}
                                     </div>
                                     );
@@ -866,9 +1014,31 @@ export default function DesignerPage() {
           {/* Sequence Canvas (Right) */}
           <div className="flex-1 flex flex-col bg-gray-100 dark:bg-[#0f0f0f] relative">
             <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-              <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">
-                Execution Sequence {currentWorkflowName ? ` - ${currentWorkflowName}` : ''}
-              </h2>
+              <div className="flex flex-col flex-1 mr-4">
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="text"
+                    value={currentWorkflowName}
+                    onChange={(e) => setCurrentWorkflowName(e.target.value)}
+                    placeholder="Sequence Name"
+                    className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
+                  />
+                  {isUnsaved && <span className="px-1.5 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 text-[10px] font-bold uppercase tracking-wider">Unsaved</span>}
+                  {isOffline && (
+                    <span className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 text-[10px] font-bold uppercase tracking-wider border border-purple-200 dark:border-purple-500/30">
+                      <AlertTriangle className="w-3 h-3" />
+                      <span>Offline Mode</span>
+                    </span>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={currentWorkflowDescription}
+                  onChange={(e) => setCurrentWorkflowDescription(e.target.value)}
+                  placeholder="Add a short description..."
+                  className="text-xs text-gray-400 dark:text-gray-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 w-full"
+                />
+              </div>
               <div className="flex items-center space-x-2">
                 <button 
                   onClick={clearCanvas}
@@ -945,23 +1115,23 @@ export default function DesignerPage() {
                       disabled={sequence.length === 0}
                       className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
                         sequence.length === 0
-                          ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500 cursor-not-allowed'
+                          ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                           : hasDynamicParams
-                            ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-md'
-                            : 'bg-green-600 hover:bg-green-700 dark:hover:bg-green-500 text-white shadow-md'
+                            ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50 shadow-sm'
+                            : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
                       }`}
                     >
                       {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                      <span>{hasDynamicParams ? 'Configure Execution' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
+                      <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
                     </button>
                     {hasDynamicParams && sequence.some(s => s.returnVar) && (
-                      <button 
-                        onClick={() => setShowOptimizer(true)}
-                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-600 hover:bg-purple-700 text-white shadow-md"
+                      <a 
+                        href="/optimize"
+                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
                       >
                         <Zap className="w-4 h-4" />
                         <span>Optimize</span>
-                      </button>
+                      </a>
                     )}
                     </>
                   );
@@ -988,212 +1158,7 @@ export default function DesignerPage() {
         </div>
       </DragDropContext>
 
-      {/* Optimizer Sidebar */}
-      {showOptimizer && (
-        <div className="w-80 bg-white dark:bg-[#111111] border-l border-gray-200 dark:border-white/10 flex flex-col h-[calc(100vh-48px)] mt-12 fixed right-0 top-0 shadow-2xl z-40 transition-all">
-          <div className="p-4 border-b border-gray-100 dark:border-white/5 flex items-center justify-between">
-            <h2 className="text-sm font-bold text-gray-800 dark:text-white flex items-center">
-              <Zap className="w-4 h-4 mr-2 text-purple-500" />
-              Optimizer Settings
-            </h2>
-            <button onClick={() => setShowOptimizer(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-white/10 rounded-lg text-gray-500">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            {(() => {
-               const vars = Array.from(new Set(sequence.flatMap(s => Object.values(s.params)).filter(v => typeof v === 'string' && v.startsWith('#')).map((v: any) => v.slice(1))));
-               const returns = Array.from(new Set(sequence.map(s => s.returnVar).filter(Boolean)));
-               
-               return (
-                 <>
-            <div>
-               <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-3 pb-2 border-b border-gray-100 dark:border-white/5">General Settings</h3>
-               <div className="space-y-4">
-                 <div>
-                   <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Optimizer Engine</label>
-                   <select 
-                      value={optConfig.optimizer} 
-                      onChange={e => setOptConfig({...optConfig, optimizer: e.target.value})}
-                      className="w-full bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:border-purple-500 outline-none"
-                   >
-                     <option value="baybe">BayBE</option>
-                     <option value="ax">Ax (BoTorch)</option>
-                     <option value="nimo">NIMO</option>
-                   </select>
-                 </div>
-                 <div>
-                   <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Evaluation Budget</label>
-                   <input 
-                      type="number" 
-                      min="1" max="1000"
-                      value={optConfig.budget}
-                      onChange={e => setOptConfig({...optConfig, budget: parseInt(e.target.value) || 1})}
-                      className="w-full bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:border-purple-500 outline-none"
-                   />
-                 </div>
-                 <div>
-                   <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Error Recovery</label>
-                   <select 
-                      value={optConfig.error_recovery} 
-                      onChange={e => setOptConfig({...optConfig, error_recovery: e.target.value})}
-                      className="w-full bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:border-purple-500 outline-none"
-                   >
-                     <option value="stop">Stop immediately</option>
-                     <option value="skip">Skip (Continue)</option>
-                     <option value="retry">Retry step</option>
-                   </select>
-                 </div>
-               </div>
-            </div>
 
-            <div>
-               <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-3 pb-2 border-b border-gray-100 dark:border-white/5">Search Space</h3>
-               {vars.length === 0 ? (
-                   <div className="text-xs text-gray-500">No dynamic variables (e.g. #x) found in sequence.</div>
-               ) : (
-                   <div className="space-y-3">
-                     {vars.map(v => (
-                       <div key={v} className="bg-gray-50/50 dark:bg-white/[0.02] p-3 rounded-lg border border-gray-100 dark:border-white/5 space-y-2">
-                         <div className="flex items-center justify-between">
-                             <span className="font-mono text-sm font-bold text-blue-500">#{v}</span>
-                             <select 
-                                value={optConfig.bounds[v]?.type || 'range'}
-                                onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], type: e.target.value}}})}
-                                className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded px-2 py-1 text-xs outline-none"
-                             >
-                                <option value="range">Range</option>
-                                <option value="choice">Choice</option>
-                             </select>
-                         </div>
-                         <div className="flex space-x-2">
-                             <input 
-                                type="text" 
-                                placeholder={optConfig.bounds[v]?.type === 'choice' ? "e.g. 10, 20" : "Min"}
-                                value={optConfig.bounds[v]?.min || ''}
-                                onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], min: e.target.value}}})}
-                                className="flex-1 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded px-2 py-1.5 text-xs outline-none focus:border-blue-500"
-                             />
-                             {optConfig.bounds[v]?.type !== 'choice' && (
-                               <input 
-                                  type="text" 
-                                  placeholder="Max"
-                                  value={optConfig.bounds[v]?.max || ''}
-                                  onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], max: e.target.value}}})}
-                                  className="flex-1 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded px-2 py-1.5 text-xs outline-none focus:border-blue-500"
-                               />
-                             )}
-                         </div>
-                       </div>
-                     ))}
-                   </div>
-               )}
-            </div>
-
-            <div>
-               <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-3 pb-2 border-b border-gray-100 dark:border-white/5">Objectives</h3>
-               {returns.length === 0 ? (
-                   <div className="text-xs text-gray-500">No return variables assigned in sequence.</div>
-               ) : (
-                   <div className="space-y-3">
-                     {returns.map((v: any) => (
-                       <div key={v} className="flex flex-col space-y-2 bg-gray-50/50 dark:bg-white/[0.02] p-3 rounded-lg border border-gray-100 dark:border-white/5">
-                         <span className="font-mono text-sm font-bold text-green-500 truncate flex-1">{v}</span>
-                         <select 
-                            value={optConfig.objectives[v]?.goal || 'maximize'}
-                            onChange={e => setOptConfig({...optConfig, objectives: {...optConfig.objectives, [v]: {...optConfig.objectives[v], goal: e.target.value}}})}
-                            className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded px-2 py-1.5 text-xs outline-none focus:border-green-500 w-full"
-                         >
-                            <option value="maximize">Maximize</option>
-                            <option value="minimize">Minimize</option>
-                         </select>
-                       </div>
-                     ))}
-                   </div>
-               )}
-            </div>
-                 </>
-               );
-            })()}
-          </div>
-          
-          <div className="p-4 border-t border-gray-100 dark:border-white/5 bg-gray-50 dark:bg-black/20">
-             <button 
-                  onClick={async () => {
-                      const vars = Array.from(new Set(sequence.flatMap(s => Object.values(s.params)).filter(v => typeof v === 'string' && v.startsWith('#')).map((v: any) => v.slice(1))));
-                      const paramSpace = vars.map((v: any) => {
-                          const b = optConfig.bounds[v] || {};
-                          if (b.type === 'choice') {
-                              return { name: v, type: 'choice', bounds: (b.min || "").split(",").map((s: string) => {
-                                  const n = parseFloat(s.trim());
-                                  return isNaN(n) ? s.trim() : n;
-                              }) };
-                          }
-                          return { name: v, type: 'range', bounds: [parseFloat(b.min || "0"), parseFloat(b.max || "1")] };
-                      });
-                      
-                      const returns = Array.from(new Set(sequence.map(s => s.returnVar).filter(Boolean)));
-                      const objConfig = returns.map((v: any) => ({
-                          name: v, minimize: optConfig.objectives[v]?.goal === 'minimize'
-                      }));
-                      
-                      const payload = {
-                          name: "Optimization Run",
-                          parameters: { 
-                              type: "Optimization",
-                              optimizer: optConfig.optimizer,
-                              budget: optConfig.budget,
-                              error_recovery: optConfig.error_recovery,
-                              parameter_space: paramSpace,
-                              objective_config: objConfig,
-                              sequence_template: sequence.map(s => ({
-                                  instrument: s.instrument,
-                                  method: s.method,
-                                  params: s.params,
-                                  returnVar: s.returnVar
-                              }))
-                          },
-                          prep: prepSequence.map(s => ({
-                              instrument: s.instrument,
-                              method: s.method,
-                              params: s.params,
-                              returnVar: s.returnVar
-                          })),
-                          cleanup: cleanupSequence.map(s => ({
-                              instrument: s.instrument,
-                              method: s.method,
-                              params: s.params,
-                              returnVar: s.returnVar
-                          })),
-                          sequence: []
-                      };
-                      
-                      try {
-                          const res = await fetch(`${API_BASE}/api/queue/runs`, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify(payload)
-                          });
-                          const data = await res.json();
-                          if (res.ok) {
-                              setShowOptimizer(false);
-                              window.location.href = '/queue';
-                          } else {
-                              alert("Failed: " + data.error);
-                          }
-                      } catch(e: any) {
-                          alert("Error: " + e.message);
-                      }
-                  }}
-                 className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors font-bold text-sm shadow-lg shadow-purple-500/20"
-             >
-                 <Zap className="w-4 h-4" />
-                 <span>Start Optimization</span>
-             </button>
-          </div>
-        </div>
-      )}
 
     </div>
   );

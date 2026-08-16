@@ -1,0 +1,38 @@
+{
+    "name": "new name test",
+    "description": "hahahahasdtfgjhkjl hufhepiahuewipfhbrejhwipv uhfpuwhupehruewhprb rhweuihruewhrouehw ehrwuiohruiowehruhweuorhwoer",
+    "prep": [],
+    "script": [
+        {
+            "id": 1,
+            "uuid": 514708413,
+            "instrument": "my_pump",
+            "action": "set_flow_rate",
+            "args": {},
+            "arg_types": {
+                "rate": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 591881977,
+            "instrument": "math_driver",
+            "action": "evaluate_function",
+            "args": {
+                "x": 1,
+                "y": 1
+            },
+            "arg_types": {
+                "x": "<class 'float'>",
+                "y": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "cleanup": []
+}

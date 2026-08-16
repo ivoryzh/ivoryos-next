@@ -122,15 +122,123 @@ export default function DataPage() {
      }
   };
   
-  const downloadRunCSV = (run: any) => {
-     if (!run) return;
-     const header = ["Row", "Status", ...run.variables].join(',');
-     const csvRows = run.rows.map((r: any) => `${r.row},${r.status},${r.data}`);
+  const downloadRunDataCSV = (run: any) => {
+     if (!run || run.type !== 'Spreadsheet') return;
+     
+     const header = run.variables.join(',');
+     const csvRows = run.rows.map((r: any) => {
+         const escapedData = r.data.split(',').map((d: string) => `"${d}"`).join(',');
+         return escapedData;
+     });
+     
      const csvContent = "data:text/csv;charset=utf-8," + header + "\n" + csvRows.join("\n");
      const encodedUri = encodeURI(csvContent);
      const link = document.createElement("a");
      link.setAttribute("href", encodedUri);
-     link.setAttribute("download", `ivoryos_${run.type}_${run.id}.csv`);
+     link.setAttribute("download", `ivoryos_data_${run.id}.csv`);
+     document.body.appendChild(link);
+     link.click();
+     link.remove();
+  };
+
+  const downloadRunLogCSV = (run: any) => {
+     if (!run || !run.steps) return;
+     
+     const paramKeys = new Set<string>();
+     const outputKeys = new Set<string>();
+     
+     const flattenObj = (obj: any, prefix = ''): Record<string, string> => {
+         const res: Record<string, string> = {};
+         if (!obj) return res;
+         Object.entries(obj).forEach(([k, v]) => {
+             const newKey = prefix ? `${prefix}.${k}` : k;
+             if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+                 Object.assign(res, flattenObj(v, newKey));
+             } else {
+                 res[newKey] = String(v);
+             }
+         });
+         return res;
+     };
+
+     run.steps.forEach((step: any) => {
+         const params = { ...(step.parameters || {}) };
+         delete params._phase;
+         const flatParams = flattenObj(params);
+         Object.keys(flatParams).forEach(k => paramKeys.add(`Param:${k}`));
+         
+         const flatOutputs = flattenObj(step.outputs);
+         Object.keys(flatOutputs).forEach(k => outputKeys.add(`Output:${k}`));
+     });
+     
+     const pKeys = Array.from(paramKeys).sort();
+     const oKeys = Array.from(outputKeys).sort();
+     
+     const header = ["Step Index", "Phase", "Iteration", "Instrument", "Method", "Status", "Start Time", "End Time", "Error", ...pKeys, ...oKeys].join(',');
+     
+     let phaseCounts: Record<string, number> = {};
+     let currentPhaseStr = '';
+     
+     const csvRows = run.steps.map((step: any, idx: number) => {
+         const params = { ...(step.parameters || {}) };
+         const phase = params._phase || 'Main';
+         delete params._phase;
+         
+         if (phase !== currentPhaseStr) {
+             currentPhaseStr = phase;
+             phaseCounts = {};
+         }
+         
+         const stepKey = `${step.instrument}.${step.method}`;
+         phaseCounts[stepKey] = (phaseCounts[stepKey] || 0) + 1;
+         const iteration = phaseCounts[stepKey];
+         
+         const escapeCSV = (s: any) => {
+             if (s === null || s === undefined) return '';
+             const str = String(s);
+             if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                 return `"${str.replace(/"/g, '""')}"`;
+             }
+             return str;
+         };
+         
+         const flatParams = flattenObj(params);
+         const flatOutputs = flattenObj(step.outputs);
+         
+         const pVals = pKeys.map(k => escapeCSV(flatParams[k.replace('Param:', '')]));
+         const oVals = oKeys.map(k => escapeCSV(flatOutputs[k.replace('Output:', '')]));
+         
+         const formatDate = (dateString: string) => {
+             if (!dateString) return '';
+             try {
+                 const d = new Date(dateString);
+                 const pad = (n: number) => n.toString().padStart(2, '0');
+                 return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+             } catch (e) {
+                 return dateString;
+             }
+         };
+         
+         return [
+             idx + 1,
+             phase,
+             iteration,
+             step.instrument,
+             step.method,
+             step.status,
+             formatDate(step.start_time),
+             formatDate(step.end_time),
+             escapeCSV(step.error),
+             ...pVals,
+             ...oVals
+         ].join(',');
+     });
+     
+     const csvContent = "data:text/csv;charset=utf-8," + header + "\n" + csvRows.join("\n");
+     const encodedUri = encodeURI(csvContent);
+     const link = document.createElement("a");
+     link.setAttribute("href", encodedUri);
+     link.setAttribute("download", `ivoryos_log_${run.id}.csv`);
      document.body.appendChild(link);
      link.click();
      link.remove();
@@ -161,7 +269,7 @@ export default function DataPage() {
                            className={`p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
                         >
                            <div className="flex justify-between items-center mb-1">
-                               <span className="text-xs font-bold text-gray-800 dark:text-gray-200">{run.name}</span>
+                               <span className="text-xs font-bold text-gray-800 dark:text-gray-200">{run.name.split(' - ')[0]}</span>
                                <span className="text-[10px] text-gray-500">{new Date(run.timestamp).toLocaleString()}</span>
                            </div>
                            <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
@@ -179,15 +287,26 @@ export default function DataPage() {
                 <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
                   <div className="flex items-center space-x-3">
                     <Database className="w-5 h-5 text-blue-500" />
-                    <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">{selectedRun.name}</h2>
+                    <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">{selectedRun.name.split(' - ')[0]}</h2>
                   </div>
-                  <button 
-                      onClick={() => downloadRunCSV(selectedRun)}
-                      className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Export CSV</span>
-                  </button>
+                  <div className="flex items-center space-x-2">
+                    {selectedRun.type === 'Spreadsheet' && (
+                        <button 
+                            onClick={() => downloadRunDataCSV(selectedRun)}
+                            className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
+                        >
+                          <Download className="w-4 h-4" />
+                          <span>Export Data</span>
+                        </button>
+                    )}
+                    <button 
+                        onClick={() => downloadRunLogCSV(selectedRun)}
+                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Export Log</span>
+                    </button>
+                  </div>
                 </header>
                 <div className="p-8 flex-1 overflow-y-auto overflow-x-hidden pb-24 min-w-0 w-full relative">
                   <div className="max-w-5xl mx-auto space-y-4 w-full min-w-0">
@@ -215,7 +334,7 @@ export default function DataPage() {
                                                     <div className="flex-1 border-t border-gray-200 dark:border-white/10"></div>
                                                 </div>
                                             )}
-                                            <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-4 shadow-sm min-w-0 mb-4">
+                                            <div className={`bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 ${(!isFlowControl && (hasParams || hasResult || step.error)) ? 'p-4' : 'px-4 py-3'} shadow-sm min-w-0 mb-3`}>
                                                 <div className={`flex items-center justify-between ${(!isFlowControl && (hasParams || hasResult || step.error)) ? 'mb-3' : ''}`}>
                                                     <div className="flex items-center space-x-3">
                                                         <span className="text-gray-400 font-mono text-xs">[{idx + 1}]</span>
@@ -226,14 +345,20 @@ export default function DataPage() {
                                                             {isFlowControl && step.method === 'Sleep' && <span className="ml-2 font-mono text-xs text-indigo-500 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded border border-indigo-100 dark:border-indigo-500/30">{paramsWithoutPhase.duration_seconds}s</span>}
                                                         </span>
                                                     </div>
-                                                    <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
-                                                        step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 
-                                                        step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 
-                                                        step.status === 'running' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
-                                                        'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-                                                    }`}>
-                                                        {step.status}
-                                                    </span>
+                                                    <div className="flex items-center space-x-4">
+                                                        <span className="text-[10px] text-gray-400 hidden sm:block">
+                                                            {step.start_time && `${new Date(step.start_time).toLocaleTimeString()}`}
+                                                            {step.end_time && ` - ${new Date(step.end_time).toLocaleTimeString()}`}
+                                                        </span>
+                                                        <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                                            step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 
+                                                            step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 
+                                                            step.status === 'running' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                                                            'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                                                        }`}>
+                                                            {step.status}
+                                                        </span>
+                                                    </div>
                                                 </div>
                                                 
                                                 {!isFlowControl && (hasParams || hasResult || step.error) && (
@@ -257,10 +382,7 @@ export default function DataPage() {
                                                     </div>
                                                 )}
                                                 
-                                                <div className="text-[10px] text-gray-400 mt-3 text-right">
-                                                    {step.start_time && `Started: ${new Date(step.start_time).toLocaleTimeString()}`}
-                                                    {step.end_time && ` • Finished: ${new Date(step.end_time).toLocaleTimeString()}`}
-                                                </div>
+
                                             </div>
                                         </div>
                                     );

@@ -475,11 +475,44 @@ class WorkflowQueueManager:
                             result = await self.current_step_task
                             self.current_step_task = None
                                 
+                            def serialize_output(res):
+                                import dataclasses
+                                if dataclasses.is_dataclass(res):
+                                    return dataclasses.asdict(res)
+                                try:
+                                    from pydantic import BaseModel
+                                    if isinstance(res, BaseModel):
+                                        return res.model_dump() if hasattr(res, "model_dump") else res.dict()
+                                except ImportError:
+                                    pass
+                                if hasattr(res, '_asdict'):
+                                    return res._asdict()
+                                import enum
+                                if isinstance(res, enum.Enum):
+                                    return res.value
+                                if isinstance(res, dict):
+                                    return {k: serialize_output(v) for k, v in res.items()}
+                                if isinstance(res, list) or isinstance(res, tuple):
+                                    return [serialize_output(v) for v in res]
+                                return res
+
+                            serialized_res = serialize_output(result)
                             step.status = "completed"
-                            step.outputs = {"result": result}
+                            step.outputs = {"result": serialized_res}
                             
                             if step.parameters and "_return_var" in step.parameters:
-                                workflow_context[step.parameters["_return_var"]] = result
+                                ret_vars = [v.strip() for v in step.parameters["_return_var"].split(",") if v.strip()]
+                                if len(ret_vars) == 1:
+                                    workflow_context[ret_vars[0]] = result
+                                elif len(ret_vars) > 1:
+                                    if isinstance(serialized_res, dict):
+                                        for k, v in zip(ret_vars, serialized_res.values()):
+                                            workflow_context[k] = v
+                                    elif isinstance(result, (tuple, list)):
+                                        for k, v in zip(ret_vars, result):
+                                            workflow_context[k] = v
+                                    else:
+                                        workflow_context[ret_vars[0]] = result
                                 
                             step.end_time = datetime.utcnow()
                             await session.commit()
@@ -745,17 +778,55 @@ class WorkflowQueueManager:
                     result = await self.current_step_task
                     self.current_step_task = None
                         
+                    def serialize_output(res):
+                        import dataclasses
+                        if dataclasses.is_dataclass(res):
+                            return dataclasses.asdict(res)
+                        try:
+                            from pydantic import BaseModel
+                            if isinstance(res, BaseModel):
+                                return res.model_dump() if hasattr(res, "model_dump") else res.dict()
+                        except ImportError:
+                            pass
+                        if hasattr(res, '_asdict'):
+                            return res._asdict()
+                        import enum
+                        if isinstance(res, enum.Enum):
+                            return res.value
+                        if isinstance(res, dict):
+                            return {k: serialize_output(v) for k, v in res.items()}
+                        if isinstance(res, list) or isinstance(res, tuple):
+                            return [serialize_output(v) for v in res]
+                        return res
+
+                    serialized_res = serialize_output(result)
                     db_step.status = "completed"
-                    db_step.outputs = {"result": result}
+                    db_step.outputs = {"result": serialized_res}
+                    
                     if return_var:
-                        # Extract the numeric objective if possible
-                        if isinstance(result, dict) and return_var in result:
-                            objective_values[return_var] = float(result[return_var])
+                        ret_vars = [v.strip() for v in return_var.split(",") if v.strip()]
+                        
+                        if len(ret_vars) > 1 and isinstance(serialized_res, dict):
+                            for k, v in zip(ret_vars, serialized_res.values()):
+                                try:
+                                    objective_values[k] = float(v)
+                                except:
+                                    pass
+                        elif len(ret_vars) > 1 and isinstance(result, (tuple, list)):
+                            for k, v in zip(ret_vars, result):
+                                try:
+                                    objective_values[k] = float(v)
+                                except:
+                                    pass
                         else:
-                            try:
-                                objective_values[return_var] = float(result)
-                            except:
-                                pass
+                            var_key = ret_vars[0] if ret_vars else return_var
+                            if isinstance(result, dict) and var_key in result:
+                                objective_values[var_key] = float(result[var_key])
+                            else:
+                                try:
+                                    objective_values[var_key] = float(result)
+                                except:
+                                    pass
                 except asyncio.CancelledError:
                     self.current_step_task = None
                     db_step.status = "error"

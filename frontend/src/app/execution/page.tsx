@@ -22,8 +22,22 @@ export default function ExecutionPage() {
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
 
+  const [varOptions, setVarOptions] = useState<Record<string, any[]>>({});
+
   useEffect(() => {
     // Theme init
+    const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.runs) {
+                const hasPending = data.runs.some((r: any) => r.status === 'pending');
+                const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
+                setHasPendingRuns(hasPending || hasActive);
+            }
+        } catch(e) {}
+    };
+
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme as 'light' | 'dark');
     if (savedTheme === 'dark') document.documentElement.classList.add('dark');
@@ -55,19 +69,34 @@ export default function ExecutionPage() {
         // Extract # variables and types
         const vars = new Set<string>();
         const vTypes: Record<string, string> = {};
+        const vOptions: Record<string, any[]> = {};
+        
+        const extractVars = (obj: any, schemaObj: any) => {
+            if (!obj) return;
+            Object.entries(obj).forEach(([k, v]) => {
+                let pData = null;
+                if (schemaObj?.parameters?.[k]) pData = schemaObj.parameters[k];
+                else if (schemaObj?.fields?.[k]) pData = schemaObj.fields[k];
+                
+                if (typeof v === 'string' && v.startsWith('#')) {
+                    const varName = v.substring(1);
+                    vars.add(varName);
+                    
+                    if (pData?.type) vTypes[varName] = pData.type;
+                    if (pData?.options) vOptions[varName] = pData.options;
+                } else if (typeof v === 'object' && v !== null) {
+                    extractVars(v, pData);
+                }
+            });
+        };
+        
         parsedSeq.forEach((block: any) => {
-          Object.entries(block.params).forEach(([key, val]: [string, any]) => {
-            if (typeof val === 'string' && val.startsWith('#')) {
-              const varName = val.substring(1);
-              vars.add(varName);
-              const t = block.schema?.parameters?.[key]?.type;
-              if (t) vTypes[varName] = t;
-            }
-          });
+            extractVars(block.params, block.schema);
         });
         const varList = Array.from(vars);
         setVariables(varList);
         setVarTypes(vTypes);
+        setVarOptions(vOptions);
         
         // Init rows from memory or empty
         const savedRows = localStorage.getItem('ivoryos_spreadsheet');
@@ -245,23 +274,39 @@ export default function ExecutionPage() {
         const rowData = activeRows[r];
         for (let i = 0; i < sequence.length; i++) {
           const block = sequence[i];
-          const args = { ...block.params };
-          for (const key in args) {
-              const val = args[key];
-              if (typeof val === 'string' && val.startsWith('#')) {
-                  const varName = val.substring(1);
-                  let subVal: any = rowData[varName];
-                  if (subVal === undefined || subVal === null || subVal === '') {
-                      alert(`Missing value for variable '${varName}' in row ${r + 1}`);
-                      setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-                      return;
+          const args = JSON.parse(JSON.stringify(block.params || {}));
+          
+          const resolveArgs = (obj: any, schemaObj: any) => {
+              Object.keys(obj).forEach(key => {
+                  const val = obj[key];
+                  let pData = null;
+                  if (schemaObj?.parameters?.[key]) pData = schemaObj.parameters[key];
+                  else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
+                  
+                  if (typeof val === 'string' && val.startsWith('#')) {
+                      const varName = val.substring(1);
+                      let subVal: any = rowData[varName];
+                      if (subVal === undefined || subVal === null || subVal === '') {
+                          throw new Error(`Missing value for variable '${varName}' in row ${r + 1}`);
+                      }
+                      
+                      const typeHint = pData?.type || '';
+                      if (typeHint.includes('int') || typeHint.includes('float')) {
+                          if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
+                      }
+                      obj[key] = subVal;
+                  } else if (typeof val === 'object' && val !== null) {
+                      resolveArgs(val, pData);
                   }
-                  const typeHint = block.schema.parameters[key]?.type || '';
-                  if (typeHint.includes('int') || typeHint.includes('float')) {
-                      if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
-                  }
-                  args[key] = subVal;
-              }
+              });
+          };
+          
+          try {
+              resolveArgs(args, block.schema);
+          } catch (err: any) {
+              alert(err.message);
+              setExecutionState({ isRunning: false, currentRow: -1, results: [] });
+              return;
           }
           fullSequence.push({
             instrument: block.instrument,
@@ -275,7 +320,7 @@ export default function ExecutionPage() {
 
       // Submit
       const payload = {
-        name: "Spreadsheet Run",
+        name: `${localStorage.getItem('ivoryos_sequence_name') || 'Spreadsheet'} Run - ${new Date().toLocaleString()}`,
         parameters: { type: 'Spreadsheet', variables, rows: activeRows },
         sequence: fullSequence.map(s => ({
           instrument: s.instrument,
@@ -401,13 +446,24 @@ export default function ExecutionPage() {
                                                     </td>
                                                     {variables.map(v => (
                                                         <td key={v} className="p-2 border-l border-gray-100 dark:border-white/5">
-                                                            <input 
-                                                                type="text" 
-                                                                value={row[v] || ''}
-                                                                onChange={(e) => updateRow(idx, v, e.target.value)}
-                                                                placeholder={`Enter ${v}...`}
-                                                                className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 dark:hover:border-white/20 dark:focus:border-blue-500 px-2 py-1 text-sm outline-none transition-colors"
-                                                            />
+                                                            {varOptions[v] ? (
+                                                                <select
+                                                                    value={row[v] || ''}
+                                                                    onChange={(e) => updateRow(idx, v, e.target.value)}
+                                                                    className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 dark:hover:border-white/20 dark:focus:border-blue-500 px-2 py-1 text-sm outline-none transition-colors cursor-pointer"
+                                                                >
+                                                                    <option value="" disabled>Select {v}</option>
+                                                                    {varOptions[v].map(opt => <option key={String(opt)} value={String(opt)}>{String(opt)}</option>)}
+                                                                </select>
+                                                            ) : (
+                                                                <input 
+                                                                    type="text" 
+                                                                    value={row[v] || ''}
+                                                                    onChange={(e) => updateRow(idx, v, e.target.value)}
+                                                                    placeholder={`Enter ${v}...`}
+                                                                    className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 dark:hover:border-white/20 dark:focus:border-blue-500 px-2 py-1 text-sm outline-none transition-colors"
+                                                                />
+                                                            )}
                                                         </td>
                                                     ))}
                                                     <td className="p-3 text-center border-l border-gray-100 dark:border-white/5">

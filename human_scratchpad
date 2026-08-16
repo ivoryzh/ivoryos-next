@@ -1,3 +1,28 @@
+20260815
+Execution Sequence - no need to say this on the designer page, just wrap the sequence name, also, we allow user to add a short description for the seuqnece, so add an entry there too 
+
+
+for method that specifically has -> None, no return field needed, also for complex (float, float) we need two return fields, the length of the tuple of fields
+the side bar,  can we have expandable minimizable, and the smallest it can minimize to is icons
+
+
+so the sequence won't auto-save, can we add unsaved
+kinda like instrument panel, where the docstring of the method can be previewed, i want the same for the designer
+
+I didn't like the that when minimize side bar, the light/dark position shifted, dark light can be in the bottom, the icon can be next line to ivoryos icon
+
+also when i hover info icon nothing showed up
+
+Any ways to make the side bar collaspe not having animation when i relaod, also no shade on the expand icon, or the theme, my bad again, the expand icon. on logo's right, and when collaspe, no logo needed 
+
+during intrspection, there might be cases where people would use Enum, Literal, can we handle that, automatically create the dropdown menu, and if this is getting configured as #variable, it should automatically know what type, and in configuration spreadsheet, this field is automatically downdown
+
+I will check the changes, and can you in the demo, adding new method to test this out. second piece for the instrospection, if we see dataclass, pydantic, or equivanlent data structure, it should allow us to define the nested fields, within the designer, and during the execution too
+
+rontend change is needed to we should be about to resave individual return in the dataclass so that they will appear as an individual column in the data csv, but in raw logs, just still dave everything 
+
+
+---- history ----
 /Users/ivoryzhang/PycharmProjects/ivoryos/ivoryos/optimizer 
 
 the optimizer is still gonna be predefined at least for those that already exist, 
@@ -13,3 +38,4 @@ i saw error and pending in data history, which shouldn't be
 
 I still see can't load page when click run spreadsheet, go back or refresh does fix, but still,
 and should be fine not having log panel there in execution, is that why it failed 
+

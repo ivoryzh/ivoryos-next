@@ -1,9 +1,11 @@
 {
+    "name": "new",
+    "description": "hahahah",
     "prep": [],
     "script": [
         {
             "id": 1,
-            "uuid": 691670056,
+            "uuid": 953533188,
             "instrument": "math_driver",
             "action": "evaluate_function",
             "args": {

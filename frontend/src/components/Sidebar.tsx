@@ -90,10 +90,14 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         {navItem('/instruments', 'Instruments', <Gamepad2 className="w-5 h-5 shrink-0" />)}
         
         {plugins.length > 0 && (
-            <div className={`pt-4 border-t border-gray-200 dark:border-white/10 mt-4 ${!isExpanded ? 'mx-2' : ''}`}>
+            <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">
                 {isExpanded && <div className="px-4 mb-2 text-[10px] font-bold tracking-wider uppercase text-gray-400">Plugins</div>}
                 <div className="space-y-2">
-                    {plugins.map(p => navItem(`/plugin?id=${p.id}`, p.name, <Plug className="w-5 h-5 shrink-0" />))}
+                    {plugins.map(p => (
+                        <div key={p.id}>
+                            {navItem(`/plugin?id=${p.id}`, p.name, <Plug className="w-5 h-5 shrink-0" />)}
+                        </div>
+                    ))}
                 </div>
             </div>
         )}

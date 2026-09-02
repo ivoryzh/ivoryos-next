@@ -118,10 +118,7 @@ export default function LibraryPage() {
       {/* Main Area */}
       <div className="flex-1 flex flex-col relative z-0">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-          <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300  flex items-center space-x-2">
-            <Book className="w-5 h-5" />
-            <span>Workflow Library</span>
-          </h2>
+          <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Workflow Library</h2>
         </header>
 
         <div className="px-8 pt-8 pb-4">

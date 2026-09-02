@@ -1,5 +1,5 @@
 "use client";
-import { API_BASE, WS_BASE } from '@/config';
+
 
 import { useState, useEffect, useRef } from 'react';
 import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
@@ -7,6 +7,7 @@ import Sidebar from '@/components/Sidebar';
 import WorkflowEditor, { SequenceBlock } from '@/components/WorkflowEditor';
 
 export default function DesignerPage() {
+  const [deviceId, setDeviceId] = useState<string | null>(null);
   const [statusData, setStatusData] = useState<any>(null);
   const [prepSequence, setPrepSequence] = useState<SequenceBlock[]>([]);
   const [sequence, setSequence] = useState<SequenceBlock[]>([]);
@@ -207,29 +208,6 @@ export default function DesignerPage() {
 
   // Fetch status on mount
   useEffect(() => {
-    // Theme init
-    const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
-    ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            if (data.runs) {
-                const hasPending = data.runs.some((r: any) => r.status === 'pending');
-                const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
-                setHasPendingRuns(hasPending || hasActive);
-            }
-        } catch(e) {}
-    };
-    
-    fetch(`${API_BASE}/api/queue/runs`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.runs) {
-            const hasPending = data.runs.some((r: any) => r.status === 'pending');
-            const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
-            setHasPendingRuns(hasPending || hasActive);
-        }
-      });
-      
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme as 'light' | 'dark');
     if (savedTheme === 'dark') document.documentElement.classList.add('dark');
@@ -266,89 +244,106 @@ export default function DesignerPage() {
     }
 
     const processStatusData = async (data: any) => {
-        // Fetch workflows
+        // Fetch offline workflows from local storage
         try {
-            const wfRes = await fetch(`${API_BASE}/api/workflows`);
-            const wfData = await wfRes.json();
-            if (wfData.workflows && wfData.workflows.length > 0) {
+            const offlineWfsStr = localStorage.getItem('ivoryos_offline_workflows');
+            const offlineWfs = offlineWfsStr ? JSON.parse(offlineWfsStr) : {};
 
-                if (!data.instruments) data.instruments = {};
-                
-                // Inject Flow Control
-                data.instruments["Flow Control"] = {
-                    If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-                    While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-                    Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
+            if (!data.instruments) data.instruments = {};
+            
+            // Inject Flow Control
+            data.instruments["Flow Control"] = {
+                If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
+                While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
+                Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
+            };
+
+            data.instruments["Library Workflows"] = {};
+            
+            for (const [wfName, wfJson] of Object.entries<any>(offlineWfs)) {
+                const dynamicParams: any = {};
+                const scanBlocks = (blocks: any[]) => {
+                    blocks.forEach((b: any) => {
+                        if (b.args) {
+                            Object.entries(b.args).forEach(([k, val]) => {
+                                if (typeof val === 'string' && val.startsWith('#')) {
+                                    const paramName = val.substring(1);
+                                    const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
+                                    dynamicParams[paramName] = { type: paramType, required: true };
+                                }
+                            });
+                        }
+                    });
                 };
-
-                data.instruments["Library Workflows"] = {};
+                scanBlocks(wfJson.prep || []);
+                scanBlocks(wfJson.script || []);
+                scanBlocks(wfJson.cleanup || []);
                 
-                for (const wfObj of wfData.workflows) {
-                    const wfName = wfObj.name;
-                    const wfJsonRes = await fetch(`${API_BASE}/api/workflows/${wfName}`);
-                    const wfJson = await wfJsonRes.json();
-                    
-                    const dynamicParams: any = {};
-                    const scanBlocks = (blocks: any[]) => {
-                        blocks.forEach((b: any) => {
-                            if (b.args) {
-                                Object.entries(b.args).forEach(([k, val]) => {
-                                    if (typeof val === 'string' && val.startsWith('#')) {
-                                        const paramName = val.substring(1);
-                                        const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
-                                        dynamicParams[paramName] = { type: paramType, required: true };
-                                    }
-                                });
-                            }
-                        });
-                    };
-                    scanBlocks(wfJson.prep || []);
-                    scanBlocks(wfJson.script || []);
-                    scanBlocks(wfJson.cleanup || []);
-                    
-                    if (wfName === editingWf) {
-                        continue; // Prevent recursion by hiding current workflow
-                    }
-                    
-                    data.instruments["Library Workflows"][wfName] = {
-                        description: "Saved Workflow from Library",
-                        parameters: dynamicParams,
-                        return_type: "None"
-                    };
+                if (wfName === editingWf) {
+                    continue; // Prevent recursion by hiding current workflow
                 }
+                
+                data.instruments["Library Workflows"][wfName] = {
+                    description: "Saved Workflow from Library",
+                    parameters: dynamicParams,
+                    return_type: "None"
+                };
             }
         } catch (e) {
-            console.error("Failed to load workflows for toolbox (might be offline)", e);
+            console.error("Failed to load workflows for toolbox", e);
         }
 
         setStatusData(data);
         if (data.instrument_meta) setInstrumentMeta(data.instrument_meta);
-        
     };
 
-    fetch(`${API_BASE}/api/status`)
-      .then(res => res.json())
-      .then(async data => {
-          localStorage.setItem('ivoryos_cached_schema', JSON.stringify(data));
-          await processStatusData(data);
-      })
-      .catch(err => {
-          console.error("Backend offline, loading cached schema...", err);
-          setIsOffline(true);
-          const cached = localStorage.getItem('ivoryos_cached_schema');
-          if (cached) {
-              try {
-                  const data = JSON.parse(cached);
-                  processStatusData(data);
-              } catch (e) {
-                  console.error("Failed to parse cached schema", e);
+    const urlParams = new URLSearchParams(window.location.search);
+    const targetDeviceId = urlParams.get('deviceId');
+    setDeviceId(targetDeviceId);
+
+    if (targetDeviceId) {
+        fetch(`/api/devices`)
+          .then(res => res.json())
+          .then(async (devices: any[]) => {
+              const targetDevice = devices.find(d => d.id === targetDeviceId);
+              if (targetDevice && targetDevice.schema) {
+                  await processStatusData({ instruments: targetDevice.schema.instruments || {} });
+              } else {
+                  console.error(`Device ${targetDeviceId} not found or has no schema. Falling back to static schema.`);
+                  throw new Error("Device not found");
+              }
+          })
+          .catch(err => {
+              console.error(err);
+              fetchStaticSchema();
+          });
+    } else {
+        fetchStaticSchema();
+    }
+
+    function fetchStaticSchema() {
+        fetch(`/ivoryos_schema.json`)
+          .then(res => res.json())
+          .then(async data => {
+              localStorage.setItem('ivoryos_cached_schema', JSON.stringify(data));
+              await processStatusData(data);
+          })
+          .catch(err => {
+              console.error("Failed to fetch schema, loading cached schema...", err);
+              setIsOffline(true);
+              const cached = localStorage.getItem('ivoryos_cached_schema');
+              if (cached) {
+                  try {
+                      const data = JSON.parse(cached);
+                      processStatusData(data);
+                  } catch (e) {
+                      setStatusData({ instruments: {} });
+                  }
+              } else {
                   setStatusData({ instruments: {} });
               }
-          } else {
-              // No cached schema available
-              setStatusData({ instruments: {} });
-          }
-      });
+          });
+    }
   }, []);
 
   // Save sequences on change
@@ -430,24 +425,19 @@ export default function DesignerPage() {
     };
 
     try {
-      const res = await fetch(`${API_BASE}/api/workflows/${name}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(legacyFormat)
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setCurrentWorkflowName(name);
-        localStorage.setItem('ivoryos_editing_workflow', name);
-        localStorage.setItem('ivoryos_editing_workflow_desc', currentWorkflowDescription);
-        localStorage.setItem('ivoryos_is_unsaved', 'false');
-        setIsUnsaved(false);
-        alert("Workflow saved to Library!");
-      } else {
-        alert("Failed to save workflow: " + data.error);
-      }
+      const offlineWfsStr = localStorage.getItem('ivoryos_offline_workflows');
+      const offlineWfs = offlineWfsStr ? JSON.parse(offlineWfsStr) : {};
+      offlineWfs[name] = legacyFormat;
+      localStorage.setItem('ivoryos_offline_workflows', JSON.stringify(offlineWfs));
+
+      setCurrentWorkflowName(name);
+      localStorage.setItem('ivoryos_editing_workflow', name);
+      localStorage.setItem('ivoryos_editing_workflow_desc', currentWorkflowDescription);
+      localStorage.setItem('ivoryos_is_unsaved', 'false');
+      setIsUnsaved(false);
+      alert("Workflow saved locally to Library!");
     } catch (e: any) {
-      alert("Network error: " + e.message);
+      alert("Error saving workflow: " + e.message);
     }
   };
 
@@ -476,36 +466,8 @@ export default function DesignerPage() {
 
 
 
-    setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
-
     try {
-      const blockToPayload = (s: SequenceBlock) => ({
-          instrument: s.instrument,
-          method: s.method,
-          params: s.params
-      });
-
-      // 1. Submit Sequence to Edge Queue
-      const payload = {
-        name: `${currentWorkflowName || 'Designer'} Run - ${new Date().toLocaleString()}`,
-        parameters: { type: 'Sequence' },
-        prep: prepSequence.filter(b => !b.isHidden).map(blockToPayload),
-        sequence: sequence.filter(b => !b.isHidden).map(blockToPayload),
-        cleanup: cleanupSequence.filter(b => !b.isHidden).map(blockToPayload)
-      };
-
-      const res = await fetch(`${API_BASE}/api/queue/runs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      
-      if (res.ok) {
-         setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
-      } else {
-         throw new Error(data.error || 'Failed to add to queue');
-      }
+        alert("This is an offline Sequence Editor. Export your workflow or execute it on a connected Edge instance.");
     } catch (e: any) {
       setExecutionState({
         isRunning: false,
@@ -518,16 +480,14 @@ export default function DesignerPage() {
 
   if (!statusData) return <div className="p-8 text-gray-900 dark:text-white bg-gray-50 dark:bg-[#0a0a0a] min-h-screen">Loading designer...</div>;
 
-  const instruments = statusData.instruments || {};
-            
-
   return (
-    <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
-
-      {/* Main Designer Area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="flex h-full w-full bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden w-full h-full">
+        {deviceId && (
+            <div className="bg-blue-500/10 border-b border-blue-500/20 px-6 py-2 text-sm text-blue-600 dark:text-blue-400 flex justify-between items-center z-10 shrink-0">
+                <span className="font-medium">Targeting Edge Device: <strong className="font-bold">{deviceId}</strong></span>
+            </div>
+        )}
         <WorkflowEditor
           statusData={statusData}
           prepSequence={prepSequence}
@@ -674,8 +634,6 @@ export default function DesignerPage() {
           }
         />
       </div>
-
-
     </div>
   );
 }

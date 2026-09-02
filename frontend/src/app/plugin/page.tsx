@@ -16,9 +16,9 @@ function PluginContent() {
 
   // Check localStorage for theme
   useEffect(() => {
-    const savedTheme = localStorage.getItem('ivoryos-theme');
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    setTheme(savedTheme as 'light' | 'dark');
     if (savedTheme === 'dark') {
-      setTheme('dark');
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
@@ -28,7 +28,7 @@ function PluginContent() {
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
     setTheme(newTheme);
-    localStorage.setItem('ivoryos-theme', newTheme);
+    localStorage.setItem('theme', newTheme);
     if (newTheme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {

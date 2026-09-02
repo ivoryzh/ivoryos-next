@@ -2,7 +2,7 @@
 import { API_BASE } from '@/config';
 
 import { useEffect, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Blocks, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, Library, Blocks, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu, Cloud } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 
@@ -88,6 +88,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}
         {navItem('/data', 'Data History', <Database className="w-5 h-5 shrink-0" />)}
         {navItem('/instruments', 'Instruments', <Gamepad2 className="w-5 h-5 shrink-0" />)}
+        {navItem('/cloud', 'Cloud Connect', <Cloud className="w-5 h-5 shrink-0" />)}
         
         {plugins.length > 0 && (
             <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">

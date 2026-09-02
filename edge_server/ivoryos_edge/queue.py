@@ -576,6 +576,19 @@ class WorkflowQueueManager:
                     run.end_time = datetime.utcnow()
                     await session.commit()
                     
+                    try:
+                        if run.parameters and run.parameters.get("cloud_run_id"):
+                            import httpx
+                            from ivoryos_edge.server import CLOUD_URL
+                            async with httpx.AsyncClient() as client:
+                                await client.post(f"{CLOUD_URL}/api/edge/complete", json={
+                                    "runId": run.parameters["cloud_run_id"],
+                                    "nodeId": run.parameters["cloud_node_id"],
+                                    "status": run.status
+                                })
+                    except Exception as e:
+                        print(f"Failed to emit cloud completion: {e}")
+                    
                     if not self.cancelled:
                         await self.pause_event.wait()
                         

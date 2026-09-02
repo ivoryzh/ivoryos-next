@@ -154,7 +154,7 @@ export default function InstrumentsPage() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-100 dark:bg-transparent">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-          <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 ">Connected Instruments</h2>
+          <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Connected Instruments</h2>
         </header>
 
         <div className="p-8 space-y-6 overflow-y-auto pb-48">

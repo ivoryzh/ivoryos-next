@@ -1,3 +1,8 @@
+for cleanup and prep, I have a different thought because it only runs once, we should still allow dynamic param, but show them once on the top when config or running in optimizer
+
+
+
+
 20260815
 Execution Sequence - no need to say this on the designer page, just wrap the sequence name, also, we allow user to add a short description for the seuqnece, so add an entry there too 
 

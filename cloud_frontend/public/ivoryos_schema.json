@@ -1,0 +1,434 @@
+{
+  "instruments": {
+    "my_pump": {
+      "complex_initialization_sequence": {
+        "description": "A complex method with many parameters to stress test the UI.\nRequires temperature, solvent name, and optionally safety checks and timeout settings.",
+        "parameters": {
+          "target_temperature": {
+            "type": "<class 'float'>",
+            "required": true
+          },
+          "solvent_name": {
+            "type": "<class 'str'>",
+            "required": true
+          },
+          "enable_safety_checks": {
+            "type": "<class 'bool'>",
+            "required": false,
+            "options": [
+              "True",
+              "False"
+            ],
+            "default": true
+          },
+          "retries": {
+            "type": "<class 'int'>",
+            "required": false,
+            "default": 3
+          },
+          "timeout_seconds": {
+            "type": "<class 'float'>",
+            "required": false,
+            "default": 60.0
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "long_running_task": {
+        "description": "A blocking task to test execution cancellation.",
+        "parameters": {
+          "duration": {
+            "type": "<class 'int'>",
+            "required": true
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "set_flow_rate": {
+        "description": "Sets the flow rate of the pump.",
+        "parameters": {
+          "rate": {
+            "type": "<class 'float'>",
+            "required": true
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "start_pump": {
+        "description": "Starts the pump at the current flow rate.",
+        "parameters": {},
+        "return_type": "None",
+        "return_info": {
+          "type": "None",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "stop_pump": {
+        "description": "Stops the pump.",
+        "parameters": {},
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "test_enum_and_literal": {
+        "description": "Test method for Enum and Literal parsing.",
+        "parameters": {
+          "direction": {
+            "type": "PumpDirection",
+            "required": true,
+            "options": [
+              "forward",
+              "backward",
+              "oscillating"
+            ]
+          },
+          "mode": {
+            "type": "Literal",
+            "required": false,
+            "options": [
+              "fast",
+              "slow",
+              "eco"
+            ],
+            "default": "eco"
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "test_error_handling": {
+        "description": "Throws an exception if should_fail is True.",
+        "parameters": {
+          "should_fail": {
+            "type": "<class 'bool'>",
+            "required": false,
+            "options": [
+              "True",
+              "False"
+            ],
+            "default": true
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "test_nested_dataclass": {
+        "description": "Test method for nested dataclass introspection.",
+        "parameters": {
+          "config": {
+            "type": "PumpConfig",
+            "required": true,
+            "is_object": true,
+            "fields": {
+              "target_speed": {
+                "type": "<class 'float'>",
+                "required": true
+              },
+              "direction": {
+                "type": "PumpDirection",
+                "required": true,
+                "options": [
+                  "forward",
+                  "backward",
+                  "oscillating"
+                ]
+              },
+              "enable_safety_valves": {
+                "type": "<class 'bool'>",
+                "required": false,
+                "options": [
+                  "True",
+                  "False"
+                ],
+                "default": true
+              }
+            }
+          },
+          "duration": {
+            "type": "<class 'int'>",
+            "required": false,
+            "default": 5
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "very_long_module_method_name_to_test_truncation_issues_on_frontend": {
+        "description": "Testing long names on the frontend display.",
+        "parameters": {
+          "super_long_parameter_name_that_should_wrap": {
+            "type": "<class 'str'>",
+            "required": false,
+            "default": "default_val"
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      }
+    },
+    "another_pump": {
+      "complex_initialization_sequence": {
+        "description": "A complex method with many parameters to stress test the UI.\nRequires temperature, solvent name, and optionally safety checks and timeout settings.",
+        "parameters": {
+          "target_temperature": {
+            "type": "<class 'float'>",
+            "required": true
+          },
+          "solvent_name": {
+            "type": "<class 'str'>",
+            "required": true
+          },
+          "enable_safety_checks": {
+            "type": "<class 'bool'>",
+            "required": false,
+            "options": [
+              "True",
+              "False"
+            ],
+            "default": true
+          },
+          "retries": {
+            "type": "<class 'int'>",
+            "required": false,
+            "default": 3
+          },
+          "timeout_seconds": {
+            "type": "<class 'float'>",
+            "required": false,
+            "default": 60.0
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "long_running_task": {
+        "description": "A blocking task to test execution cancellation.",
+        "parameters": {
+          "duration": {
+            "type": "<class 'int'>",
+            "required": true
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "set_flow_rate": {
+        "description": "Sets the flow rate of the pump.",
+        "parameters": {
+          "rate": {
+            "type": "<class 'float'>",
+            "required": true
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "start_pump": {
+        "description": "Starts the pump at the current flow rate.",
+        "parameters": {},
+        "return_type": "None",
+        "return_info": {
+          "type": "None",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "stop_pump": {
+        "description": "Stops the pump.",
+        "parameters": {},
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "test_enum_and_literal": {
+        "description": "Test method for Enum and Literal parsing.",
+        "parameters": {
+          "direction": {
+            "type": "PumpDirection",
+            "required": true,
+            "options": [
+              "forward",
+              "backward",
+              "oscillating"
+            ]
+          },
+          "mode": {
+            "type": "Literal",
+            "required": false,
+            "options": [
+              "fast",
+              "slow",
+              "eco"
+            ],
+            "default": "eco"
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "test_error_handling": {
+        "description": "Throws an exception if should_fail is True.",
+        "parameters": {
+          "should_fail": {
+            "type": "<class 'bool'>",
+            "required": false,
+            "options": [
+              "True",
+              "False"
+            ],
+            "default": true
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "test_nested_dataclass": {
+        "description": "Test method for nested dataclass introspection.",
+        "parameters": {
+          "config": {
+            "type": "PumpConfig",
+            "required": true,
+            "is_object": true,
+            "fields": {
+              "target_speed": {
+                "type": "<class 'float'>",
+                "required": true
+              },
+              "direction": {
+                "type": "PumpDirection",
+                "required": true,
+                "options": [
+                  "forward",
+                  "backward",
+                  "oscillating"
+                ]
+              },
+              "enable_safety_valves": {
+                "type": "<class 'bool'>",
+                "required": false,
+                "options": [
+                  "True",
+                  "False"
+                ],
+                "default": true
+              }
+            }
+          },
+          "duration": {
+            "type": "<class 'int'>",
+            "required": false,
+            "default": 5
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      },
+      "very_long_module_method_name_to_test_truncation_issues_on_frontend": {
+        "description": "Testing long names on the frontend display.",
+        "parameters": {
+          "super_long_parameter_name_that_should_wrap": {
+            "type": "<class 'str'>",
+            "required": false,
+            "default": "default_val"
+          }
+        },
+        "return_type": "Any",
+        "return_info": null,
+        "is_coroutine": false
+      }
+    },
+    "async_pump": {
+      "async_long_task": {
+        "description": "An async long running task.",
+        "parameters": {
+          "duration": {
+            "type": "<class 'int'>",
+            "required": true
+          }
+        },
+        "return_type": "<class 'dict'>",
+        "return_info": {
+          "type": "<class 'dict'>",
+          "required": true
+        },
+        "is_coroutine": true
+      },
+      "async_start_pump": {
+        "description": "Starts the pump asynchronously.",
+        "parameters": {},
+        "return_type": "<class 'dict'>",
+        "return_info": {
+          "type": "<class 'dict'>",
+          "required": true
+        },
+        "is_coroutine": true
+      },
+      "sync_to_async_thread_test": {
+        "description": "A regular synchronous method that runs an async function inside a new thread.",
+        "parameters": {},
+        "return_type": "<class 'dict'>",
+        "return_info": {
+          "type": "<class 'dict'>",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "math_driver": {
+      "evaluate_function": {
+        "description": "Evaluates a simulated objective function: -(x-3)^2 - (y-2)^2 + 10\nOptimal parameters are x=3, y=2, yielding max=10.",
+        "parameters": {
+          "x": {
+            "type": "<class 'float'>",
+            "required": true
+          },
+          "y": {
+            "type": "<class 'float'>",
+            "required": true
+          }
+        },
+        "return_type": "<class 'float'>",
+        "return_info": {
+          "type": "<class 'float'>",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    }
+  },
+  "instrument_meta": {
+    "my_pump": {
+      "module": "dummy_driver",
+      "class": "PumpDriver"
+    },
+    "another_pump": {
+      "module": "dummy_driver",
+      "class": "PumpDriver"
+    },
+    "async_pump": {
+      "module": "dummy_driver",
+      "class": "AsyncPumpDriver"
+    },
+    "math_driver": {
+      "module": "dummy_driver",
+      "class": "DummyMathDriver"
+    }
+  }
+}

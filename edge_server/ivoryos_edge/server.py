@@ -1,9 +1,9 @@
 import os
 import asyncio
-import socketio
 import inspect
 import sys
 import uuid
+import httpx
 from typing import Dict, Any
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -30,11 +30,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Socket.io Client to connect to Cloud Orchestrator
-# handle_sigint=False prevents socket.io from fighting with uvicorn's shutdown handlers
-sio = socketio.AsyncClient(handle_sigint=False)
-CLOUD_URL = os.getenv("CLOUD_URL", "http://localhost:4000")
+CLOUD_URL = os.getenv("CLOUD_URL", "http://localhost:3000")
 REGISTRATION_KEY = os.getenv("REGISTRATION_KEY", "edge-default-01")
+
+class CloudSettingsRequest(BaseModel):
+    cloudUrl: str
+    registrationKey: str
+
+@app.get("/api/cloud-settings")
+def get_cloud_settings():
+    return {
+        "cloudUrl": CLOUD_URL,
+        "registrationKey": REGISTRATION_KEY
+    }
+
+@app.post("/api/cloud-settings")
+def update_cloud_settings(req: CloudSettingsRequest):
+    global CLOUD_URL, REGISTRATION_KEY
+    CLOUD_URL = req.cloudUrl
+    REGISTRATION_KEY = req.registrationKey
+    
+    # Save to .env
+    env_lines = []
+    if os.path.exists(".env"):
+        with open(".env", "r") as f:
+            env_lines = f.readlines()
+            
+    # Update or append
+    cloud_url_found = False
+    reg_key_found = False
+    for i, line in enumerate(env_lines):
+        if line.startswith("CLOUD_URL="):
+            env_lines[i] = f"CLOUD_URL={CLOUD_URL}\n"
+            cloud_url_found = True
+        elif line.startswith("REGISTRATION_KEY="):
+            env_lines[i] = f"REGISTRATION_KEY={REGISTRATION_KEY}\n"
+            reg_key_found = True
+            
+    if not cloud_url_found:
+        env_lines.append(f"CLOUD_URL={CLOUD_URL}\n")
+    if not reg_key_found:
+        env_lines.append(f"REGISTRATION_KEY={REGISTRATION_KEY}\n")
+        
+    with open(".env", "w") as f:
+        f.writelines(env_lines)
+        
+    return {"status": "success"}
 
 class ExecuteRequest(BaseModel):
     module: str
@@ -79,40 +120,86 @@ async def startup_event():
     except Exception as e:
         print(f"Failed to dump ivoryos_schema.json: {e}")
         
-    try:
-        print(f"Connecting to Cloud Orchestrator at {CLOUD_URL}...")
-        await sio.connect(CLOUD_URL, auth={"token": REGISTRATION_KEY})
-        print("Connected to Cloud Orchestrator successfully.")
-    except Exception as e:
-        print(f"Failed to connect to Cloud Orchestrator: {e}")
+    # Start Cloud Polling Task
+    async def poll_cloud():
+        print(f"Starting cloud polling to {CLOUD_URL}...")
+        while True:
+            try:
+                if not CLOUD_URL:
+                    await asyncio.sleep(2)
+                    continue
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    try:
-        if sio.connected:
-            await sio.disconnect()
-    except Exception as e:
-        print(f"Graceful shutdown of socket.io failed: {e}")
+                library_workflows = {}
+                try:
+                    import json
+                    if os.path.exists(WORKFLOWS_DIR):
+                        for f in os.listdir(WORKFLOWS_DIR):
+                            if f.endswith(".json"):
+                                with open(os.path.join(WORKFLOWS_DIR, f), 'r') as fp:
+                                    data = json.load(fp)
+                                    wf_name = f.replace(".json", "")
+                                    dynamic_params = {}
+                                    
+                                    def scan_blocks(blocks):
+                                        for b in blocks:
+                                            for k, val in b.get("args", {}).items():
+                                                if isinstance(val, str) and val.startswith('#'):
+                                                    param_name = val[1:]
+                                                    param_type = b.get("arg_types", {}).get(k, "str")
+                                                    dynamic_params[param_name] = {"type": param_type, "required": True}
+                                                    
+                                    scan_blocks(data.get("prep", []))
+                                    scan_blocks(data.get("script", []))
+                                    scan_blocks(data.get("cleanup", []))
+                                    
+                                    library_workflows[wf_name] = {
+                                        "description": data.get("description", "Saved Workflow"),
+                                        "parameters": dynamic_params,
+                                        "return_type": "None"
+                                    }
+                except Exception as e:
+                    pass
 
-@sio.event
-async def connect():
-    print("Socket.io connection established with Cloud Orchestrator.")
+                current_instruments = dict(app.state.instrument_schemas)
+                if library_workflows:
+                    current_instruments["Library Workflows"] = library_workflows
 
-@sio.event
-async def disconnect():
-    print("Socket.io disconnected from Cloud Orchestrator.")
-
-@sio.event
-async def execute_workflow(data):
-    print(f"Received workflow execution request from cloud: {data}")
-    # TODO: Pass to local execution engine
-    await sio.emit("workflow_status", {"status": "started", "workflow": data.get("id")})
+                schema = {
+                    "instruments": current_instruments,
+                    "instrument_meta": app.state.instrument_meta
+                }
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(f"{CLOUD_URL}/api/edge/heartbeat", json={
+                        "deviceId": REGISTRATION_KEY,
+                        "schema": schema
+                    })
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        tasks = data.get("tasks", [])
+                        for t in tasks:
+                            print(f"Received cloud task: {t}")
+                            block = t.get("block")
+                            runId = t.get("runId")
+                            nodeId = t.get("nodeId")
+                            if block and runId and nodeId:
+                                expanded_blocks = expand_workflow_blocks([block], WORKFLOWS_DIR, "main")
+                                await queue_manager.submit_sequence(
+                                    f"Cloud Node {nodeId} ({runId})", 
+                                    expanded_blocks, 
+                                    {"cloud_run_id": runId, "cloud_node_id": nodeId}
+                                )
+            except Exception as e:
+                # Silently catch network errors during polling
+                pass
+            await asyncio.sleep(2)
+            
+    asyncio.create_task(poll_cloud())
 
 @app.get("/api/status")
 def get_status():
     return {
         "status": "running", 
-        "cloud_connected": sio.connected,
+        "cloud_connected": True,
         "instruments": getattr(app.state, "instrument_schemas", {}),
         "instrument_meta": getattr(app.state, "instrument_meta", {}),
         "active_tasks": list(active_tasks.keys()),

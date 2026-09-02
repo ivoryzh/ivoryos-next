@@ -1,15 +1,87 @@
 {
     "name": "new",
-    "description": "hahahah",
-    "prep": [],
+    "description": "i don't know this is just wip",
+    "prep": [
+        {
+            "id": 1,
+            "uuid": 744816304,
+            "instrument": "my_pump",
+            "action": "start_pump",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 916769533,
+            "instrument": "my_pump",
+            "action": "set_flow_rate",
+            "args": {},
+            "arg_types": {
+                "rate": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 3,
+            "uuid": 181546247,
+            "instrument": "my_pump",
+            "action": "long_running_task",
+            "args": {},
+            "arg_types": {
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
     "script": [
         {
             "id": 1,
-            "uuid": 953533188,
+            "uuid": 510945407,
+            "instrument": "my_pump",
+            "action": "test_nested_dataclass",
+            "args": {
+                "duration": 5,
+                "config": {
+                    "enable_safety_valves": true
+                }
+            },
+            "arg_types": {
+                "config": "PumpConfig",
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 22132382,
+            "instrument": "Flow_Control",
+            "action": "If",
+            "args": {
+                "condition": "True"
+            },
+            "arg_types": {
+                "condition": "str"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 3,
+            "uuid": 793543297,
             "instrument": "math_driver",
             "action": "evaluate_function",
             "args": {
-                "x": 1,
+                "x": 6,
                 "y": 1
             },
             "arg_types": {
@@ -19,7 +91,142 @@
             "return": "objective",
             "batch_action": false,
             "consolidate_batch_args": false
+        },
+        {
+            "id": 4,
+            "uuid": 419871542,
+            "instrument": "Flow_Control",
+            "action": "Else",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 5,
+            "uuid": 283974128,
+            "instrument": "Flow_Control",
+            "action": "End_If",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 6,
+            "uuid": 644301869,
+            "instrument": "another_pump",
+            "action": "complex_initialization_sequence",
+            "args": {
+                "enable_safety_checks": true,
+                "retries": 3,
+                "timeout_seconds": 60
+            },
+            "arg_types": {
+                "target_temperature": "<class 'float'>",
+                "solvent_name": "<class 'str'>",
+                "enable_safety_checks": "<class 'bool'>",
+                "retries": "<class 'int'>",
+                "timeout_seconds": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 7,
+            "uuid": 525360064,
+            "instrument": "my_pump",
+            "action": "complex_initialization_sequence",
+            "args": {
+                "enable_safety_checks": true,
+                "retries": 3,
+                "timeout_seconds": 60,
+                "target_temperature": "#ff"
+            },
+            "arg_types": {
+                "target_temperature": "<class 'float'>",
+                "solvent_name": "<class 'str'>",
+                "enable_safety_checks": "<class 'bool'>",
+                "retries": "<class 'int'>",
+                "timeout_seconds": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 8,
+            "uuid": 81010571,
+            "instrument": "my_pump",
+            "action": "very_long_module_method_name_to_test_truncation_issues_on_frontend",
+            "args": {
+                "super_long_parameter_name_that_should_wrap": "default_val"
+            },
+            "arg_types": {
+                "super_long_parameter_name_that_should_wrap": "<class 'str'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 9,
+            "uuid": 951815995,
+            "instrument": "async_pump",
+            "action": "async_long_task",
+            "args": {},
+            "arg_types": {
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 10,
+            "uuid": 798700357,
+            "instrument": "async_pump",
+            "action": "async_long_task",
+            "args": {},
+            "arg_types": {
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 11,
+            "uuid": 169426290,
+            "instrument": "my_pump",
+            "action": "set_flow_rate",
+            "args": {},
+            "arg_types": {
+                "rate": "<class 'float'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
         }
     ],
-    "cleanup": []
+    "cleanup": [
+        {
+            "id": 1,
+            "uuid": 629255715,
+            "instrument": "async_pump",
+            "action": "async_long_task",
+            "args": {
+                "duration": "#ghi"
+            },
+            "arg_types": {
+                "duration": "<class 'int'>"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ]
 }

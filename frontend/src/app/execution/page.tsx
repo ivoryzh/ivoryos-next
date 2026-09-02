@@ -360,7 +360,7 @@ export default function ExecutionPage() {
       {/* Main Area */}
       <div className="flex-1 flex flex-col relative z-0">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-          <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">Spreadsheet Editor</h2>
+          <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Spreadsheet Editor</h2>
           <div className="flex space-x-3">
             <label className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10 cursor-pointer">
               <Upload className="w-4 h-4" />

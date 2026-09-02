@@ -1,8 +1,10 @@
 {
+    "name": "test",
+    "description": "",
     "prep": [
         {
             "id": 1,
-            "uuid": 752817706,
+            "uuid": 739463303,
             "instrument": "math_driver",
             "action": "evaluate_function",
             "args": {
@@ -21,7 +23,7 @@
     "script": [
         {
             "id": 1,
-            "uuid": 105138194,
+            "uuid": 261875495,
             "instrument": "Flow_Control",
             "action": "If",
             "args": {
@@ -36,19 +38,8 @@
         },
         {
             "id": 2,
-            "uuid": 707095143,
+            "uuid": 179937577,
             "instrument": "Flow_Control",
-            "action": "Else",
-            "args": {},
-            "arg_types": {},
-            "return": "",
-            "batch_action": false,
-            "consolidate_batch_args": false
-        },
-        {
-            "id": 3,
-            "uuid": 717895656,
-            "instrument": "Flow Control",
             "action": "Sleep",
             "args": {
                 "duration_seconds": 10
@@ -61,8 +52,19 @@
             "consolidate_batch_args": false
         },
         {
+            "id": 3,
+            "uuid": 43385695,
+            "instrument": "Flow_Control",
+            "action": "Else",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
             "id": 4,
-            "uuid": 966554626,
+            "uuid": 126817504,
             "instrument": "Flow_Control",
             "action": "End_If",
             "args": {},

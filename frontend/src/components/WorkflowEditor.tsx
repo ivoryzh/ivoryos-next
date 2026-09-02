@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Layers, BookOpen, Box } from 'lucide-react';
+import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Layers, BookOpen, Box, Search } from 'lucide-react';
 
 export type SequenceBlock = {
   id: string;
@@ -40,6 +40,7 @@ export default function WorkflowEditor({
 }: WorkflowEditorProps) {
   const [expandedToolbox, setExpandedToolbox] = useState<Record<string, boolean>>({});
   const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const expandAll = () => {
     const expandList = (list: SequenceBlock[]) => list.map(b => ({ ...b, isExpanded: true }));
@@ -508,9 +509,21 @@ export default function WorkflowEditor({
       <div className="flex-1 flex overflow-hidden">
         
         {/* Toolbox (Left) */}
-        <div className="w-72 border-r border-gray-200 dark:border-white/10 bg-white dark:bg-[#0f0f0f] flex flex-col z-10">
-          <div className="h-16 flex items-center px-6 border-b border-gray-200 dark:border-white/10 shrink-0 bg-white/50 dark:bg-black/10">
+        <div className="w-72 shrink-0 border-r border-gray-200 dark:border-white/10 bg-white dark:bg-[#0f0f0f] flex flex-col z-10">
+          <div className="h-16 flex items-center px-6 shrink-0 bg-white/50 dark:bg-black/10">
             <h2 className="text-sm font-bold tracking-wider text-gray-800 dark:text-gray-200 uppercase">Toolbox</h2>
+          </div>
+          <div className="px-4 pb-4 border-b border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/10">
+             <div className="relative">
+                <input 
+                  type="text"
+                  placeholder="Search modules..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 transition-colors shadow-sm"
+                />
+                <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
+             </div>
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 space-y-1">
@@ -533,12 +546,19 @@ export default function WorkflowEditor({
                        return a.localeCompare(b);
                     })
                     .map(instrument => {
-                    const isExpanded = expandedToolbox[instrument];
+                    const matchesInst = instrument.toLowerCase().includes(searchQuery.toLowerCase());
+                    const matchingMethods = Object.keys(instruments[instrument]).filter(method => 
+                        matchesInst || method.toLowerCase().includes(searchQuery.toLowerCase())
+                    );
+                    
+                    if (searchQuery && matchingMethods.length === 0) return null;
+
+                    const isExpanded = searchQuery ? true : expandedToolbox[instrument];
                     const isFlowControl = instrument === 'Flow Control' || instrument === 'Flow_Control';
                     const isLibrary = instrument === 'Library Workflows';
                     
-                    let headerClass = "w-full flex items-center justify-between p-3 rounded-xl transition-all duration-200 ";
-                    let titleClass = "font-bold text-[15px] ";
+                    let headerClass = "w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all duration-200 ";
+                    let titleClass = "text-[15px] capitalize ";
                     
                     if (isFlowControl) {
                        headerClass += "bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:hover:bg-indigo-900/40";
@@ -561,8 +581,8 @@ export default function WorkflowEditor({
                         </button>
                         
                         {isExpanded && (
-                          <div className="p-2 space-y-2 mb-2">
-                            {Object.keys(instruments[instrument]).map((method, idx) => (
+                          <div className="p-2 space-y-1 mb-2">
+                            {matchingMethods.map((method, idx) => (
                               <Draggable key={`${instrument}::${method}`} draggableId={`${instrument}::${method}`} index={idx}>
                               {(provided, snapshot) => (
                                 <React.Fragment>
@@ -570,7 +590,7 @@ export default function WorkflowEditor({
                                     ref={provided.innerRef}
                                     {...provided.draggableProps}
                                     {...provided.dragHandleProps}
-                                    className={`p-2.5 bg-white dark:bg-[#1a1a1a] border rounded-lg transition-all flex items-center justify-between shadow-sm border-gray-200 dark:border-white/10 hover:border-gray-300 dark:hover:border-white/20 hover:shadow-md ${snapshot.isDragging ? 'border-blue-500 shadow-xl ring-2 ring-blue-500/20' : ''}`}
+                                    className={`p-2.5 rounded-lg transition-all flex items-center justify-between ${snapshot.isDragging ? 'bg-white dark:bg-[#1a1a1a] shadow-xl ring-2 ring-blue-500/20 border border-blue-500' : 'hover:bg-gray-100 dark:hover:bg-white/5'}`}
                                     style={provided.draggableProps.style}
                                   >
                                     <div className="flex flex-col w-full min-w-0">
@@ -588,7 +608,7 @@ export default function WorkflowEditor({
                                     </div>
                                   </div>
                                   {snapshot.isDragging && (
-                                    <div className="p-2.5 bg-white dark:bg-[#1a1a1a] border rounded-lg flex items-center justify-between shadow-sm border-gray-200 dark:border-white/10 opacity-50 grayscale pointer-events-none select-none">
+                                    <div className="p-2.5 rounded-lg flex items-center justify-between opacity-50 grayscale pointer-events-none select-none">
                                       <div className="flex flex-col w-full min-w-0">
                                         <div className="flex items-center justify-between w-full">
                                           <span className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate">{method.replace(/_/g, ' ')}</span>

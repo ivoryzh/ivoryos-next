@@ -1,12 +1,14 @@
 "use client";
 import { API_BASE } from '@/config';
 import { useState, useEffect } from 'react';
-import { Settings2, Info, Zap } from 'lucide-react';
+import { Settings2, Info, Zap, Sun } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
 export default function OptimizePage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [variables, setVariables] = useState<string[]>([]);
+  const [globalVariables, setGlobalVariables] = useState<string[]>([]);
+  const [globalValues, setGlobalValues] = useState<Record<string, string>>({});
   const [returns, setReturns] = useState<string[]>([]);
   const [sequence, setSequence] = useState<any[]>([]);
   const [prepSequence, setPrepSequence] = useState<any[]>([]);
@@ -41,18 +43,51 @@ export default function OptimizePage() {
       try {
         const parsedSeq = JSON.parse(savedSequence);
         setSequence(parsedSeq);
-        if (savedPrep) setPrepSequence(JSON.parse(savedPrep));
-        if (savedCleanup) setCleanupSequence(JSON.parse(savedCleanup));
+        const pSeq = savedPrep ? JSON.parse(savedPrep) : [];
+        const cSeq = savedCleanup ? JSON.parse(savedCleanup) : [];
+        setPrepSequence(pSeq);
+        setCleanupSequence(cSeq);
 
         const vars = new Set<string>();
         parsedSeq.forEach((block: any) => {
-          Object.entries(block.params).forEach(([key, val]: [string, any]) => {
-            if (typeof val === 'string' && val.startsWith('#')) {
-              vars.add(val.substring(1));
-            }
-          });
+          const extractVars = (obj: any) => {
+             if (!obj) return;
+             Object.entries(obj).forEach(([k, v]) => {
+                if (typeof v === 'string' && v.startsWith('#')) {
+                    vars.add(v.substring(1));
+                } else if (typeof v === 'object' && v !== null) {
+                    extractVars(v);
+                }
+             });
+          };
+          extractVars(block.params);
         });
         setVariables(Array.from(vars));
+
+        const gVars = new Set<string>();
+        const extractGVars = (obj: any) => {
+             if (!obj) return;
+             Object.entries(obj).forEach(([k, v]) => {
+                if (typeof v === 'string' && v.startsWith('#')) {
+                    gVars.add(v.substring(1));
+                } else if (typeof v === 'object' && v !== null) {
+                    extractGVars(v);
+                }
+             });
+        };
+        pSeq.forEach((block: any) => extractGVars(block.params));
+        cSeq.forEach((block: any) => extractGVars(block.params));
+        const gVarList = Array.from(gVars);
+        setGlobalVariables(gVarList);
+
+        const savedGlobalValues = localStorage.getItem('ivoryos_global_values');
+        if (savedGlobalValues) {
+            setGlobalValues(JSON.parse(savedGlobalValues));
+        } else {
+            const initGVals: Record<string, string> = {};
+            gVarList.forEach(v => initGVals[v] = '');
+            setGlobalValues(initGVals);
+        }
 
         const retVars = Array.from(new Set(parsedSeq.map((s: any) => s.returnVar).filter(Boolean))) as string[];
         setReturns(retVars);
@@ -86,6 +121,51 @@ export default function OptimizePage() {
         name: v, minimize: optConfig.objectives[v]?.goal === 'minimize'
     }));
     
+    const resolveGlobalBlock = (block: any) => {
+        const args = JSON.parse(JSON.stringify(block.params || {}));
+        const resolveArgs = (obj: any, schemaObj: any) => {
+            Object.keys(obj).forEach(key => {
+                const val = obj[key];
+                let pData = null;
+                if (schemaObj?.parameters?.[key]) pData = schemaObj.parameters[key];
+                else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
+                
+                if (typeof val === 'string' && val.startsWith('#')) {
+                    const varName = val.substring(1);
+                    let subVal: any = globalValues[varName];
+                    if (subVal === undefined || subVal === null || subVal === '') {
+                        throw new Error(`Missing global value for variable '${varName}'`);
+                    }
+                    
+                    const typeHint = pData?.type || '';
+                    if (typeHint.includes('int') || typeHint.includes('float')) {
+                        if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
+                    }
+                    obj[key] = subVal;
+                } else if (typeof val === 'object' && val !== null) {
+                    resolveArgs(val, pData);
+                }
+            });
+        };
+        resolveArgs(args, block.schema);
+        return {
+            instrument: block.instrument,
+            method: block.method,
+            params: args,
+            returnVar: block.returnVar
+        };
+    };
+
+    let resolvedPrep: any[] = [];
+    let resolvedCleanup: any[] = [];
+    try {
+        resolvedPrep = prepSequence.map(resolveGlobalBlock);
+        resolvedCleanup = cleanupSequence.map(resolveGlobalBlock);
+    } catch (err: any) {
+        alert(err.message);
+        return;
+    }
+
     const payload = {
         name: `${localStorage.getItem('ivoryos_sequence_name') || 'Optimization'} Run - ${new Date().toLocaleString()}`,
         parameters: { 
@@ -102,18 +182,8 @@ export default function OptimizePage() {
                 returnVar: s.returnVar
             }))
         },
-        prep: prepSequence.map(s => ({
-            instrument: s.instrument,
-            method: s.method,
-            params: s.params,
-            returnVar: s.returnVar
-        })),
-        cleanup: cleanupSequence.map(s => ({
-            instrument: s.instrument,
-            method: s.method,
-            params: s.params,
-            returnVar: s.returnVar
-        })),
+        prep: resolvedPrep,
+        cleanup: resolvedCleanup,
         sequence: []
     };
     
@@ -159,11 +229,33 @@ export default function OptimizePage() {
             </div>
           ) : (
             <div className="max-w-4xl mx-auto space-y-6 pb-24">
+              {globalVariables.length > 0 && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/30 rounded-lg px-4 py-3 flex items-center gap-4 flex-wrap">
+                  <span className="text-xs font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider whitespace-nowrap shrink-0">Prep / Cleanup Config</span>
+                  {globalVariables.map(v => (
+                    <div key={v} className="flex items-center gap-2">
+                      <label className="text-xs font-medium text-amber-800 dark:text-amber-200 whitespace-nowrap">{v}</label>
+                      <input 
+                         type="text" 
+                         value={globalValues[v] || ''}
+                         onChange={e => {
+                           const updated = {...globalValues, [v]: e.target.value};
+                           setGlobalValues(updated);
+                           localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
+                         }}
+                         className="w-36 bg-white dark:bg-black/50 border border-amber-300 dark:border-amber-700/50 rounded-md px-2 py-1 text-sm focus:border-amber-500 outline-none"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-white/10 rounded-2xl shadow-sm p-6">
                 <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-6 flex items-center">
                   <Zap className="w-5 h-5 mr-2 text-purple-500" />
                   General Settings
                 </h3>
+                
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div>
                     <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 block">Optimizer Engine</label>

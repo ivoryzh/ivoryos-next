@@ -453,7 +453,8 @@ export default function DesignerPage() {
 
   
   const validateSequence = () => {
-    for (const block of sequence) {
+    const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+    for (const block of allBlocks) {
       if (block.schema?.parameters) {
         for (const [key, param] of Object.entries(block.schema.parameters)) {
           const val = block.params[key];
@@ -572,6 +573,15 @@ export default function DesignerPage() {
                   <span className="hidden sm:inline">Clear</span>
                 </button>
                 
+                <button 
+                  onClick={saveWorkflow}
+                  disabled={sequence.length === 0}
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Save className="w-4 h-4" />
+                  <span className="hidden sm:inline">Save</span>
+                </button>
+
                 <div className="relative group">
                   <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
                     <Settings2 className="w-4 h-4" />
@@ -579,17 +589,9 @@ export default function DesignerPage() {
                   </button>
                   <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
                     <button 
-                      onClick={saveWorkflow}
-                      disabled={sequence.length === 0}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
-                    >
-                      <Save className="w-4 h-4" />
-                      <span>Save to Library</span>
-                    </button>
-                    <button 
                       onClick={exportJSON}
                       disabled={sequence.length === 0}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 border-t border-gray-100 dark:border-white/5"
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
                     >
                       <Download className="w-4 h-4" />
                       <span>Export JSON</span>
@@ -620,7 +622,8 @@ export default function DesignerPage() {
                   <span className="hidden sm:inline">{viewMode === 'canvas' ? 'View Python' : 'Back'}</span>
                 </button>
                 {(() => {
-                  const hasDynamicParams = sequence.some(block => 
+                  const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+                  const hasDynamicParams = allBlocks.some(block => 
                     Object.values(block.params).some(val => typeof val === 'string' && val.startsWith('#'))
                   );
                   return (

@@ -88,8 +88,6 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}
         {navItem('/data', 'Data History', <Database className="w-5 h-5 shrink-0" />)}
         {navItem('/instruments', 'Instruments', <Gamepad2 className="w-5 h-5 shrink-0" />)}
-        {navItem('/cloud', 'Cloud Connect', <Cloud className="w-5 h-5 shrink-0" />)}
-        
         {plugins.length > 0 && (
             <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">
                 {isExpanded && <div className="px-4 mb-2 text-[10px] font-bold tracking-wider uppercase text-gray-400">Plugins</div>}
@@ -106,13 +104,20 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
 
       <div className="flex flex-col space-y-4 w-full">
         <div className="mx-3">
-          <div className={`flex items-center py-2 px-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-100 dark:border-white/5`}>
-            <div className={`w-2 h-2 rounded-full shrink-0 ${edgeStatus?.status === 'running' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
+          <div className={`flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-100 dark:border-white/5`}>
+            <div className="flex items-center min-w-0">
+              <div className={`w-2 h-2 rounded-full shrink-0 ${edgeStatus?.cloud_connected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
+              {isExpanded && (
+                  <div className="flex flex-col ml-3 min-w-0">
+                    <span className="text-xs font-bold text-gray-700 dark:text-gray-300">Cloud Connect</span>
+                    <span className="text-[10px] text-gray-500 truncate">{edgeStatus?.cloud_connected ? 'Connected' : 'Offline'}</span>
+                  </div>
+              )}
+            </div>
             {isExpanded && (
-                <div className="flex flex-col ml-3 min-w-0">
-                  <span className="text-xs font-bold text-gray-700 dark:text-gray-300">Edge Server</span>
-                  <span className="text-[10px] text-gray-500 truncate">{edgeStatus?.status === 'running' ? 'Connected' : 'Offline'}</span>
-                </div>
+              <Link href="/cloud" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors ml-2">
+                <Settings2 className="w-4 h-4" />
+              </Link>
             )}
           </div>
         </div>

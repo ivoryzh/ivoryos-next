@@ -124,7 +124,7 @@ export default function WorkflowEditor({
           );
       } else if (instrument === "Flow Control" && method === "While_Loop") {
           destList.splice(destination.index, 0, 
-              createBlock("Flow_Control", "While", { condition: "True" }),
+              createBlock("Flow_Control", "While", { condition: "False" }),
               createBlock("Flow_Control", "End_While", {})
           );
       } else {
@@ -203,7 +203,36 @@ export default function WorkflowEditor({
 
   const removeBlock = (index: number, listId: string) => {
     const list = Array.from(getSequenceList(listId));
-    list.splice(index, 1);
+    const block = list[index];
+    const toDelete = [index];
+
+    if (block.method === 'If') {
+      let depth = 1;
+      for (let i = index + 1; i < list.length; i++) {
+        const b = list[i];
+        if (b.method === 'If') depth++;
+        else if (b.method === 'End_If') depth--;
+        
+        toDelete.push(i);
+        if (depth === 0) break;
+      }
+    } else if (block.method === 'While') {
+      let depth = 1;
+      for (let i = index + 1; i < list.length; i++) {
+        const b = list[i];
+        if (b.method === 'While') depth++;
+        else if (b.method === 'End_While') depth--;
+        
+        toDelete.push(i);
+        if (depth === 0) break;
+      }
+    }
+
+    // Remove from highest index to lowest to avoid shifting issues
+    toDelete.sort((a, b) => b - a).forEach(i => {
+      list.splice(i, 1);
+    });
+
     setSequenceList(listId, list);
   };
 
@@ -260,6 +289,12 @@ export default function WorkflowEditor({
                   const isMissing = !isFlowBlock && (!statusData.instruments[block.instrument] || !statusData.instruments[block.instrument][block.method]);
                   let borderClass = blockDepth > 0 ? `border-gray-200 dark:border-white/10 border-l-4 ${nestColor}` : 'border-gray-200 dark:border-white/10';
                   
+                  const allParams = Object.keys(block.schema?.parameters || {});
+                  const visibleParams = isFlowBlock 
+                    ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds')
+                    : allParams;
+                  const hasParams = visibleParams.length > 0;
+                  
                   const hasMissingRequiredArg = (() => {
                       let missing = false;
                       const paramsSchema = block.schema?.parameters || {};
@@ -277,7 +312,30 @@ export default function WorkflowEditor({
                   })();
 
                   if (isMissing) borderClass = `border-red-400 dark:border-red-500/50 shadow-[0_0_0_1px_rgba(248,113,113,0.5)] ${blockDepth > 0 ? 'border-l-4' : ''}`;
-                  let bgClass = isFlowBlock ? 'bg-indigo-50/60 dark:bg-indigo-900/20' : (blockDepth > 0 ? `bg-white dark:bg-black/40 ${nestBg}` : 'bg-white dark:bg-black/40');
+                  let flowBgClass = 'bg-stone-50/60 dark:bg-stone-900/20';
+                  let flowTextClass = 'text-stone-700 dark:text-stone-300 font-bold';
+                  let flowInputClass = 'bg-stone-500/10 dark:bg-stone-900/40 border-stone-200 dark:border-stone-800/50 focus:border-stone-400 dark:focus:border-stone-500 text-stone-900 dark:text-stone-100 placeholder-stone-300 dark:placeholder-stone-600/50';
+                  
+                  if (isFlowBlock) {
+                      if (block.method === 'If' || block.method === 'End_If' || block.method === 'Else') {
+                          flowBgClass = 'bg-sky-50/70 dark:bg-sky-900/20';
+                          flowTextClass = 'text-sky-700 dark:text-sky-300 font-bold';
+                          flowInputClass = 'bg-sky-500/10 dark:bg-sky-900/40 border-sky-200 dark:border-sky-800/50 focus:border-sky-400 dark:focus:border-sky-500 text-sky-900 dark:text-sky-100 placeholder-sky-300 dark:placeholder-sky-600/50';
+                      } else if (block.method === 'While' || block.method === 'End_While') {
+                          flowBgClass = 'bg-amber-50/70 dark:bg-amber-900/20';
+                          flowTextClass = 'text-amber-700 dark:text-amber-300 font-bold';
+                          flowInputClass = 'bg-amber-500/10 dark:bg-amber-900/40 border-amber-200 dark:border-amber-800/50 focus:border-amber-400 dark:focus:border-amber-500 text-amber-900 dark:text-amber-100 placeholder-amber-300 dark:placeholder-amber-600/50';
+                      } else if (block.method === 'Sleep') {
+                          flowBgClass = 'bg-rose-50/70 dark:bg-rose-900/20';
+                          flowTextClass = 'text-rose-700 dark:text-rose-300 font-bold';
+                          flowInputClass = 'bg-rose-500/10 dark:bg-rose-900/40 border-rose-200 dark:border-rose-800/50 focus:border-rose-400 dark:focus:border-rose-500 text-rose-900 dark:text-rose-100 placeholder-rose-300 dark:placeholder-rose-600/50';
+                      }
+                  }
+
+                  let bgClass = 'bg-white dark:bg-[#1a1a1a]';
+                  if (isFlowBlock) bgClass = flowBgClass;
+                  else if (blockDepth > 0) bgClass = `bg-white dark:bg-black/40 ${nestBg}`;
+
                   const indent = blockDepth > 0 ? { marginLeft: `${blockDepth * 20}px` } : {};
                   
                   return (
@@ -288,7 +346,7 @@ export default function WorkflowEditor({
                                 {...provided.draggableProps}
                                 style={{ ...provided.draggableProps.style, ...indent }}
                                 className={`
-                                  relative bg-white dark:bg-[#1a1a1a] rounded-xl shadow-sm border
+                                  relative ${bgClass} rounded-lg shadow-sm border
                                   transition-all duration-200 group
                                   ${block.isHidden ? 'opacity-50 border-gray-200 dark:border-gray-800' : 
                                     snapshot.isDragging ? 'border-blue-500 shadow-xl scale-[1.02] z-50' : 
@@ -299,26 +357,26 @@ export default function WorkflowEditor({
                                   {/* Top Row: Info & Controls */}
                                   <div 
                                     {...provided.dragHandleProps}
-                                    onClick={() => !isFlowBlock && toggleExpand(block.id, listId)}
-                                    className={`p-3 flex items-center justify-between cursor-grab active:cursor-grabbing ${!isFlowBlock ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''} ${isExpanded && !isFlowBlock ? 'border-b border-gray-100 dark:border-white/5' : ''}`}
+                                    onClick={() => !isFlowBlock && hasParams && toggleExpand(block.id, listId)}
+                                    className={`px-3 py-1.5 flex items-center justify-between cursor-grab active:cursor-grabbing ${!isFlowBlock && hasParams ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
                                   >
                                     <div className="flex items-center min-w-0 flex-1">
-                                      {!isFlowBlock && (
-                                        <button className="mr-3 p-1 rounded-md text-gray-400 hover:text-gray-800 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10 transition-colors pointer-events-none">
-                                          {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+                                      {!isFlowBlock && hasParams && (
+                                        <button className="mr-2 p-0.5 rounded-md text-gray-400 hover:text-gray-800 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10 transition-colors pointer-events-none">
+                                          {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                                         </button>
                                       )}
-                                      <div className="flex items-center space-x-2">
+                                      <div className={`flex items-center space-x-2 ${!isFlowBlock && !hasParams ? 'ml-1' : ''}`}>
                                         {!isFlowBlock && (
-                                          <span className="text-[10px] font-bold px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 rounded capitalize">
+                                          <span title={block.instrument.replace(/_/g, ' ')} className="w-28 shrink-0 truncate text-center text-[10px] font-semibold px-2 py-0.5 bg-gray-100 text-gray-600 border border-gray-200 dark:bg-white/10 dark:text-gray-300 dark:border-white/5 rounded-md capitalize">
                                             {block.instrument.replace(/_/g, ' ')}
                                           </span>
                                         )}
-                                        <span className={`text-sm font-medium flex items-center ${isFlowBlock ? 'text-indigo-700 dark:text-indigo-300 font-bold' : isMissing ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-800 dark:text-gray-100'}`}>
+                                        <span className={`text-[13px] tracking-tight capitalize ${isFlowBlock ? flowTextClass : isMissing ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-800 dark:text-gray-100 font-medium'}`}>
                                           {block.method.replace(/_/g, ' ')}
                                           {hasMissingRequiredArg && (
-                                            <span title="Missing required parameter">
-                                              <AlertTriangle className="w-4 h-4 text-orange-500 ml-2" />
+                                            <span title="Missing required parameter" className="inline-flex items-center ml-1.5">
+                                              <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
                                             </span>
                                           )}
                                         </span>
@@ -328,8 +386,6 @@ export default function WorkflowEditor({
                                               const pData = block.schema!.parameters[paramKey];
                                               const val = block.params[paramKey];
                                               const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
-                                              const isDynamic = typeof actualVal === 'string' && actualVal.startsWith('#');
-                                              const isInvalidDynamic = isDynamic && (listId === 'prep' || listId === 'cleanup');
                                               return (
                                                 <div key={paramKey} className="relative flex items-center">
                                                   <input
@@ -338,13 +394,8 @@ export default function WorkflowEditor({
                                                     placeholder={paramKey.replace(/_/g, ' ')}
                                                     onChange={(e) => handleParamChange(block.id, paramKey, e.target.value, pData.type || '', listId)}
                                                     onClick={(e) => e.stopPropagation()}
-                                                    className={`w-32 bg-indigo-500/10 dark:bg-indigo-900/40 border ${isInvalidDynamic ? 'border-red-500 focus:border-red-500 text-red-600 dark:text-red-400' : 'border-indigo-200 dark:border-indigo-800/50 focus:border-indigo-400 dark:focus:border-indigo-500 text-indigo-900 dark:text-indigo-100'} rounded px-2 py-1 text-xs focus:outline-none placeholder-indigo-300 dark:placeholder-indigo-600/50 pr-6`}
+                                                    className={`w-32 border ${flowInputClass} rounded px-2 py-1 text-xs focus:outline-none`}
                                                   />
-                                                  {isInvalidDynamic && (
-                                                    <div className="absolute right-2" title="Dynamic variables (#) are not allowed in Prep/Cleanup phases.">
-                                                      <AlertTriangle className="w-3.5 h-3.5 text-red-500" />
-                                                    </div>
-                                                  )}
                                                 </div>
                                               )
                                             })}
@@ -420,20 +471,16 @@ export default function WorkflowEditor({
 
                                   {/* Bottom Row: Params */}
                                   {isExpanded && !isFlowBlock && (
-                                    <div className="p-3 bg-gray-50/50 dark:bg-black/20 rounded-b-xl border-t border-gray-100 dark:border-white/5">
+                                    <div className="px-3 pb-2 pt-0">
                                       {(() => {
-                                        const allParams = Object.keys(block.schema?.parameters || {});
-                                        const visibleParams = isFlowBlock 
-                                          ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds')
-                                          : allParams;
-                                        if (visibleParams.length === 0) return null;
+                                        if (!hasParams) return null;
                                         return (
-                                        <div className="flex flex-wrap gap-x-4 gap-y-2 items-center">
+                                        <div className="flex flex-wrap gap-2 items-center">
                                           {visibleParams.map((param) => {
                                             const renderParam = (pData: any, paramKey: string, paramName: string, bId: string, lId: string, paramsObj: any): React.ReactNode => {
                                                 if (pData.is_object && pData.fields) {
                                                     return (
-                                                        <div key={paramKey} className="flex flex-col space-y-1 shrink-0 p-2 border border-gray-200 dark:border-white/10 rounded-lg bg-white dark:bg-[#1a1a1a] shadow-sm">
+                                                        <div key={paramKey} className="flex flex-col space-y-1 shrink-0 p-2 border border-gray-200 dark:border-white/10 rounded-lg bg-white dark:bg-[#1a1a1a]">
                                                             <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider px-1">{paramName}</span>
                                                             <div className="flex flex-wrap gap-x-2 gap-y-1.5 pl-1 border-l-2 border-gray-300 dark:border-white/20">
                                                                 {Object.keys(pData.fields).map(subKey => 
@@ -447,21 +494,12 @@ export default function WorkflowEditor({
                                                 const displayType = (pData.type || '').replace(/<class '([^']+)'>/, '$1').replace('typing.', '');
                                                 const val = paramKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, paramsObj);
                                                 const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
-                                                const isDynamic = typeof actualVal === 'string' && actualVal.startsWith('#');
-                                                const isInvalidDynamic = isDynamic && (lId === 'prep' || lId === 'cleanup');
                                                 
                                                 return (
-                                                    <div key={paramKey} className="flex flex-col space-y-0.5 shrink-0 relative">
-                                                      <label className="h-4 text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-end justify-between space-x-1 whitespace-nowrap w-full">
-                                                        <div className="flex items-center space-x-1">
-                                                          <span>{paramName.replace(/_/g, ' ')}</span>
-                                                          {pData.required && <span className="text-red-500/80 leading-none">*</span>}
-                                                        </div>
-                                                        {isInvalidDynamic && (
-                                                          <span title="Dynamic variables (#) are not allowed in Prep/Cleanup phases.">
-                                                            <AlertTriangle className="w-3 h-3 text-red-500 ml-1" />
-                                                          </span>
-                                                        )}
+                                                    <div key={paramKey} className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1">
+                                                      <label className="text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-center whitespace-nowrap">
+                                                        <span>{paramName.replace(/_/g, ' ')}</span>
+                                                        {pData.required && <span className="text-red-500/80 leading-none ml-0.5">*</span>}
                                                       </label>
                                                       <input
                                                         type="text"
@@ -469,7 +507,7 @@ export default function WorkflowEditor({
                                                         value={actualVal}
                                                         placeholder={pData.default !== undefined ? `Default: ${pData.default}` : displayType}
                                                         onChange={(e) => handleParamChange(bId, paramKey, e.target.value, pData.type || '', lId)}
-                                                        className={`w-32 bg-white dark:bg-[#1a1a1a] border ${isInvalidDynamic ? 'border-red-500 focus:border-red-600 text-red-600 dark:text-red-400' : 'border-gray-300 dark:border-white/10 focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white'} rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-1 ${isInvalidDynamic ? 'focus:ring-red-500/20' : 'focus:ring-blue-500/20'} transition-all`}
+                                                        className={`w-28 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700`}
                                                       />
                                                       {pData.options && (
                                                         <datalist id={`datalist-${bId}-${paramKey}`}>
@@ -508,12 +546,9 @@ export default function WorkflowEditor({
     <DragDropContext onDragEnd={onDragEnd}>
       <div className="flex-1 flex overflow-hidden">
         
-        {/* Toolbox (Left) */}
-        <div className="w-72 shrink-0 border-r border-gray-200 dark:border-white/10 bg-white dark:bg-[#0f0f0f] flex flex-col z-10">
-          <div className="h-16 flex items-center px-6 shrink-0 bg-white/50 dark:bg-black/10">
-            <h2 className="text-sm font-bold tracking-wider text-gray-800 dark:text-gray-200 uppercase">Toolbox</h2>
-          </div>
-          <div className="px-4 pb-4 border-b border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/10">
+        {/* Left Sidebar (Toolbox) */}
+        <div className="w-72 bg-white dark:bg-[#1a1a1a] flex flex-col border-r border-gray-200 dark:border-white/10 shrink-0 z-10">
+          <div className="h-16 px-4 flex flex-col justify-center border-b border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/10 shrink-0">
              <div className="relative">
                 <input 
                   type="text"
@@ -545,7 +580,7 @@ export default function WorkflowEditor({
                        if (bIsLib) return -1;
                        return a.localeCompare(b);
                     })
-                    .map(instrument => {
+                    .map((instrument, instIdx) => {
                     const matchesInst = instrument.toLowerCase().includes(searchQuery.toLowerCase());
                     const matchingMethods = Object.keys(instruments[instrument]).filter(method => 
                         matchesInst || method.toLowerCase().includes(searchQuery.toLowerCase())
@@ -558,16 +593,20 @@ export default function WorkflowEditor({
                     const isLibrary = instrument === 'Library Workflows';
                     
                     let headerClass = "w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all duration-200 ";
-                    let titleClass = "text-[15px] capitalize ";
+                    let titleClass = "text-[15px] capitalize font-medium tracking-wide ";
                     
                     if (isFlowControl) {
-                       headerClass += "bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:hover:bg-indigo-900/40";
-                       titleClass += "text-indigo-800 dark:text-indigo-300";
+                       headerClass += "bg-sky-50 hover:bg-sky-100 dark:bg-sky-900/20 dark:hover:bg-sky-900/40";
+                       titleClass += "text-sky-800 dark:text-sky-300";
                     } else if (isLibrary) {
                        headerClass += "bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:hover:bg-emerald-900/40";
                        titleClass += "text-emerald-800 dark:text-emerald-300";
                     } else {
-                       headerClass += "bg-transparent hover:bg-gray-100 dark:hover:bg-white/5";
+                       if (instIdx % 2 === 0) {
+                           headerClass += "bg-gray-100 hover:bg-gray-200 dark:bg-white/10 dark:hover:bg-white/20";
+                       } else {
+                           headerClass += "bg-transparent hover:bg-gray-100 dark:hover:bg-white/5";
+                       }
                        titleClass += "text-gray-900 dark:text-gray-100";
                     }
 
@@ -581,7 +620,7 @@ export default function WorkflowEditor({
                         </button>
                         
                         {isExpanded && (
-                          <div className="p-2 space-y-1 mb-2">
+                          <div className="pl-8 pr-2 mt-1 mb-2 space-y-0.5">
                             {matchingMethods.map((method, idx) => (
                               <Draggable key={`${instrument}::${method}`} draggableId={`${instrument}::${method}`} index={idx}>
                               {(provided, snapshot) => (
@@ -590,12 +629,12 @@ export default function WorkflowEditor({
                                     ref={provided.innerRef}
                                     {...provided.draggableProps}
                                     {...provided.dragHandleProps}
-                                    className={`p-2.5 rounded-lg transition-all flex items-center justify-between ${snapshot.isDragging ? 'bg-white dark:bg-[#1a1a1a] shadow-xl ring-2 ring-blue-500/20 border border-blue-500' : 'hover:bg-gray-100 dark:hover:bg-white/5'}`}
+                                    className={`p-2 rounded-lg transition-all flex items-center justify-between ${snapshot.isDragging ? 'bg-white dark:bg-[#1a1a1a] shadow-xl ring-2 ring-blue-500/20' : 'bg-transparent hover:bg-gray-100 dark:hover:bg-white/10'}`}
                                     style={provided.draggableProps.style}
                                   >
                                     <div className="flex flex-col w-full min-w-0">
                                       <div className="flex items-center justify-between w-full relative">
-                                        <span className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate">{method.replace(/_/g, ' ')}</span>
+                                        <span title={method.replace(/_/g, ' ')} className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate capitalize">{method.replace(/_/g, ' ')}</span>
                                         {instruments[instrument][method]?.description && (
                                           <div className="relative group/tooltip flex items-center shrink-0 ml-2">
                                             <Info className="w-3.5 h-3.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors cursor-help" />
@@ -611,7 +650,7 @@ export default function WorkflowEditor({
                                     <div className="p-2.5 rounded-lg flex items-center justify-between opacity-50 grayscale pointer-events-none select-none">
                                       <div className="flex flex-col w-full min-w-0">
                                         <div className="flex items-center justify-between w-full">
-                                          <span className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate">{method.replace(/_/g, ' ')}</span>
+                                          <span title={method.replace(/_/g, ' ')} className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate">{method.replace(/_/g, ' ')}</span>
                                           {instruments[instrument][method]?.description && (
                                             <div className="shrink-0 ml-2">
                                               <Info className="w-3.5 h-3.5 text-gray-400" />
@@ -638,21 +677,22 @@ export default function WorkflowEditor({
         </div>
 
         {/* Sequence Canvas (Center) and Right Sidebar */}
-        <div className="flex-1 flex flex-col bg-gray-100 dark:bg-[#0f0f0f] relative min-w-0">
+        <div className="flex-1 flex flex-col bg-gray-50 dark:bg-[#0a0a0a] relative min-w-0">
           {header}
           
           <div className="flex-1 flex overflow-hidden relative min-w-0">
             {customView ? (
               customView
             ) : (
-              <div className="flex-1 overflow-y-auto p-6 pb-48 relative">
-                <div className="max-w-4xl mx-auto w-full relative">
-                  <div className="absolute -top-4 right-0 flex items-center space-x-2 z-10">
-                     <button onClick={expandAll} className="flex items-center space-x-1 text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors" title="Expand All Cards">
+              <div className="flex-1 overflow-y-auto p-4 md:p-8 relative">
+                <div className="max-w-5xl mx-auto w-full relative min-h-[85vh]">
+                  <div className="absolute -top-4 right-0 flex items-center space-x-3 z-10">
+                     <button onClick={expandAll} className="flex items-center space-x-1.5 text-[11px] font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors uppercase tracking-wide" title="Expand All Cards">
                          <ChevronsUpDown className="w-3.5 h-3.5" />
                          <span>Expand All</span>
                      </button>
-                     <button onClick={collapseAll} className="flex items-center space-x-1 text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors" title="Collapse All Cards">
+                     <div className="w-px h-3 bg-gray-200 dark:bg-white/10"></div>
+                     <button onClick={collapseAll} className="flex items-center space-x-1.5 text-[11px] font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors uppercase tracking-wide" title="Collapse All Cards">
                          <ChevronsDownUp className="w-3.5 h-3.5" />
                          <span>Collapse All</span>
                      </button>

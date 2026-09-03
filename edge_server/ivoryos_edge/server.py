@@ -199,7 +199,7 @@ async def startup_event():
 def get_status():
     return {
         "status": "running", 
-        "cloud_connected": True,
+        "cloud_connected": bool(CLOUD_URL),
         "instruments": getattr(app.state, "instrument_schemas", {}),
         "instrument_meta": getattr(app.state, "instrument_meta", {}),
         "active_tasks": list(active_tasks.keys()),

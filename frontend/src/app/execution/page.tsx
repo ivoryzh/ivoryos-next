@@ -8,7 +8,11 @@ import Sidebar from '@/components/Sidebar';
 
 export default function ExecutionPage() {
   const [sequence, setSequence] = useState<any[]>([]);
+  const [prepSequence, setPrepSequence] = useState<any[]>([]);
+  const [cleanupSequence, setCleanupSequence] = useState<any[]>([]);
   const [variables, setVariables] = useState<string[]>([]);
+  const [globalVariables, setGlobalVariables] = useState<string[]>([]);
+  const [globalValues, setGlobalValues] = useState<Record<string, string>>({});
   const [varTypes, setVarTypes] = useState<Record<string, string>>({});
   const [rows, setRows] = useState<Record<string, any>[]>([{}]);
   
@@ -68,10 +72,11 @@ export default function ExecutionPage() {
         
         // Extract # variables and types
         const vars = new Set<string>();
+        const gVars = new Set<string>();
         const vTypes: Record<string, string> = {};
         const vOptions: Record<string, any[]> = {};
         
-        const extractVars = (obj: any, schemaObj: any) => {
+        const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>) => {
             if (!obj) return;
             Object.entries(obj).forEach(([k, v]) => {
                 let pData = null;
@@ -80,23 +85,47 @@ export default function ExecutionPage() {
                 
                 if (typeof v === 'string' && v.startsWith('#')) {
                     const varName = v.substring(1);
-                    vars.add(varName);
+                    targetSet.add(varName);
                     
                     if (pData?.type) vTypes[varName] = pData.type;
                     if (pData?.options) vOptions[varName] = pData.options;
                 } else if (typeof v === 'object' && v !== null) {
-                    extractVars(v, pData);
+                    extractVars(v, pData, targetSet);
                 }
             });
         };
         
         parsedSeq.forEach((block: any) => {
-            extractVars(block.params, block.schema);
+            extractVars(block.params, block.schema, vars);
         });
+        
+        const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
+        const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
+        let pSeq = [];
+        let cSeq = [];
+        if (savedPrep) pSeq = JSON.parse(savedPrep);
+        if (savedCleanup) cSeq = JSON.parse(savedCleanup);
+        setPrepSequence(pSeq);
+        setCleanupSequence(cSeq);
+        
+        pSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
+        cSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
+
         const varList = Array.from(vars);
+        const gVarList = Array.from(gVars);
         setVariables(varList);
+        setGlobalVariables(gVarList);
         setVarTypes(vTypes);
         setVarOptions(vOptions);
+        
+        const savedGlobalValues = localStorage.getItem('ivoryos_global_values');
+        if (savedGlobalValues) {
+            setGlobalValues(JSON.parse(savedGlobalValues));
+        } else {
+            const initGVals: Record<string, string> = {};
+            gVarList.forEach(v => initGVals[v] = '');
+            setGlobalValues(initGVals);
+        }
         
         // Init rows from memory or empty
         const savedRows = localStorage.getItem('ivoryos_spreadsheet');
@@ -256,26 +285,85 @@ export default function ExecutionPage() {
   };
 
   const executeSpreadsheet = async () => {
-    if (sequence.length === 0 || variables.length === 0) return;
+    if (sequence.length === 0 && prepSequence.length === 0 && cleanupSequence.length === 0) return;
     
     setExecutionState({ isRunning: true, currentRow: -1, results: [] });
 
     try {
-      const activeRows = rows.filter(row => Object.values(row).some(v => v !== undefined && v !== null && v !== ''));
-      if (activeRows.length === 0) {
-          setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-          alert("No active rows to execute.");
-          return;
-      }
-      
       const fullSequence = [];
-      // Build the unrolled sequence
-      for (let r = 0; r < activeRows.length; r++) {
-        const rowData = activeRows[r];
+
+      if (variables.length > 0) {
+        // Row-based execution: resolve # variables from spreadsheet rows
+        const activeRows = rows.filter(row => Object.values(row).some(v => v !== undefined && v !== null && v !== ''));
+        if (activeRows.length === 0) {
+            setExecutionState({ isRunning: false, currentRow: -1, results: [] });
+            alert("No active rows to execute.");
+            return;
+        }
+        
+        for (let r = 0; r < activeRows.length; r++) {
+          const rowData = activeRows[r];
+          for (let i = 0; i < sequence.length; i++) {
+            const block = sequence[i];
+            const args = JSON.parse(JSON.stringify(block.params || {}));
+            
+            const resolveArgs = (obj: any, schemaObj: any) => {
+                Object.keys(obj).forEach(key => {
+                    const val = obj[key];
+                    let pData = null;
+                    if (schemaObj?.parameters?.[key]) pData = schemaObj.parameters[key];
+                    else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
+                    
+                    if (typeof val === 'string' && val.startsWith('#')) {
+                        const varName = val.substring(1);
+                        let subVal: any = rowData[varName];
+                        if (subVal === undefined || subVal === null || subVal === '') {
+                            throw new Error(`Missing value for variable '${varName}' in row ${r + 1}`);
+                        }
+                        
+                        const typeHint = pData?.type || '';
+                        if (typeHint.includes('int') || typeHint.includes('float')) {
+                            if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
+                        }
+                        obj[key] = subVal;
+                    } else if (typeof val === 'object' && val !== null) {
+                        resolveArgs(val, pData);
+                    }
+                });
+            };
+            
+            try {
+                resolveArgs(args, block.schema);
+            } catch (err: any) {
+                alert(err.message);
+                setExecutionState({ isRunning: false, currentRow: -1, results: [] });
+                return;
+            }
+            fullSequence.push({
+              instrument: block.instrument,
+              method: block.method,
+              params: args,
+              originalRow: r,
+              originalBlockIndex: i
+            });
+          }
+        }
+      } else {
+        // No spreadsheet variables — run sequence once as-is
         for (let i = 0; i < sequence.length; i++) {
           const block = sequence[i];
+          fullSequence.push({
+            instrument: block.instrument,
+            method: block.method,
+            params: JSON.parse(JSON.stringify(block.params || {})),
+            originalRow: 0,
+            originalBlockIndex: i
+          });
+        }
+      }
+
+      const resolveGlobalBlock = (block: any) => {
           const args = JSON.parse(JSON.stringify(block.params || {}));
-          
           const resolveArgs = (obj: any, schemaObj: any) => {
               Object.keys(obj).forEach(key => {
                   const val = obj[key];
@@ -285,9 +373,9 @@ export default function ExecutionPage() {
                   
                   if (typeof val === 'string' && val.startsWith('#')) {
                       const varName = val.substring(1);
-                      let subVal: any = rowData[varName];
+                      let subVal: any = globalValues[varName];
                       if (subVal === undefined || subVal === null || subVal === '') {
-                          throw new Error(`Missing value for variable '${varName}' in row ${r + 1}`);
+                          throw new Error(`Missing global value for variable '${varName}'`);
                       }
                       
                       const typeHint = pData?.type || '';
@@ -300,33 +388,37 @@ export default function ExecutionPage() {
                   }
               });
           };
-          
-          try {
-              resolveArgs(args, block.schema);
-          } catch (err: any) {
-              alert(err.message);
-              setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-              return;
-          }
-          fullSequence.push({
-            instrument: block.instrument,
-            method: block.method,
-            params: args,
-            originalRow: r,
-            originalBlockIndex: i
-          });
-        }
+          resolveArgs(args, block.schema);
+          return {
+              instrument: block.instrument,
+              method: block.method,
+              params: args,
+              returnVar: block.returnVar
+          };
+      };
+
+      let resolvedPrep: any[] = [];
+      let resolvedCleanup: any[] = [];
+      try {
+          resolvedPrep = prepSequence.map(resolveGlobalBlock);
+          resolvedCleanup = cleanupSequence.map(resolveGlobalBlock);
+      } catch (err: any) {
+          alert(err.message);
+          setExecutionState({ isRunning: false, currentRow: -1, results: [] });
+          return;
       }
 
       // Submit
       const payload = {
         name: `${localStorage.getItem('ivoryos_sequence_name') || 'Spreadsheet'} Run - ${new Date().toLocaleString()}`,
-        parameters: { type: 'Spreadsheet', variables, rows: activeRows },
+        parameters: { type: variables.length > 0 ? 'Spreadsheet' : 'Simple', variables, rows: variables.length > 0 ? rows.filter(row => Object.values(row).some(v => v !== undefined && v !== null && v !== '')) : [] },
+        prep: resolvedPrep,
         sequence: fullSequence.map(s => ({
           instrument: s.instrument,
           method: s.method,
           params: s.params
-        }))
+        })),
+        cleanup: resolvedCleanup
       };
 
       const res = await fetch(`${API_BASE}/api/queue/runs`, {
@@ -390,9 +482,9 @@ export default function ExecutionPage() {
                     }
                     executeSpreadsheet();
                 }}
-                disabled={variables.length === 0}
+                disabled={variables.length === 0 && globalVariables.length === 0}
                 className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
-                  variables.length === 0
+                  variables.length === 0 && globalVariables.length === 0
                     ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500 cursor-not-allowed'
                     : 'bg-green-600 hover:bg-green-700 dark:hover:bg-green-500 text-white shadow-md'
                 }`}
@@ -404,10 +496,36 @@ export default function ExecutionPage() {
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto pb-48">
-          {variables.length === 0 ? (
+          {globalVariables.length > 0 && (
+            <div className="mb-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/30 rounded-lg px-4 py-3 flex items-center gap-4 flex-wrap">
+              <span className="text-xs font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider whitespace-nowrap shrink-0">Prep / Cleanup Config</span>
+              {globalVariables.map(v => (
+                <div key={v} className="flex items-center gap-2">
+                  <label className="text-xs font-medium text-amber-800 dark:text-amber-200 whitespace-nowrap">{v}</label>
+                  <input 
+                     type="text" 
+                     value={globalValues[v] || ''}
+                     onChange={e => {
+                       const updated = {...globalValues, [v]: e.target.value};
+                       setGlobalValues(updated);
+                       localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
+                     }}
+                     className="w-36 bg-white dark:bg-black/50 border border-amber-300 dark:border-amber-700/50 rounded-md px-2 py-1 text-sm focus:border-amber-500 outline-none"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {variables.length === 0 && globalVariables.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 text-gray-500 dark:text-gray-400 border-2 border-dashed border-gray-300 dark:border-white/10 rounded-2xl">
               <p className="text-sm font-medium">No dynamic variables found in current sequence.</p>
               <p className="text-xs mt-2">Go to the Designer and set a parameter to #variable_name.</p>
+            </div>
+          ) : variables.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-32 text-gray-500 dark:text-gray-400 border-2 border-dashed border-gray-300 dark:border-white/10 rounded-2xl">
+              <p className="text-sm font-medium">No iterative variables in main sequence.</p>
+              <p className="text-xs mt-2">Only global prep/cleanup parameters are configured above.</p>
             </div>
           ) : (
             <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden shadow-sm dark:shadow-none">

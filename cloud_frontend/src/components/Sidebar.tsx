@@ -134,13 +134,6 @@ export default function Sidebar() {
 
           {isExpanded && edgeSeqExpanded && (
             <div className="mt-1 flex flex-col space-y-1">
-              {/* Offline Builder Fallback */}
-              <Link
-                href="/edge-sequence"
-                className={`flex items-center py-2 rounded-lg overflow-hidden mx-3 ml-8 transition-colors ${pathname === '/edge-sequence' ? 'bg-blue-500/20 text-blue-500' : 'hover-bg text-gray-500 dark:text-gray-400'}`}
-              >
-                <span className="ml-4 whitespace-nowrap font-medium text-xs">Offline Template</span>
-              </Link>
 
               {/* Connected Devices */}
               {devices.map(device => (

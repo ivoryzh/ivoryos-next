@@ -1,0 +1,13 @@
+[project]
+name = "ivoryos-next"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.2.3",
+    "sqlalchemy>=2.0.52",
+    "uvicorn>=0.52.4",
+    "websockets>=12.0",
+]

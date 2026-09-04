@@ -23,8 +23,8 @@ export default function CloudSettingsPage() {
     fetch(`${API_BASE}/api/cloud-settings`)
       .then(res => res.json())
       .then(data => {
-        if (data.cloudUrl) setCloudUrl(data.cloudUrl);
-        if (data.registrationKey) setRegistrationKey(data.registrationKey);
+        if (data.cloudUrl !== undefined) setCloudUrl(data.cloudUrl);
+        if (data.registrationKey !== undefined) setRegistrationKey(data.registrationKey);
       })
       .catch(err => {
         console.error("Failed to fetch cloud settings", err);

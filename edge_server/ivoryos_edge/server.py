@@ -17,7 +17,8 @@ from .introspection import inspect_device_module
 from .models import init_db
 from .queue import WorkflowQueueManager
 
-load_dotenv()
+ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+load_dotenv(ENV_PATH)
 
 app = FastAPI(title="IvoryOS Edge Server")
 queue_manager = WorkflowQueueManager(app)
@@ -52,8 +53,8 @@ def update_cloud_settings(req: CloudSettingsRequest):
     
     # Save to .env
     env_lines = []
-    if os.path.exists(".env"):
-        with open(".env", "r") as f:
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r") as f:
             env_lines = f.readlines()
             
     # Update or append
@@ -72,7 +73,7 @@ def update_cloud_settings(req: CloudSettingsRequest):
     if not reg_key_found:
         env_lines.append(f"REGISTRATION_KEY={REGISTRATION_KEY}\n")
         
-    with open(".env", "w") as f:
+    with open(ENV_PATH, "w") as f:
         f.writelines(env_lines)
         
     return {"status": "success"}

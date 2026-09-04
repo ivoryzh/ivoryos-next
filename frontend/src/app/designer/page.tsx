@@ -24,7 +24,7 @@ export default function DesignerPage() {
     currentIndex: -1,
     results: {}
   });
-  
+
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
@@ -41,7 +41,7 @@ export default function DesignerPage() {
     reader.onload = (event) => {
       try {
         const json = JSON.parse(event.target?.result as string);
-        
+
         // Auto-migrate legacy sequence format
         const migrateBlocks = (blocks: any[]): SequenceBlock[] => {
           return blocks.map(b => ({
@@ -81,7 +81,7 @@ export default function DesignerPage() {
         console.error("Failed to parse JSON file", error);
         alert("Failed to parse JSON file.");
       }
-      
+
       // Reset input
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -111,26 +111,26 @@ export default function DesignerPage() {
     const hasSleep = allBlocks.some(b => (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'Sleep');
     if (hasSleep) code += "import time\n";
     let instruments = Array.from(new Set(sequence.map(s => s.instrument))).filter(i => i !== 'Flow_Control' && i !== 'Flow Control');
-    
+
     // Generate real imports for the instances directly
     if (instruments.length > 0) {
-        // Group by module
-        const moduleGroups: Record<string, string[]> = {};
-        instruments.forEach(inst => {
-            const meta = instrumentMeta[inst];
-            const mod = meta ? meta.module : 'hardware';
-            if (!moduleGroups[mod]) moduleGroups[mod] = [];
-            moduleGroups[mod].push(inst);
-        });
-        
-        Object.entries(moduleGroups).forEach(([mod, insts]) => {
-            code += `from ${mod} import ${insts.join(', ')}\n`;
-        });
-        code += "\n";
+      // Group by module
+      const moduleGroups: Record<string, string[]> = {};
+      instruments.forEach(inst => {
+        const meta = instrumentMeta[inst];
+        const mod = meta ? meta.module : 'hardware';
+        if (!moduleGroups[mod]) moduleGroups[mod] = [];
+        moduleGroups[mod].push(inst);
+      });
+
+      Object.entries(moduleGroups).forEach(([mod, insts]) => {
+        code += `from ${mod} import ${insts.join(', ')}\n`;
+      });
+      code += "\n";
     }
-    
+
     code += "def run_workflow():\n";
-    
+
     if (sequence.length === 0) {
       code += "    pass\n";
     }
@@ -141,7 +141,7 @@ export default function DesignerPage() {
       blocks.forEach((block, idx) => {
         const pad = '    '.repeat(indent);
         const isFlow = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
-        
+
         if (isFlow) {
           if (block.method === 'If') {
             code += `${pad}if ${block.params.condition || 'True'}:\n`;
@@ -177,30 +177,30 @@ export default function DesignerPage() {
           }
           return;
         }
-        
+
         const formatValue = (v: any): string => {
-            if (typeof v === 'string' && !v.startsWith('#')) return `"${v}"`;
-            if (typeof v === 'object' && v !== null) {
-                // Return a valid python dict literal, preserving variable tokens if any exist
-                const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
-                return `{${dictEntries.join(', ')}}`;
-            }
-            return String(v);
+          if (typeof v === 'string' && !v.startsWith('#')) return `"${v}"`;
+          if (typeof v === 'object' && v !== null) {
+            // Return a valid python dict literal, preserving variable tokens if any exist
+            const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
+            return `{${dictEntries.join(', ')}}`;
+          }
+          return String(v);
         };
-        
+
         let params = Object.entries(block.params).map(([k, v]) => {
-           return `${k}=${formatValue(v)}`;
+          return `${k}=${formatValue(v)}`;
         }).join(', ');
-        
+
         let returnStr = block.returnVar ? `${block.returnVar} = ` : "";
         code += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;
       });
     };
-    
+
     genBlocks(prepSequence, "Prep");
     genBlocks(sequence, "Main");
     genBlocks(cleanupSequence, "Cleanup");
-    
+
     code += "\nif __name__ == '__main__':\n    run_workflow()\n";
     return code;
   };
@@ -210,31 +210,31 @@ export default function DesignerPage() {
     // Theme init
     const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
     ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            if (data.runs) {
-                const hasPending = data.runs.some((r: any) => r.status === 'pending');
-                const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
-                setHasPendingRuns(hasPending || hasActive);
-            }
-        } catch(e) {}
+      try {
+        const data = JSON.parse(event.data);
+        if (data.runs) {
+          const hasPending = data.runs.some((r: any) => r.status === 'pending');
+          const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
+          setHasPendingRuns(hasPending || hasActive);
+        }
+      } catch (e) { }
     };
-    
+
     fetch(`${API_BASE}/api/queue/runs`)
       .then(res => res.json())
       .then(data => {
         if (data.runs) {
-            const hasPending = data.runs.some((r: any) => r.status === 'pending');
-            const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
-            setHasPendingRuns(hasPending || hasActive);
+          const hasPending = data.runs.some((r: any) => r.status === 'pending');
+          const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
+          setHasPendingRuns(hasPending || hasActive);
         }
       });
-      
+
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme as 'light' | 'dark');
     if (savedTheme === 'dark') document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
-    
+
     // Load saved sequence if exists
     const savedSeq = localStorage.getItem('ivoryos_sequence');
     if (savedSeq) {
@@ -266,88 +266,88 @@ export default function DesignerPage() {
     }
 
     const processStatusData = async (data: any) => {
-        // Fetch workflows
-        try {
-            const wfRes = await fetch(`${API_BASE}/api/workflows`);
-            const wfData = await wfRes.json();
-            if (wfData.workflows && wfData.workflows.length > 0) {
+      // Fetch workflows
+      try {
+        const wfRes = await fetch(`${API_BASE}/api/workflows`);
+        const wfData = await wfRes.json();
+        if (wfData.workflows && wfData.workflows.length > 0) {
 
-                if (!data.instruments) data.instruments = {};
-                
-                // Inject Flow Control
-                data.instruments["Flow Control"] = {
-                    If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-                    While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-                    Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
-                };
+          if (!data.instruments) data.instruments = {};
 
-                data.instruments["Library Workflows"] = {};
-                
-                for (const wfObj of wfData.workflows) {
-                    const wfName = wfObj.name;
-                    const wfJsonRes = await fetch(`${API_BASE}/api/workflows/${wfName}`);
-                    const wfJson = await wfJsonRes.json();
-                    
-                    const dynamicParams: any = {};
-                    const scanBlocks = (blocks: any[]) => {
-                        blocks.forEach((b: any) => {
-                            if (b.args) {
-                                Object.entries(b.args).forEach(([k, val]) => {
-                                    if (typeof val === 'string' && val.startsWith('#')) {
-                                        const paramName = val.substring(1);
-                                        const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
-                                        dynamicParams[paramName] = { type: paramType, required: true };
-                                    }
-                                });
-                            }
-                        });
-                    };
-                    scanBlocks(wfJson.prep || []);
-                    scanBlocks(wfJson.script || []);
-                    scanBlocks(wfJson.cleanup || []);
-                    
-                    if (wfName === editingWf) {
-                        continue; // Prevent recursion by hiding current workflow
+          // Inject Flow Control
+          data.instruments["Flow Control"] = {
+            If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
+            While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
+            Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
+          };
+
+          data.instruments["Library Workflows"] = {};
+
+          for (const wfObj of wfData.workflows) {
+            const wfName = wfObj.name;
+            const wfJsonRes = await fetch(`${API_BASE}/api/workflows/${wfName}`);
+            const wfJson = await wfJsonRes.json();
+
+            const dynamicParams: any = {};
+            const scanBlocks = (blocks: any[]) => {
+              blocks.forEach((b: any) => {
+                if (b.args) {
+                  Object.entries(b.args).forEach(([k, val]) => {
+                    if (typeof val === 'string' && val.startsWith('#')) {
+                      const paramName = val.substring(1);
+                      const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
+                      dynamicParams[paramName] = { type: paramType, required: true };
                     }
-                    
-                    data.instruments["Library Workflows"][wfName] = {
-                        description: "Saved Workflow from Library",
-                        parameters: dynamicParams,
-                        return_type: "None"
-                    };
+                  });
                 }
-            }
-        } catch (e) {
-            console.error("Failed to load workflows for toolbox (might be offline)", e);
-        }
+              });
+            };
+            scanBlocks(wfJson.prep || []);
+            scanBlocks(wfJson.script || []);
+            scanBlocks(wfJson.cleanup || []);
 
-        setStatusData(data);
-        if (data.instrument_meta) setInstrumentMeta(data.instrument_meta);
-        
+            if (wfName === editingWf) {
+              continue; // Prevent recursion by hiding current workflow
+            }
+
+            data.instruments["Library Workflows"][wfName] = {
+              description: "Saved Workflow from Library",
+              parameters: dynamicParams,
+              return_type: "None"
+            };
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load workflows for toolbox (might be offline)", e);
+      }
+
+      setStatusData(data);
+      if (data.instrument_meta) setInstrumentMeta(data.instrument_meta);
+
     };
 
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
       .then(async data => {
-          localStorage.setItem('ivoryos_cached_schema', JSON.stringify(data));
-          await processStatusData(data);
+        localStorage.setItem('ivoryos_cached_schema', JSON.stringify(data));
+        await processStatusData(data);
       })
       .catch(err => {
-          console.error("Backend offline, loading cached schema...", err);
-          setIsOffline(true);
-          const cached = localStorage.getItem('ivoryos_cached_schema');
-          if (cached) {
-              try {
-                  const data = JSON.parse(cached);
-                  processStatusData(data);
-              } catch (e) {
-                  console.error("Failed to parse cached schema", e);
-                  setStatusData({ instruments: {} });
-              }
-          } else {
-              // No cached schema available
-              setStatusData({ instruments: {} });
+        console.error("Backend offline, loading cached schema...", err);
+        setIsOffline(true);
+        const cached = localStorage.getItem('ivoryos_cached_schema');
+        if (cached) {
+          try {
+            const data = JSON.parse(cached);
+            processStatusData(data);
+          } catch (e) {
+            console.error("Failed to parse cached schema", e);
+            setStatusData({ instruments: {} });
           }
+        } else {
+          // No cached schema available
+          setStatusData({ instruments: {} });
+        }
       });
   }, []);
 
@@ -356,7 +356,7 @@ export default function DesignerPage() {
     localStorage.setItem('ivoryos_sequence', JSON.stringify(sequence));
     localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
     localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
-    
+
     if (isInitialMount.current) {
       isInitialMount.current = false;
     } else {
@@ -375,49 +375,49 @@ export default function DesignerPage() {
 
   const clearCanvas = () => {
     if (confirm("Are you sure you want to clear the canvas? All blocks will be removed.")) {
-        setSequence([]);
-        setPrepSequence([]);
-        setCleanupSequence([]);
-        setCurrentWorkflowName("");
-        setCurrentWorkflowDescription("");
-        localStorage.removeItem('ivoryos_sequence');
-        localStorage.removeItem('ivoryos_prep_sequence');
-        localStorage.removeItem('ivoryos_cleanup_sequence');
-        localStorage.removeItem('ivoryos_editing_workflow');
-        localStorage.removeItem('ivoryos_editing_workflow_desc');
-        localStorage.removeItem('ivoryos_is_unsaved');
-        setIsUnsaved(false);
-        isInitialMount.current = true;
+      setSequence([]);
+      setPrepSequence([]);
+      setCleanupSequence([]);
+      setCurrentWorkflowName("");
+      setCurrentWorkflowDescription("");
+      localStorage.removeItem('ivoryos_sequence');
+      localStorage.removeItem('ivoryos_prep_sequence');
+      localStorage.removeItem('ivoryos_cleanup_sequence');
+      localStorage.removeItem('ivoryos_editing_workflow');
+      localStorage.removeItem('ivoryos_editing_workflow_desc');
+      localStorage.removeItem('ivoryos_is_unsaved');
+      setIsUnsaved(false);
+      isInitialMount.current = true;
     }
   };
 
   const saveWorkflow = async () => {
     let name = currentWorkflowName;
     if (!name) {
-        const inputName = prompt("Enter a name for this workflow:");
-        if (!inputName) return;
-        name = inputName;
+      const inputName = prompt("Enter a name for this workflow:");
+      if (!inputName) return;
+      name = inputName;
     }
 
     const formatBlocks = (blocks: SequenceBlock[]) => blocks.map((block, idx) => {
-        const argTypes: Record<string, string> = {};
-        if (block.schema && block.schema.parameters) {
-            for (const [key, paramObj] of Object.entries(block.schema.parameters)) {
-                argTypes[key] = (paramObj as any).type || "str";
-            }
+      const argTypes: Record<string, string> = {};
+      if (block.schema && block.schema.parameters) {
+        for (const [key, paramObj] of Object.entries(block.schema.parameters)) {
+          argTypes[key] = (paramObj as any).type || "str";
         }
-        
-        return {
-          id: idx + 1,
-          uuid: Math.floor(Math.random() * 1000000000), // Random int UUID
-          instrument: block.instrument,
-          action: block.method,
-          args: block.params,
-          arg_types: argTypes,
-          return: block.returnVar || "",
-          batch_action: false,
-          consolidate_batch_args: false
-        };
+      }
+
+      return {
+        id: idx + 1,
+        uuid: Math.floor(Math.random() * 1000000000), // Random int UUID
+        instrument: block.instrument,
+        action: block.method,
+        args: block.params,
+        arg_types: argTypes,
+        return: block.returnVar || "",
+        batch_action: false,
+        consolidate_batch_args: false
+      };
     });
 
     // Convert sequence to Legacy IvoryOS JSON
@@ -451,7 +451,7 @@ export default function DesignerPage() {
     }
   };
 
-  
+
   const validateSequence = () => {
     const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
     for (const block of allBlocks) {
@@ -460,7 +460,7 @@ export default function DesignerPage() {
           const val = block.params[key];
           // Allow dynamic variables (strings starting with #) to pass through here, they are checked in execution/optimizer
           if (typeof val === 'string' && val.startsWith('#')) continue;
-          
+
           if (val === undefined || val === '') {
             alert(`Missing parameter '${key}' in ${block.instrument}.${block.method}`);
             return false;
@@ -481,9 +481,9 @@ export default function DesignerPage() {
 
     try {
       const blockToPayload = (s: SequenceBlock) => ({
-          instrument: s.instrument,
-          method: s.method,
-          params: s.params
+        instrument: s.instrument,
+        method: s.method,
+        params: s.params
       });
 
       // 1. Submit Sequence to Edge Queue
@@ -501,11 +501,11 @@ export default function DesignerPage() {
         body: JSON.stringify(payload)
       });
       const data = await res.json();
-      
+
       if (res.ok) {
-         setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
+        setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
       } else {
-         throw new Error(data.error || 'Failed to add to queue');
+        throw new Error(data.error || 'Failed to add to queue');
       }
     } catch (e: any) {
       setExecutionState({
@@ -520,7 +520,7 @@ export default function DesignerPage() {
   if (!statusData) return <div className="p-8 text-gray-900 dark:text-white bg-gray-50 dark:bg-[#0a0a0a] min-h-screen">Loading designer...</div>;
 
   const instruments = statusData.instruments || {};
-            
+
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
@@ -565,15 +565,15 @@ export default function DesignerPage() {
                 />
               </div>
               <div className="flex items-center space-x-2">
-                <button 
+                <button
                   onClick={clearCanvas}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
                 >
                   <Trash2 className="w-4 h-4" />
                   <span className="hidden sm:inline">Clear</span>
                 </button>
-                
-                <button 
+
+                <button
                   onClick={saveWorkflow}
                   disabled={sequence.length === 0}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -588,7 +588,7 @@ export default function DesignerPage() {
                     <span className="hidden sm:inline">Manage</span>
                   </button>
                   <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-                    <button 
+                    <button
                       onClick={exportJSON}
                       disabled={sequence.length === 0}
                       className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
@@ -596,7 +596,7 @@ export default function DesignerPage() {
                       <Download className="w-4 h-4" />
                       <span>Export JSON</span>
                     </button>
-                    <button 
+                    <button
                       onClick={() => fileInputRef.current?.click()}
                       className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 flex items-center space-x-2 border-t border-gray-100 dark:border-white/5"
                     >
@@ -614,7 +614,7 @@ export default function DesignerPage() {
                   onChange={handleFileUpload}
                 />
 
-                <button 
+                <button
                   onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
@@ -623,43 +623,42 @@ export default function DesignerPage() {
                 </button>
                 {(() => {
                   const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
-                  const hasDynamicParams = allBlocks.some(block => 
+                  const hasDynamicParams = allBlocks.some(block =>
                     Object.values(block.params).some(val => typeof val === 'string' && val.startsWith('#'))
                   );
                   return (
                     <>
-                    <button 
-                      onClick={() => {
-                        if (!validateSequence()) return;
-                        if (hasPendingRuns) {
+                      <button
+                        onClick={() => {
+                          if (!validateSequence()) return;
+                          if (hasPendingRuns) {
                             if (!confirm("A task is already running. Add this sequence to the execution queue?")) {
-                                return;
+                              return;
                             }
-                        }
-                        if (hasDynamicParams) window.location.href = '/execution';
-                        else runSequence();
-                      }}
-                      disabled={sequence.length === 0}
-                      className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
-                        sequence.length === 0
-                          ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
-                          : hasDynamicParams
-                            ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50 shadow-sm'
-                            : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
-                      }`}
-                    >
-                      {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                      <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
-                    </button>
-                    {hasDynamicParams && sequence.some(s => s.returnVar) && (
-                      <a 
-                        href="/optimize"
-                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
+                          }
+                          if (hasDynamicParams) window.location.href = '/execution';
+                          else runSequence();
+                        }}
+                        disabled={sequence.length === 0}
+                        className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${sequence.length === 0
+                            ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
+                            : hasDynamicParams
+                              ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50 shadow-sm'
+                              : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
+                          }`}
                       >
-                        <Zap className="w-4 h-4" />
-                        <span>Optimize</span>
-                      </a>
-                    )}
+                        {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                        <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
+                      </button>
+                      {hasDynamicParams && sequence.some(s => s.returnVar) && (
+                        <a
+                          href="/optimize"
+                          className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
+                        >
+                          <Zap className="w-4 h-4" />
+                          <span>Optimize</span>
+                        </a>
+                      )}
                     </>
                   );
                 })()}
@@ -668,11 +667,11 @@ export default function DesignerPage() {
           }
           customView={
             viewMode === 'code' ? (
-                <div className="flex-1 min-w-0 overflow-auto p-8 bg-gray-900 text-gray-100 font-mono text-sm h-full flex flex-col">
-                    <pre className="p-6 rounded-xl bg-black/50 border border-white/10 shadow-inner overflow-x-auto max-w-full flex-shrink-0">
-                        <code>{generatePythonCode()}</code>
-                    </pre>
-                </div>
+              <div className="flex-1 min-w-0 overflow-auto p-8 bg-gray-900 text-gray-100 font-mono text-sm h-full flex flex-col">
+                <pre className="p-6 rounded-xl bg-black/50 border border-white/10 shadow-inner overflow-x-auto max-w-full flex-shrink-0">
+                  <code>{generatePythonCode()}</code>
+                </pre>
+              </div>
             ) : null
           }
         />

@@ -11,7 +11,8 @@ dependencies = [
     "python-dotenv",
     "aiohttp",
     "sqlalchemy",
-    "aiosqlite"
+    "aiosqlite",
+    "paho-mqtt"
 ]
 
 [build-system]

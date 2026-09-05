@@ -1,36 +1,18 @@
 {
     "name": "test",
     "description": "",
-    "prep": [
-        {
-            "id": 1,
-            "uuid": 739463303,
-            "instrument": "math_driver",
-            "action": "evaluate_function",
-            "args": {
-                "x": 1,
-                "y": 2
-            },
-            "arg_types": {
-                "x": "<class 'float'>",
-                "y": "<class 'float'>"
-            },
-            "return": "",
-            "batch_action": false,
-            "consolidate_batch_args": false
-        }
-    ],
+    "prep": [],
     "script": [
         {
             "id": 1,
-            "uuid": 261875495,
-            "instrument": "Flow_Control",
-            "action": "If",
+            "uuid": 929700471,
+            "instrument": "async_pump",
+            "action": "async_long_task",
             "args": {
-                "condition": "True"
+                "duration": "#test"
             },
             "arg_types": {
-                "condition": "str"
+                "duration": "<class 'int'>"
             },
             "return": "",
             "batch_action": false,
@@ -38,35 +20,9 @@
         },
         {
             "id": 2,
-            "uuid": 179937577,
-            "instrument": "Flow_Control",
-            "action": "Sleep",
-            "args": {
-                "duration_seconds": 10
-            },
-            "arg_types": {
-                "duration_seconds": "float"
-            },
-            "return": "",
-            "batch_action": false,
-            "consolidate_batch_args": false
-        },
-        {
-            "id": 3,
-            "uuid": 43385695,
-            "instrument": "Flow_Control",
-            "action": "Else",
-            "args": {},
-            "arg_types": {},
-            "return": "",
-            "batch_action": false,
-            "consolidate_batch_args": false
-        },
-        {
-            "id": 4,
-            "uuid": 126817504,
-            "instrument": "Flow_Control",
-            "action": "End_If",
+            "uuid": 327817497,
+            "instrument": "async_pump",
+            "action": "sync_to_async_thread_test",
             "args": {},
             "arg_types": {},
             "return": "",

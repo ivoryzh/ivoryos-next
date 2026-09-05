@@ -12,6 +12,9 @@ export default function CloudDesignerPage() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [currentWorkflowName, setCurrentWorkflowName] = useState<string>('');
+  
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [taskStatuses, setTaskStatuses] = useState<any[]>([]);
 
   useEffect(() => {
     const saved = localStorage.getItem('cloud_workflow');
@@ -97,6 +100,36 @@ export default function CloudDesignerPage() {
           setIsOffline(true);
       });
   }, []);
+
+  useEffect(() => {
+    if (!activeRunId) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/cloud-workflows/status');
+        const tasks = await res.json();
+        const currentRunTasks = tasks.filter((t: any) => t.runId === activeRunId);
+        setTaskStatuses(currentRunTasks);
+        
+        // Stop executing/polling if all tasks in the UI are completed or error
+        if (currentRunTasks.length > 0 && currentRunTasks.every((t: any) => t.status === 'completed' || t.status === 'error' || t.status === 'cancelled')) {
+           setActiveRunId(null);
+        }
+      } catch (e) {}
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [activeRunId]);
+
+  useEffect(() => {
+    setNodes(nds => nds.map(n => {
+      if (n.type === 'customCloudNode') {
+        const taskStatus = taskStatuses.find(t => t.nodeId === n.id);
+        if (taskStatus) {
+            return { ...n, data: { ...n.data, taskStatus } };
+        }
+      }
+      return n;
+    }));
+  }, [taskStatuses, setNodes]);
 
   const clearCanvas = () => {
     if (confirm("Are you sure you want to clear the cloud canvas?")) {
@@ -188,6 +221,7 @@ export default function CloudDesignerPage() {
       const data = await res.json();
       
       if (res.ok) {
+         setActiveRunId(data.runId);
          alert(`Distributed workflow started with ID: ${data.runId}`);
       } else {
          throw new Error(data.error || 'Failed to dispatch workflow');
@@ -264,11 +298,11 @@ export default function CloudDesignerPage() {
                 
                 <button 
                   onClick={runDistributedWorkflow}
-                  disabled={nodes.length === 0 || isExecuting}
+                  disabled={nodes.length === 0}
                   className="btn-primary flex items-center space-x-2 px-6 py-2 rounded font-bold"
                 >
-                  {isExecuting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                  <span>{isExecuting ? 'Dispatching...' : 'Run Distributed'}</span>
+                  {activeRunId ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  <span>{activeRunId ? 'Running...' : 'Run Distributed'}</span>
                 </button>
               </div>
             </header>

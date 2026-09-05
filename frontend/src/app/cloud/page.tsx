@@ -7,8 +7,7 @@ import Sidebar from '@/components/Sidebar';
 
 export default function CloudSettingsPage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const [cloudUrl, setCloudUrl] = useState('http://localhost:3000');
-  const [registrationKey, setRegistrationKey] = useState('edge-default-01');
+  const [token, setToken] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState('');
@@ -23,8 +22,7 @@ export default function CloudSettingsPage() {
     fetch(`${API_BASE}/api/cloud-settings`)
       .then(res => res.json())
       .then(data => {
-        if (data.cloudUrl !== undefined) setCloudUrl(data.cloudUrl);
-        if (data.registrationKey !== undefined) setRegistrationKey(data.registrationKey);
+        if (data.token !== undefined) setToken(data.token);
       })
       .catch(err => {
         console.error("Failed to fetch cloud settings", err);
@@ -49,7 +47,7 @@ export default function CloudSettingsPage() {
       const res = await fetch(`${API_BASE}/api/cloud-settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cloudUrl, registrationKey })
+        body: JSON.stringify({ token })
       });
       
       if (res.ok) {
@@ -75,11 +73,11 @@ export default function CloudSettingsPage() {
       const res = await fetch(`${API_BASE}/api/cloud-settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cloudUrl: "", registrationKey })
+        body: JSON.stringify({ token: "" })
       });
       
       if (res.ok) {
-        setCloudUrl("");
+        setToken("");
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 3000);
       } else {
@@ -122,33 +120,17 @@ export default function CloudSettingsPage() {
             <div className="space-y-6">
               <div>
                 <label className="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-300">
-                  Cloud Orchestrator URL
+                  Connection Token
                 </label>
-                <input 
-                  type="text" 
-                  value={cloudUrl}
-                  onChange={e => setCloudUrl(e.target.value)}
-                  placeholder="https://cloud.ivoryos.com"
-                  className="w-full px-4 py-2 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
+                <textarea 
+                  value={token}
+                  onChange={e => setToken(e.target.value)}
+                  placeholder="Paste your Base64 Connection Token here..."
+                  rows={6}
+                  className="w-full px-4 py-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm font-mono"
                 />
                 <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  The base URL of your organization's IvoryOS Cloud instance (e.g. <code>http://localhost:3000</code>).
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-300">
-                  Device Registration Key
-                </label>
-                <input 
-                  type="text" 
-                  value={registrationKey}
-                  onChange={e => setRegistrationKey(e.target.value)}
-                  placeholder="edge-device-unique-id"
-                  className="w-full px-4 py-2 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
-                />
-                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  A unique identifier and secret token for this edge device to authenticate with the cloud.
+                  This secure token configures your edge device's connection to the Cloud message broker. It supports both local MQTT testing and AWS IoT Core.
                 </p>
               </div>
             </div>
@@ -165,7 +147,7 @@ export default function CloudSettingsPage() {
               <div className="flex items-center space-x-3">
                 <button 
                   onClick={disconnectCloud}
-                  disabled={isSaving || !cloudUrl}
+                  disabled={isSaving || !token}
                   className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors disabled:opacity-50"
                 >
                   <span>Disconnect</span>

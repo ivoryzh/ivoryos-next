@@ -280,10 +280,28 @@ class WorkflowQueueManager:
                         step.start_time = datetime.utcnow()
                         
                         run = await session.get(WorkflowRun, run_id)
-                        run.status = "running"
                         
-                        await session.commit()
-                        await self.broadcast_updates(run_id)
+                        # Only emit 'running' status once per run when the first step starts
+                        if run.status != "running":
+                            run.status = "running"
+                            await session.commit()
+                            await self.broadcast_updates(run_id)
+                            try:
+                                if run.parameters and run.parameters.get("cloud_run_id"):
+                                    from ivoryos_edge.server import global_broker
+                                    if global_broker:
+                                        payload = {
+                                            "runId": run.parameters["cloud_run_id"],
+                                            "nodeId": run.parameters["cloud_node_id"],
+                                            "status": "running"
+                                        }
+                                        # Use topic prefix from broker context, but default to ivoryos/edge
+                                        global_broker.publish(f"ivoryos/edge/{global_broker.client_id}/status", payload)
+                            except Exception as e:
+                                print(f"Failed to emit cloud running status: {e}")
+                        else:
+                            await session.commit()
+                            await self.broadcast_updates(run_id)
                         
                         try:
                             if step.instrument in ("Flow_Control", "Flow Control"):
@@ -578,16 +596,17 @@ class WorkflowQueueManager:
                     
                     try:
                         if run.parameters and run.parameters.get("cloud_run_id"):
-                            import httpx
-                            from ivoryos_edge.server import CLOUD_URL
-                            async with httpx.AsyncClient() as client:
-                                await client.post(f"{CLOUD_URL}/api/edge/complete", json={
+                            from ivoryos_edge.server import global_broker
+                            if global_broker:
+                                payload = {
                                     "runId": run.parameters["cloud_run_id"],
                                     "nodeId": run.parameters["cloud_node_id"],
                                     "status": run.status
-                                })
+                                }
+                                global_broker.publish(f"ivoryos/edge/{global_broker.client_id}/status", payload)
+                                print(f"Published cloud status for {run.parameters['cloud_node_id']}: {run.status}")
                     except Exception as e:
-                        print(f"Failed to emit cloud completion: {e}")
+                        print(f"Failed to emit cloud completion status: {e}")
                     
                     if not self.cancelled:
                         await self.pause_event.wait()

@@ -19,7 +19,7 @@ interface CloudWorkflowEditorProps {
 }
 
 const CustomCloudNode = ({ data, id }: any) => {
-  const { block, updateNodeData, statusData, cloudDevices, targetDeviceId } = data;
+  const { block, updateNodeData, statusData, cloudDevices, targetDeviceId, taskStatus } = data;
   const isMissing = !statusData?.instruments?.[block.instrument] || !statusData?.instruments?.[block.instrument]?.[block.method];
 
   const handleParamChange = (paramKey: string, val: any) => {
@@ -40,8 +40,14 @@ const CustomCloudNode = ({ data, id }: any) => {
   const allParams = Object.keys(block.schema?.parameters || {});
 
   let borderClass = 'border-blue-500';
-  if (!targetDeviceId) borderClass = 'border-orange-500';
-  else if (isMissing) borderClass = 'border-red-500';
+  if (taskStatus) {
+      if (taskStatus.status === 'running') borderClass = 'border-yellow-400 shadow-[0_0_15px_rgba(250,204,21,0.6)]';
+      else if (taskStatus.status === 'completed') borderClass = 'border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.6)]';
+      else if (taskStatus.status === 'error') borderClass = 'border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.6)]';
+  } else {
+      if (!targetDeviceId) borderClass = 'border-orange-500';
+      else if (isMissing) borderClass = 'border-red-500';
+  }
 
   const isStartNode = block.instrument === 'Flow Control' && block.method === 'Start';
   const hasBottomSection = !isStartNode && (allParams.length > 0 || (block.schema?.return_type && block.schema.return_type !== 'None' && block.schema.return_type !== 'NoneType'));

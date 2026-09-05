@@ -4,6 +4,8 @@ import inspect
 import sys
 import uuid
 import httpx
+import base64
+import json
 from typing import Dict, Any
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -31,25 +33,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CLOUD_URL = os.getenv("CLOUD_URL", "http://localhost:3000")
-REGISTRATION_KEY = os.getenv("REGISTRATION_KEY", "edge-default-01")
+CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
+global_broker = None
 
 class CloudSettingsRequest(BaseModel):
-    cloudUrl: str
-    registrationKey: str
+    token: str
 
 @app.get("/api/cloud-settings")
 def get_cloud_settings():
     return {
-        "cloudUrl": CLOUD_URL,
-        "registrationKey": REGISTRATION_KEY
+        "token": CLOUD_TOKEN,
     }
 
 @app.post("/api/cloud-settings")
-def update_cloud_settings(req: CloudSettingsRequest):
-    global CLOUD_URL, REGISTRATION_KEY
-    CLOUD_URL = req.cloudUrl
-    REGISTRATION_KEY = req.registrationKey
+async def update_cloud_settings(req: CloudSettingsRequest):
+    global CLOUD_TOKEN
+    CLOUD_TOKEN = req.token
     
     # Save to .env
     env_lines = []
@@ -57,26 +56,112 @@ def update_cloud_settings(req: CloudSettingsRequest):
         with open(ENV_PATH, "r") as f:
             env_lines = f.readlines()
             
-    # Update or append
-    cloud_url_found = False
-    reg_key_found = False
+    token_found = False
     for i, line in enumerate(env_lines):
-        if line.startswith("CLOUD_URL="):
-            env_lines[i] = f"CLOUD_URL={CLOUD_URL}\n"
-            cloud_url_found = True
-        elif line.startswith("REGISTRATION_KEY="):
-            env_lines[i] = f"REGISTRATION_KEY={REGISTRATION_KEY}\n"
-            reg_key_found = True
+        if line.startswith("CLOUD_TOKEN="):
+            env_lines[i] = f"CLOUD_TOKEN={CLOUD_TOKEN}\n"
+            token_found = True
             
-    if not cloud_url_found:
-        env_lines.append(f"CLOUD_URL={CLOUD_URL}\n")
-    if not reg_key_found:
-        env_lines.append(f"REGISTRATION_KEY={REGISTRATION_KEY}\n")
+    if not token_found:
+        env_lines.append(f"CLOUD_TOKEN={CLOUD_TOKEN}\n")
         
     with open(ENV_PATH, "w") as f:
         f.writelines(env_lines)
         
+    # Apply token immediately
+    asyncio.create_task(setup_broker())
+        
     return {"status": "success"}
+
+from .broker import LocalMQTTBroker, AWSIoTBroker
+
+async def handle_broker_message(topic: str, payload: dict):
+    print(f"Received cloud task from topic {topic}: {payload}")
+    block = payload.get("block")
+    runId = payload.get("runId")
+    nodeId = payload.get("nodeId")
+    if block and runId and nodeId:
+        expanded_blocks = expand_workflow_blocks([block], WORKFLOWS_DIR, "main")
+        await queue_manager.submit_sequence(
+            f"Cloud Node {nodeId} ({runId})", 
+            expanded_blocks, 
+            {"cloud_run_id": runId, "cloud_node_id": nodeId}
+        )
+
+async def heartbeat_loop(broker, topic_prefix, client_id):
+    while True:
+        try:
+            current_instruments = dict(getattr(app.state, "instrument_schemas", {}))
+            schema = {
+                "instruments": current_instruments,
+                "instrument_meta": getattr(app.state, "instrument_meta", {})
+            }
+            payload = {
+                "deviceId": client_id,
+                "schema": schema,
+                "status": "online"
+            }
+            broker.publish(f"{topic_prefix}/{client_id}/heartbeat", payload)
+        except Exception as e:
+            print(f"Error publishing heartbeat: {e}")
+        await asyncio.sleep(5)
+
+async def setup_broker():
+    global global_broker
+    if global_broker:
+        global_broker.disconnect()
+        global_broker = None
+        
+    if not CLOUD_TOKEN:
+        return
+        
+    try:
+        # Standardize token decoding: support raw JSON fallback if user didn't base64 encode
+        try:
+            token_data = json.loads(base64.b64decode(CLOUD_TOKEN).decode('utf-8'))
+        except:
+            token_data = json.loads(CLOUD_TOKEN)
+            
+        protocol = token_data.get("protocol")
+        endpoint = token_data.get("endpoint", "")
+        if ":" in endpoint:
+            endpoint = endpoint.split(":")[0]
+        if endpoint == "localhost":
+            endpoint = "127.0.0.1"
+        port = token_data.get("port", 1883 if protocol == "mqtt" else 8883)
+        client_id = token_data.get("client_id", str(uuid.uuid4()))
+        topic_prefix = token_data.get("topic_prefix", "ivoryos/edge")
+        
+        if protocol == "mqtt":
+            global_broker = LocalMQTTBroker(client_id, endpoint, port)
+        elif protocol == "aws_iot":
+            certs = token_data.get("certs", {})
+            cert_dir = os.path.join(os.path.dirname(__file__), ".certs")
+            os.makedirs(cert_dir, exist_ok=True)
+            
+            ca_cert_path = os.path.join(cert_dir, "root-CA.crt")
+            cert_path = os.path.join(cert_dir, "device.cert.pem")
+            key_path = os.path.join(cert_dir, "device.private.key")
+            
+            with open(ca_cert_path, "w") as f:
+                f.write(certs.get("root_ca", ""))
+            with open(cert_path, "w") as f:
+                f.write(certs.get("cert_pem", ""))
+            with open(key_path, "w") as f:
+                f.write(certs.get("private_key", ""))
+                
+            global_broker = AWSIoTBroker(client_id, endpoint, ca_cert_path, cert_path, key_path)
+            
+        if global_broker:
+            global_broker.set_callback(handle_broker_message)
+            global_broker.connect()
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/execute")
+            
+            # Start publishing heartbeats
+            asyncio.create_task(heartbeat_loop(global_broker, topic_prefix, client_id))
+            
+    except Exception as e:
+        print(f"Failed to setup broker from token: {e}")
 
 class ExecuteRequest(BaseModel):
     module: str
@@ -116,91 +201,19 @@ async def startup_event():
             json.dump({
                 "instruments": app.state.instrument_schemas,
                 "instrument_meta": app.state.instrument_meta
-            }, f, indent=2)
+            }, f, indent=2, default=str)
         print("Dumped introspected schema to ivoryos_schema.json for local version control.")
     except Exception as e:
         print(f"Failed to dump ivoryos_schema.json: {e}")
         
-    # Start Cloud Polling Task
-    async def poll_cloud():
-        print(f"Starting cloud polling to {CLOUD_URL}...")
-        while True:
-            try:
-                if not CLOUD_URL:
-                    await asyncio.sleep(2)
-                    continue
-
-                library_workflows = {}
-                try:
-                    import json
-                    if os.path.exists(WORKFLOWS_DIR):
-                        for f in os.listdir(WORKFLOWS_DIR):
-                            if f.endswith(".json"):
-                                with open(os.path.join(WORKFLOWS_DIR, f), 'r') as fp:
-                                    data = json.load(fp)
-                                    wf_name = f.replace(".json", "")
-                                    dynamic_params = {}
-                                    
-                                    def scan_blocks(blocks):
-                                        for b in blocks:
-                                            for k, val in b.get("args", {}).items():
-                                                if isinstance(val, str) and val.startswith('#'):
-                                                    param_name = val[1:]
-                                                    param_type = b.get("arg_types", {}).get(k, "str")
-                                                    dynamic_params[param_name] = {"type": param_type, "required": True}
-                                                    
-                                    scan_blocks(data.get("prep", []))
-                                    scan_blocks(data.get("script", []))
-                                    scan_blocks(data.get("cleanup", []))
-                                    
-                                    library_workflows[wf_name] = {
-                                        "description": data.get("description", "Saved Workflow"),
-                                        "parameters": dynamic_params,
-                                        "return_type": "None"
-                                    }
-                except Exception as e:
-                    pass
-
-                current_instruments = dict(app.state.instrument_schemas)
-                if library_workflows:
-                    current_instruments["Library Workflows"] = library_workflows
-
-                schema = {
-                    "instruments": current_instruments,
-                    "instrument_meta": app.state.instrument_meta
-                }
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(f"{CLOUD_URL}/api/edge/heartbeat", json={
-                        "deviceId": REGISTRATION_KEY,
-                        "schema": schema
-                    })
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        tasks = data.get("tasks", [])
-                        for t in tasks:
-                            print(f"Received cloud task: {t}")
-                            block = t.get("block")
-                            runId = t.get("runId")
-                            nodeId = t.get("nodeId")
-                            if block and runId and nodeId:
-                                expanded_blocks = expand_workflow_blocks([block], WORKFLOWS_DIR, "main")
-                                await queue_manager.submit_sequence(
-                                    f"Cloud Node {nodeId} ({runId})", 
-                                    expanded_blocks, 
-                                    {"cloud_run_id": runId, "cloud_node_id": nodeId}
-                                )
-            except Exception as e:
-                # Silently catch network errors during polling
-                pass
-            await asyncio.sleep(2)
-            
-    asyncio.create_task(poll_cloud())
+    # Setup Message Broker
+    await setup_broker()
 
 @app.get("/api/status")
 def get_status():
     return {
         "status": "running", 
-        "cloud_connected": bool(CLOUD_URL),
+        "cloud_connected": bool(CLOUD_TOKEN and global_broker),
         "instruments": getattr(app.state, "instrument_schemas", {}),
         "instrument_meta": getattr(app.state, "instrument_meta", {}),
         "active_tasks": list(active_tasks.keys()),

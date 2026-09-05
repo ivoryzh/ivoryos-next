@@ -12,6 +12,7 @@
     "@hello-pangea/dnd": "^18.0.1",
     "@xyflow/react": "^12.11.6",
     "lucide-react": "^1.39.0",
+    "mqtt": "^5.15.2",
     "next": "^16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

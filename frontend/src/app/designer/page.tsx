@@ -452,8 +452,36 @@ export default function DesignerPage() {
   };
 
 
+  // Finds a '#' used as a dynamic parameter with no variable name after it (e.g. '#' instead of '#temperature'),
+  // searching nested object parameters too.
+  const findEmptyHashName = (blocks: SequenceBlock[]): string | null => {
+    const scan = (obj: any): string | null => {
+      if (!obj) return null;
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === 'string' && v.trim() === '#') return k;
+        if (typeof v === 'object' && v !== null) {
+          const nested = scan(v);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    };
+    for (const block of blocks) {
+      const badKey = scan(block.params);
+      if (badKey) return `${block.instrument}.${block.method} → ${badKey}`;
+    }
+    return null;
+  };
+
   const validateSequence = () => {
     const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+
+    const emptyHashLocation = findEmptyHashName(allBlocks);
+    if (emptyHashLocation) {
+      alert(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`);
+      return false;
+    }
+
     for (const block of allBlocks) {
       if (block.schema?.parameters) {
         for (const [key, param] of Object.entries(block.schema.parameters)) {
@@ -473,7 +501,7 @@ export default function DesignerPage() {
 
   const runSequence = async () => {
     if (!validateSequence()) return;
-    if (sequence.length === 0) return;
+    if (prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0) return;
 
 
 
@@ -538,8 +566,8 @@ export default function DesignerPage() {
           cleanupSequence={cleanupSequence}
           setCleanupSequence={setCleanupSequence}
           header={
-            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-              <div className="flex flex-col flex-1 mr-4">
+            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-50 relative">
+              <div className="flex flex-col justify-center flex-1 mr-4 space-y-1">
                 <div className="flex items-center space-x-3">
                   <input
                     type="text"
@@ -555,6 +583,23 @@ export default function DesignerPage() {
                       <span>Offline Mode</span>
                     </span>
                   )}
+                  <div className="flex items-center space-x-1.5 pl-2 border-l border-gray-200 dark:border-white/10">
+                    <button
+                      onClick={saveWorkflow}
+                      disabled={sequence.length === 0}
+                      title="Save"
+                      className="flex items-center justify-center p-1.5 rounded transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={clearCanvas}
+                      title="Clear"
+                      className="flex items-center justify-center p-1.5 rounded transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
                 <input
                   type="text"
@@ -565,22 +610,6 @@ export default function DesignerPage() {
                 />
               </div>
               <div className="flex items-center space-x-2">
-                <button
-                  onClick={clearCanvas}
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  <span className="hidden sm:inline">Clear</span>
-                </button>
-
-                <button
-                  onClick={saveWorkflow}
-                  disabled={sequence.length === 0}
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Save className="w-4 h-4" />
-                  <span className="hidden sm:inline">Save</span>
-                </button>
 
                 <div className="relative group">
                   <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
@@ -619,18 +648,24 @@ export default function DesignerPage() {
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
                   {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
-                  <span className="hidden sm:inline">{viewMode === 'canvas' ? 'View Python' : 'Back'}</span>
+                  <span className="hidden sm:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
                 </button>
                 {(() => {
                   const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
                   const hasDynamicParams = allBlocks.some(block =>
                     Object.values(block.params).some(val => typeof val === 'string' && val.startsWith('#'))
                   );
+                  const hasNoSteps = prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0;
                   return (
                     <>
                       <button
                         onClick={() => {
                           if (!validateSequence()) return;
+                          if (sequence.length === 0 && (prepSequence.length > 0 || cleanupSequence.length > 0)) {
+                            if (!confirm("There are no steps in the Main Workflow — only Prep and Cleanup will run. Continue?")) {
+                              return;
+                            }
+                          }
                           if (hasPendingRuns) {
                             if (!confirm("A task is already running. Add this sequence to the execution queue?")) {
                               return;
@@ -639,8 +674,8 @@ export default function DesignerPage() {
                           if (hasDynamicParams) window.location.href = '/execution';
                           else runSequence();
                         }}
-                        disabled={sequence.length === 0}
-                        className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${sequence.length === 0
+                        disabled={hasNoSteps}
+                        className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
                             ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                             : hasDynamicParams
                               ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50 shadow-sm'

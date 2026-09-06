@@ -2,7 +2,7 @@
 import { API_BASE } from '@/config';
 
 import { useEffect, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Blocks, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu, Cloud } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu, Cloud } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 
@@ -82,7 +82,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
       <nav className="flex-1 space-y-2 text-sm font-medium text-gray-600 dark:text-gray-400 overflow-y-auto w-full">
         {navItem('/', 'Dashboard', <LayoutDashboard className="w-5 h-5 shrink-0" />)}
         {navItem('/library', 'Library', <Library className="w-5 h-5 shrink-0" />)}
-        {navItem('/designer', 'Designer', <Blocks className="w-5 h-5 shrink-0" />)}
+        {navItem('/designer', 'Designer', <Workflow className="w-5 h-5 shrink-0" />)}
         {navItem('/execution', 'Configure', <Settings2 className="w-5 h-5 shrink-0" />)}
         {navItem('/optimize', 'Optimize', <Zap className="w-5 h-5 shrink-0" />)}
         {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}

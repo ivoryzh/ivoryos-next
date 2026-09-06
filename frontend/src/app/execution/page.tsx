@@ -2,7 +2,7 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical } from 'lucide-react';
+import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical, AlertTriangle } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import Sidebar from '@/components/Sidebar';
 
@@ -27,6 +27,7 @@ export default function ExecutionPage() {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
 
   const [varOptions, setVarOptions] = useState<Record<string, any[]>>({});
+  const [hasEmptyHashVar, setHasEmptyHashVar] = useState(false);
 
   useEffect(() => {
     // Theme init
@@ -75,18 +76,23 @@ export default function ExecutionPage() {
         const gVars = new Set<string>();
         const vTypes: Record<string, string> = {};
         const vOptions: Record<string, any[]> = {};
-        
+        let sawEmptyHash = false;
+
         const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>) => {
             if (!obj) return;
             Object.entries(obj).forEach(([k, v]) => {
                 let pData = null;
                 if (schemaObj?.parameters?.[k]) pData = schemaObj.parameters[k];
                 else if (schemaObj?.fields?.[k]) pData = schemaObj.fields[k];
-                
+
                 if (typeof v === 'string' && v.startsWith('#')) {
-                    const varName = v.substring(1);
+                    const varName = v.substring(1).trim();
+                    if (varName === '') {
+                        sawEmptyHash = true;
+                        return;
+                    }
                     targetSet.add(varName);
-                    
+
                     if (pData?.type) vTypes[varName] = pData.type;
                     if (pData?.options) vOptions[varName] = pData.options;
                 } else if (typeof v === 'object' && v !== null) {
@@ -94,11 +100,11 @@ export default function ExecutionPage() {
                 }
             });
         };
-        
+
         parsedSeq.forEach((block: any) => {
             extractVars(block.params, block.schema, vars);
         });
-        
+
         const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
         const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
         let pSeq = [];
@@ -107,9 +113,11 @@ export default function ExecutionPage() {
         if (savedCleanup) cSeq = JSON.parse(savedCleanup);
         setPrepSequence(pSeq);
         setCleanupSequence(cSeq);
-        
+
         pSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
         cSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
+
+        setHasEmptyHashVar(sawEmptyHash);
 
         const varList = Array.from(vars);
         const gVarList = Array.from(gVars);
@@ -315,7 +323,10 @@ export default function ExecutionPage() {
                     else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
                     
                     if (typeof val === 'string' && val.startsWith('#')) {
-                        const varName = val.substring(1);
+                        const varName = val.substring(1).trim();
+                        if (varName === '') {
+                            throw new Error(`A parameter uses '#' with no variable name — fix it in the Designer before running.`);
+                        }
                         let subVal: any = rowData[varName];
                         if (subVal === undefined || subVal === null || subVal === '') {
                             throw new Error(`Missing value for variable '${varName}' in row ${r + 1}`);
@@ -372,7 +383,10 @@ export default function ExecutionPage() {
                   else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
                   
                   if (typeof val === 'string' && val.startsWith('#')) {
-                      const varName = val.substring(1);
+                      const varName = val.substring(1).trim();
+                      if (varName === '') {
+                          throw new Error(`A parameter uses '#' with no variable name — fix it in the Designer before running.`);
+                      }
                       let subVal: any = globalValues[varName];
                       if (subVal === undefined || subVal === null || subVal === '') {
                           throw new Error(`Missing global value for variable '${varName}'`);
@@ -496,6 +510,16 @@ export default function ExecutionPage() {
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto pb-48">
+          {hasEmptyHashVar && (
+            <div className="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700/30 rounded-lg px-4 py-3 flex items-start gap-3 text-sm text-red-700 dark:text-red-300">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                One or more parameters use <code className="px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/40 font-mono text-xs">#</code> with
+                no variable name after it, so they're excluded here and will fail if run. Go back to the Designer and give each one a name
+                (e.g. <code className="px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/40 font-mono text-xs">#temperature</code>).
+              </span>
+            </div>
+          )}
           {globalVariables.length > 0 && (
             <div className="mb-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/30 rounded-lg px-4 py-3 flex items-center gap-4 flex-wrap">
               <span className="text-xs font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider whitespace-nowrap shrink-0">Prep / Cleanup Config</span>

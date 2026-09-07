@@ -8,7 +8,15 @@ def extract_type_info(annotation, default=inspect.Parameter.empty):
     fields = {}
 
     if annotation != inspect.Parameter.empty:
-        param_type = str(annotation).replace("typing.", "")
+        # For a plain class (float, int, a dataclass, ...) str(annotation) is Python's repr,
+        # "<class 'float'>" — noise that isn't used anywhere (cast_value/cast_arguments always
+        # re-introspect the real annotation object, never this string), so use the clean name
+        # directly. typing constructs (List[str], Optional[int], ...) aren't classes and keep
+        # falling through to str(annotation) as before.
+        if isinstance(annotation, type):
+            param_type = annotation.__name__
+        else:
+            param_type = str(annotation).replace("typing.", "")
         
         # Check for Enum
         import enum

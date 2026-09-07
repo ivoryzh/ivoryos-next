@@ -1,4 +1,6 @@
 import asyncio
+import re
+import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import traceback
@@ -7,6 +9,40 @@ import inspect
 from sqlalchemy import update, select
 from sqlalchemy.orm import selectinload
 from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
+
+def substitute_workflow_vars(obj, context: Dict[str, Any]):
+    """Recursively resolve '#varname' parameter values against the live run's workflow_context.
+
+    Values produced by a 'User_Input' step (or any step's return var) only exist once that
+    step has actually run, so an unresolved reference raises rather than sending a literal
+    '#varname' string to a real instrument.
+    """
+    if isinstance(obj, str) and obj.startswith("#"):
+        var_name = obj[1:].strip()
+        if var_name == "":
+            return obj
+        if var_name not in context:
+            raise Exception(f"Variable '#{var_name}' is not available yet — no earlier step has set it.")
+        return context[var_name]
+    if isinstance(obj, dict):
+        return {k: substitute_workflow_vars(v, context) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [substitute_workflow_vars(v, context) for v in obj]
+    return obj
+
+
+def interpolate_message(text: str, context: Dict[str, Any]) -> str:
+    """Replaces every '#varname' found inside free text (a Comment message or a User_Input
+    prompt) with that variable's current value — a lightweight f-string using the same '#name'
+    syntax as every other dynamic reference in the app. Unlike substitute_workflow_vars, this
+    matches substrings within a larger message, and leaves an unresolved '#name' as literal text
+    rather than raising, since a stray '#' in prose shouldn't take down the whole message.
+    """
+    def replace(match: "re.Match[str]") -> str:
+        var_name = match.group(1)
+        return str(context[var_name]) if var_name in context else match.group(0)
+    return re.sub(r"#(\w+)", replace, text)
+
 
 class WorkflowQueueManager:
     def __init__(self, app):
@@ -21,10 +57,19 @@ class WorkflowQueueManager:
         self.current_task: Optional[asyncio.Task] = None
         self.current_step_task: Optional[asyncio.Future] = None
         self._runner_lock: Optional[asyncio.Lock] = None
-        
+
         # WebSocket tracking: run_id -> list of WebSockets
         self.active_connections: Dict[int, List[Any]] = {}
         self.global_connections: List[Any] = []
+
+        # Human-in-the-loop "User_Input" step support: run_id -> pending Event/value
+        self.pending_input_event: Dict[int, asyncio.Event] = {}
+        self.pending_input_value: Dict[int, Any] = {}
+
+        # The live optimizer instance for the active Optimization run, if any, so its
+        # get_plots()/append_existing_data() can be reached from outside the execution loop.
+        self.active_optimizer: Optional[Any] = None
+        self.active_optimizer_run_id: Optional[int] = None
 
     async def init_asyncio(self):
         if self.pause_event is None:
@@ -145,7 +190,16 @@ class WorkflowQueueManager:
         self.cancelled = True
         if self.current_step_task and not self.current_step_task.done():
             self.current_step_task.cancel()
+        for event in self.pending_input_event.values():
+            event.set() # Wake up any step waiting on human input so it observes the cancellation
         self.resume() # Make sure it wakes up to cancel
+
+    def submit_input(self, run_id: int, value: Any):
+        """Provide the value a running 'User_Input' step is waiting on."""
+        self.pending_input_value[run_id] = value
+        event = self.pending_input_event.get(run_id)
+        if event:
+            event.set()
     async def subscribe(self, run_id: int, websocket: Any):
         if run_id not in self.active_connections:
             self.active_connections[run_id] = []
@@ -317,7 +371,53 @@ class WorkflowQueueManager:
                                     await self.broadcast_updates(run_id)
                                     index += 1
                                     continue
-                                    
+
+                                elif method == "Comment":
+                                    message = interpolate_message(str(args.get("message", "")), workflow_context)
+                                    print(f"[Run {run_id}] {message}")
+                                    step.status = "completed"
+                                    step.outputs = {"message": message}
+                                    step.end_time = datetime.utcnow()
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+                                    index += 1
+                                    continue
+
+                                elif method == "User_Input":
+                                    var_name = (args.get("variable_name") or "").strip()
+                                    if not var_name:
+                                        raise Exception("User Input step is missing a variable name")
+                                    prompt = interpolate_message(str(args.get("prompt", "Input required")), workflow_context)
+
+                                    step.status = "waiting_input"
+                                    step.outputs = {"prompt": prompt}
+                                    run.status = "waiting_input"
+                                    event = asyncio.Event()
+                                    self.pending_input_event[run_id] = event
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+
+                                    await event.wait()
+                                    self.pending_input_event.pop(run_id, None)
+                                    value = self.pending_input_value.pop(run_id, None)
+
+                                    if self.cancelled:
+                                        step.status = "error"
+                                        step.error = "Cancelled while waiting for input"
+                                        step.end_time = datetime.utcnow()
+                                        await session.commit()
+                                        break
+
+                                    workflow_context[var_name] = value
+                                    step.status = "completed"
+                                    step.outputs = {"result": value}
+                                    step.end_time = datetime.utcnow()
+                                    run.status = "running"
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+                                    index += 1
+                                    continue
+
                                 elif method == "If":
                                     condition = args.get("condition", "False")
                                     try:
@@ -479,8 +579,8 @@ class WorkflowQueueManager:
                                 raise Exception(f"Method {step.method} not found on {step.instrument}")
                                 
                             method = getattr(instance, step.method)
-                            args = step.parameters or {}
-                            
+                            args = substitute_workflow_vars(step.parameters or {}, workflow_context)
+
                             from ivoryos_edge.introspection import cast_arguments
                             args = cast_arguments(method, args)
                             
@@ -631,27 +731,41 @@ class WorkflowQueueManager:
 
     async def _execute_optimization_run(self, run_id: int, session, parameters: dict):
         """Executes an optimization loop run, generating steps dynamically."""
+        import os
         from ivoryos_edge.optimizer.registry import OPTIMIZER_REGISTRY
         import inspect
-        
+
         opt_name = parameters.get("optimizer", "ax")
         budget = parameters.get("budget", 5)
         param_space = parameters.get("parameter_space", [])
         obj_config = parameters.get("objective_config", [])
+        opt_config = parameters.get("optimizer_config", {})
+        parameter_constraints = parameters.get("parameter_constraints")
+        additional_params = parameters.get("additional_params")
         error_recovery = parameters.get("error_recovery", "stop")
         seq_template = parameters.get("sequence_template", [])
-        
+        early_stop = parameters.get("early_stop")
+
         OptClass = OPTIMIZER_REGISTRY.get(opt_name)
         if not OptClass:
             raise Exception(f"Optimizer {opt_name} not found")
-            
+
+        optimizer_data_dir = os.path.join(os.path.dirname(__file__), "optimizer_data")
+        os.makedirs(optimizer_data_dir, exist_ok=True)
+
         optimizer = OptClass(
             experiment_name=f"OptRun_{run_id}",
             parameter_space=param_space,
             objective_config=obj_config,
-            optimizer_config={}
+            optimizer_config=opt_config,
+            parameter_constraints=parameter_constraints,
+            datapath=optimizer_data_dir,
+            additional_params=additional_params
         )
-        
+        self.active_optimizer = optimizer
+        self.active_optimizer_run_id = run_id
+
+
         run = await session.get(WorkflowRun, run_id)
         run.status = "running"
         await session.commit()
@@ -721,6 +835,7 @@ class WorkflowQueueManager:
                     await self.broadcast_updates(run_id)
                 except Exception as e:
                     db_step.status = "error"
+                    db_step.error = str(e) + "\n" + traceback.format_exc()
                     db_step.end_time = datetime.utcnow()
                     run.status = "error"
                     await session.commit()
@@ -800,13 +915,16 @@ class WorkflowQueueManager:
                         raise Exception(f"Instrument {db_step.instrument} not found")
                     instance = instruments[db_step.instrument]
                     method = getattr(instance, db_step.method)
-                    
+
+                    from ivoryos_edge.introspection import cast_arguments
+                    casted_args = cast_arguments(method, db_step.parameters or {})
+
                     if inspect.iscoroutinefunction(method):
-                        self.current_step_task = asyncio.create_task(method(**(db_step.parameters or {})))
+                        self.current_step_task = asyncio.create_task(method(**casted_args))
                     else:
                         loop = asyncio.get_running_loop()
-                        self.current_step_task = loop.run_in_executor(None, lambda: method(**(db_step.parameters or {})))
-                        
+                        self.current_step_task = loop.run_in_executor(None, lambda: method(**casted_args))
+
                     result = await self.current_step_task
                     self.current_step_task = None
                         
@@ -900,10 +1018,46 @@ class WorkflowQueueManager:
             else:
                 try:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, lambda: optimizer.observe(objective_values))
+                    # Every optimizer's observe() takes a list of per-trial results (it mirrors
+                    # suggest(n)'s batch shape) — this loop always suggests one trial at a time,
+                    # so wrap the single result dict rather than passing it bare.
+                    await loop.run_in_executor(None, lambda: optimizer.observe([objective_values]))
                 except Exception as e:
                     print(f"Optimizer observe error: {e}")
-                    
+
+                # Early stop: each objective can carry its own target threshold (direction is
+                # derived from that objective's own minimize/maximize goal). With multiple
+                # criteria defined, "mode" decides whether ANY one of them or ALL of them must
+                # be met this iteration to end the budget loop early. Ending early still finishes
+                # the run as "completed", not "error".
+                if early_stop and early_stop.get("criteria"):
+                    mode = early_stop.get("mode", "any")
+                    reached_flags = []
+                    for criterion in early_stop["criteria"]:
+                        metric = criterion.get("metric")
+                        threshold = criterion.get("threshold")
+                        if metric not in objective_values or threshold is None:
+                            continue
+                        value = objective_values[metric]
+                        minimize = next((o.get("minimize") for o in obj_config if o.get("name") == metric), False)
+                        reached_flags.append((value <= threshold) if minimize else (value >= threshold))
+                    if reached_flags:
+                        stop = all(reached_flags) if mode == "all" else any(reached_flags)
+                        if stop:
+                            print(f"Early stop ({mode}): criteria met after {iteration + 1} iteration(s)")
+                            break
+
+        # 2. Execute Cleanup Phase — runs once after the budget loop, mirroring Prep. This was
+        # previously never executed at all for Optimization runs even though the Optimize page
+        # already lets you configure one. Skipped on cancellation: execute_template_block bails
+        # out immediately once self.cancelled is set, so cleanup can't run through a cancel yet —
+        # that would need its own bypass, left for later if it turns out to matter.
+        cleanup_template = parameters.get("cleanup_template", [])
+        if cleanup_template and not self.cancelled:
+            success, _ = await execute_template_block(cleanup_template)
+            if not success:
+                run.status = "error"
+
         # Finish run
         run = await session.get(WorkflowRun, run_id)
         if self.cancelled:

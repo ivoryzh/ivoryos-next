@@ -17,7 +17,7 @@ class AxOptimizer(OptimizerBase):
                 "Install it with `pip install ax-platform`."
             ) from e
         super().__init__(experiment_name, parameter_space, objective_config, optimizer_config, parameter_constraints,
-                         additional_params)
+                         datapath, additional_params)
 
         self.client = Client()
         # 2. Configure where Ax will search.
@@ -52,24 +52,25 @@ class AxOptimizer(OptimizerBase):
         from ax import RangeParameterConfig, ChoiceParameterConfig
         ax_params = []
         for p in parameter_space:
+            value_type = p.get("value_type", "float")
             if p["type"] == "range":
                 # if step is used here, convert to ChoiceParameterConfig
                 if  len(p["bounds"]) == 3:
-                    values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=p["value_type"])
+                    values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=value_type)
                     ax_params.append(ChoiceParameterConfig(name=p["name"], values=values, parameter_type="float", is_ordered=True))
                 else:
                     ax_params.append(
                         RangeParameterConfig(
                             name=p["name"],
                             bounds=tuple(p["bounds"]),
-                            parameter_type=p["value_type"]
+                            parameter_type=value_type
                         ))
             elif p["type"] == "choice":
                 ax_params.append(
                     ChoiceParameterConfig(
                         name=p["name"],
                         values=p["bounds"],
-                        parameter_type=p["value_type"],
+                        parameter_type=value_type,
                     )
                 )
         return ax_params
@@ -115,7 +116,11 @@ class AxOptimizer(OptimizerBase):
             if not num_trials == 0:
                 steps.append(GenerationStep(generator=generators.get(generator), num_trials=num_trials, should_deduplicate=True))
 
-        return GenerationStrategy(steps=steps)
+        import inspect
+        if "steps" not in inspect.signature(GenerationStrategy.__init__).parameters:
+            return GenerationStrategy(nodes=steps)
+        else:
+            return GenerationStrategy(steps=steps)
 
     def suggest(self, n=1):
         trials = self.client.get_next_trials(n)
@@ -141,7 +146,91 @@ class AxOptimizer(OptimizerBase):
                 )
 
     def get_plots(self, plot_type):
-        return None
+        try:
+            from ax.plot.contour import interact_contour_plotly
+            from ax.plot.slice import interact_slice_plotly
+            from ax.plot.trace import optimization_trace_single_method_plotly
+            from ax.plot.render import plot_config_to_html
+            import numpy as np
+            
+            plots = {}
+            errors = []
+            if hasattr(self, 'generators'):
+                try:
+                    from ax.plot.feature_importances import plot_feature_importance_by_feature_plotly
+                    
+                    # We need the model adapter from the current generation step to extract feature importance
+                    gs = self.client._generation_strategy
+                    adapter = gs.adapter if hasattr(gs, 'adapter') else gs.model
+                    
+                    if adapter is not None:
+                        fig = plot_feature_importance_by_feature_plotly(model=adapter, relative=True)
+                        plots['Feature Importance'] = fig.to_html(full_html=False, include_plotlyjs=False)
+                except Exception as e:
+                    errors.append(f"Feature Importance Error: {e}")
+
+                try:
+                    adapter = None
+                    if hasattr(self.client, "_generation_strategy"):
+                        gs = self.client._generation_strategy
+                        if hasattr(gs, "adapter"):
+                            adapter = gs.adapter
+                        elif hasattr(gs, "model"):
+                            adapter = gs.model
+
+                    metric_name = self.objective_config[0]["name"] if self.objective_config else None
+                    if metric_name:
+                        fig = interact_contour_plotly(model=adapter, metric_name=metric_name)
+                        plots['Contour'] = fig.to_html(full_html=False, include_plotlyjs=False)
+                except Exception as e:
+                    errors.append(f"Contour Error: {e}")
+
+                try:
+                    fig = interact_slice_plotly(model=adapter)
+                    plots['Slice'] = fig.to_html(full_html=False, include_plotlyjs=False)
+                except Exception as e:
+                    errors.append(f"Slice Error: {e}")
+
+            if len(self.objective_config) > 1:
+                try:
+                    from ax.plot.pareto_utils import compute_posterior_pareto_frontier
+                    from ax.plot.pareto_frontier import plot_pareto_frontier
+                    
+                    experiment = self.client._experiment
+                    metric_names = [o['name'] for o in self.objective_config]
+                    
+                    # Check if experiment has enough data and metrics
+                    if len(metric_names) >= 2 and all(m in experiment.metrics for m in metric_names[:2]):
+                        m1 = experiment.metrics[metric_names[0]]
+                        m2 = experiment.metrics[metric_names[1]]
+                        
+                        frontier = compute_posterior_pareto_frontier(
+                            experiment=experiment,
+                            data=experiment.fetch_data(),
+                            primary_objective=m1,
+                            secondary_objective=m2,
+                            absolute_metrics=metric_names,
+                            num_points=30,
+                        )
+                        fig = plot_pareto_frontier(frontier, CI_level=0.90)
+                        plots['Pareto Frontier'] = plot_config_to_html(fig)
+                except Exception as e:
+                    errors.append(f"Pareto Error: {e}")
+
+            if not plots:
+                try:
+                    trial_count = len(self.client.experiment.trials)
+                except:
+                    trial_count = 0
+                    
+                if trial_count < 5:
+                    return {"error": "Not enough data points yet. Ax requires a few initial random trials to build the surrogate model."}
+                else:
+                    return {"error": f"Failed to generate plots. Errors encountered: {' | '.join(errors)}"}
+            return plots
+            
+        except Exception as e:
+            return {"error": f"Critical error in get_plots: {str(e)}"}
 
     @staticmethod
     def get_schema():

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Layers, BookOpen, Box, Search } from 'lucide-react';
+import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Search, Hash } from 'lucide-react';
 
 export type SequenceBlock = {
   id: string;
@@ -41,6 +41,65 @@ export default function WorkflowEditor({
   const [expandedToolbox, setExpandedToolbox] = useState<Record<string, boolean>>({});
   const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [emptyHashFields, setEmptyHashFields] = useState<Set<string>>(new Set());
+  const [autoFillVariables, setAutoFillVariables] = useState(false);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('ivoryos_autofill_variables');
+    if (saved !== null) setAutoFillVariables(saved === 'true');
+  }, []);
+
+  const toggleAutoFillVariables = () => {
+    setAutoFillVariables(prev => {
+      const next = !prev;
+      localStorage.setItem('ivoryos_autofill_variables', String(next));
+      return next;
+    });
+  };
+
+  // Builds a new block's initial params. In auto-fill mode, every leaf parameter (recursing into
+  // nested object params) defaults to '#paramName' instead of its schema default, so a block dragged
+  // in for optimization is immediately wired up as a variable — just delete the '#' on any param
+  // that should stay fixed.
+  const buildDefaultParams = (schemaParams: any, useVariables: boolean): Record<string, any> => {
+    const result: Record<string, any> = {};
+    if (!schemaParams) return result;
+    Object.entries(schemaParams).forEach(([key, param]: [string, any]) => {
+      if (param?.is_object && param?.fields) {
+        result[key] = buildDefaultParams(param.fields, useVariables);
+      } else if (useVariables) {
+        result[key] = `#${key}`;
+      } else if (param?.default !== undefined) {
+        result[key] = param.default;
+      }
+    });
+    return result;
+  };
+
+  const hashFieldKey = (listId: string, blockId: string, paramKey: string) => `${listId}::${blockId}::${paramKey}`;
+
+  // Only flag a bare '#' with no variable name once the user leaves the field —
+  // flagging on every keystroke would warn mid-typing, before they've had a chance to name it.
+  const handleHashBlur = (listId: string, blockId: string, paramKey: string, value: string) => {
+    const key = hashFieldKey(listId, blockId, paramKey);
+    setEmptyHashFields(prev => {
+      const isEmpty = value.trim() === '#';
+      if (isEmpty === prev.has(key)) return prev;
+      const next = new Set(prev);
+      if (isEmpty) next.add(key); else next.delete(key);
+      return next;
+    });
+  };
+
+  const clearHashWarning = (listId: string, blockId: string, paramKey: string) => {
+    const key = hashFieldKey(listId, blockId, paramKey);
+    setEmptyHashFields(prev => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  };
 
   const expandAll = () => {
     const expandList = (list: SequenceBlock[]) => list.map(b => ({ ...b, isExpanded: true }));
@@ -91,14 +150,8 @@ export default function WorkflowEditor({
       const [instrument, method] = result.draggableId.split('::');
       const methodSchema = statusData.instruments[instrument][method];
       
-      const defaultParams: Record<string, any> = {};
-      if (methodSchema.parameters) {
-        Object.entries(methodSchema.parameters).forEach(([key, param]: [string, any]) => {
-            if (param.default !== undefined) {
-                defaultParams[key] = param.default;
-            }
-        });
-      }
+      const isFlowControlBlock = instrument === "Flow Control" || instrument === "Flow_Control";
+      const defaultParams = buildDefaultParams(methodSchema.parameters, autoFillVariables && !isFlowControlBlock);
 
       const destList = Array.from(getSequenceList(destId));
       
@@ -289,29 +342,77 @@ export default function WorkflowEditor({
                   const isMissing = !isFlowBlock && (!statusData.instruments[block.instrument] || !statusData.instruments[block.instrument][block.method]);
                   let borderClass = blockDepth > 0 ? `border-gray-200 dark:border-white/10 border-l-4 ${nestColor}` : 'border-gray-200 dark:border-white/10';
                   
-                  const allParams = Object.keys(block.schema?.parameters || {});
-                  const visibleParams = isFlowBlock 
-                    ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds')
+                  let effectiveSchema = block.schema?.parameters || (statusData.instruments[block.instrument] && statusData.instruments[block.instrument][block.method]?.parameters);
+                  
+                  const blockWarnings: string[] = [];
+                  if (isMissing) {
+                      blockWarnings.push(`Method '${block.instrument}.${block.method}' no longer exists.`);
+                  }
+
+                  // Check for deprecated parameters if schema is known
+                  if (effectiveSchema && block.params && !isMissing) {
+                      for (const p of Object.keys(block.params)) {
+                          if (effectiveSchema[p] === undefined && typeof block.params[p] !== 'undefined') {
+                              blockWarnings.push(`Parameter '${p}' is no longer supported.`);
+                          }
+                      }
+                  }
+
+                  if (!effectiveSchema && block.params && Object.keys(block.params).length > 0) {
+                      effectiveSchema = {};
+                      for (const key of Object.keys(block.params)) {
+                          effectiveSchema[key] = { type: "unknown", required: false };
+                      }
+                  } else if (!effectiveSchema) {
+                      effectiveSchema = {};
+                  }
+
+                  const allParams = Object.keys(effectiveSchema);
+                  const visibleParams = isFlowBlock
+                    ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds' && p !== 'prompt' && p !== 'variable_name' && p !== 'message')
                     : allParams;
                   const hasParams = visibleParams.length > 0;
                   
-                  const hasMissingRequiredArg = (() => {
-                      let missing = false;
-                      const paramsSchema = block.schema?.parameters || {};
-                      for (const p of Object.keys(paramsSchema)) {
-                          const pData = paramsSchema[p];
-                          if (pData?.required) {
-                              const val = block.params[p];
+                  const checkRequiredParams = (schemaObj: any, prefix: string = '') => {
+                      for (const p of Object.keys(schemaObj)) {
+                          const pData = schemaObj[p];
+                          const fullKey = prefix ? `${prefix}.${p}` : p;
+
+                          if (pData?.is_object && pData?.fields) {
+                              // If object is not required and no params for it exist at all, we can skip enforcing its inner fields.
+                              // But if it is required or partially filled, we enforce.
+                              const objVal = fullKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, block.params);
+                              if (pData.required || (objVal !== undefined && Object.keys(objVal).length > 0)) {
+                                  checkRequiredParams(pData.fields, fullKey);
+                              }
+                              continue;
+                          }
+
+                          const val = fullKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, block.params);
+                          const isDynamicRef = typeof val === 'string' && val.startsWith('#');
+
+                          if (pData?.required && !isDynamicRef) {
                               if ((val === undefined || val === '') && (pData.default === undefined || pData.default === '')) {
-                                  missing = true;
-                                  break;
+                                  blockWarnings.push(`Missing required parameter: '${fullKey}'`);
+                                  continue;
                               }
                           }
-                      }
-                      return missing;
-                  })();
 
-                  if (isMissing) borderClass = `border-red-400 dark:border-red-500/50 shadow-[0_0_0_1px_rgba(248,113,113,0.5)] ${blockDepth > 0 ? 'border-l-4' : ''}`;
+                          // A param typed int/float has to be a '#variable' or an actual number —
+                          // anything else would only fail once the run tries to cast it, so flag
+                          // it here instead of letting that happen mid-run.
+                          const typeStr = (pData?.type || '').toLowerCase();
+                          const isNumericType = typeStr.includes('int') || typeStr.includes('float');
+                          if (isNumericType && !isDynamicRef && val !== undefined && val !== '' && isNaN(Number(val))) {
+                              blockWarnings.push(`Parameter '${fullKey}' expects a number (or '#variable'), got '${val}'`);
+                          }
+                      }
+                  };
+                  checkRequiredParams(effectiveSchema);
+
+                  if (blockWarnings.length > 0) {
+                      borderClass = `border-amber-400 dark:border-amber-500/50 shadow-[0_0_0_1px_rgba(251,191,36,0.5)] ${blockDepth > 0 ? 'border-l-4 ' + nestColor : ''}`;
+                  }
                   let flowBgClass = 'bg-stone-50/60 dark:bg-stone-900/20';
                   let flowTextClass = 'text-stone-700 dark:text-stone-300 font-bold';
                   let flowInputClass = 'bg-stone-500/10 dark:bg-stone-900/40 border-stone-200 dark:border-stone-800/50 focus:border-stone-400 dark:focus:border-stone-500 text-stone-900 dark:text-stone-100 placeholder-stone-300 dark:placeholder-stone-600/50';
@@ -326,9 +427,17 @@ export default function WorkflowEditor({
                           flowTextClass = 'text-amber-700 dark:text-amber-300 font-bold';
                           flowInputClass = 'bg-amber-500/10 dark:bg-amber-900/40 border-amber-200 dark:border-amber-800/50 focus:border-amber-400 dark:focus:border-amber-500 text-amber-900 dark:text-amber-100 placeholder-amber-300 dark:placeholder-amber-600/50';
                       } else if (block.method === 'Sleep') {
-                          flowBgClass = 'bg-rose-50/70 dark:bg-rose-900/20';
-                          flowTextClass = 'text-rose-700 dark:text-rose-300 font-bold';
-                          flowInputClass = 'bg-rose-500/10 dark:bg-rose-900/40 border-rose-200 dark:border-rose-800/50 focus:border-rose-400 dark:focus:border-rose-500 text-rose-900 dark:text-rose-100 placeholder-rose-300 dark:placeholder-rose-600/50';
+                          flowBgClass = 'bg-violet-50/70 dark:bg-violet-900/20';
+                          flowTextClass = 'text-violet-700 dark:text-violet-300 font-bold';
+                          flowInputClass = 'bg-violet-500/10 dark:bg-violet-900/40 border-violet-200 dark:border-violet-800/50 focus:border-violet-400 dark:focus:border-violet-500 text-violet-900 dark:text-violet-100 placeholder-violet-300 dark:placeholder-violet-600/50';
+                      } else if (block.method === 'User_Input') {
+                          flowBgClass = 'bg-pink-50/70 dark:bg-pink-900/20';
+                          flowTextClass = 'text-pink-700 dark:text-pink-300 font-bold';
+                          flowInputClass = 'bg-pink-500/10 dark:bg-pink-900/40 border-pink-200 dark:border-pink-800/50 focus:border-pink-400 dark:focus:border-pink-500 text-pink-900 dark:text-pink-100 placeholder-pink-300 dark:placeholder-pink-600/50';
+                      } else if (block.method === 'Comment') {
+                          flowBgClass = 'bg-slate-50/70 dark:bg-slate-800/20';
+                          flowTextClass = 'text-slate-600 dark:text-slate-400 font-bold';
+                          flowInputClass = 'bg-slate-500/10 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700/50 focus:border-slate-400 dark:focus:border-slate-500 text-slate-900 dark:text-slate-100 placeholder-slate-300 dark:placeholder-slate-600/50';
                       }
                   }
 
@@ -361,21 +470,16 @@ export default function WorkflowEditor({
                                     className={`px-3 py-1.5 flex items-center justify-between cursor-grab active:cursor-grabbing ${!isFlowBlock && hasParams ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
                                   >
                                     <div className="flex items-center min-w-0 flex-1">
-                                      {!isFlowBlock && hasParams && (
-                                        <button className="mr-2 p-0.5 rounded-md text-gray-400 hover:text-gray-800 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10 transition-colors pointer-events-none">
-                                          {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                                        </button>
-                                      )}
                                       <div className={`flex items-center space-x-2 ${!isFlowBlock && !hasParams ? 'ml-1' : ''}`}>
                                         {!isFlowBlock && (
                                           <span title={block.instrument.replace(/_/g, ' ')} className="w-28 shrink-0 truncate text-center text-[10px] font-semibold px-2 py-0.5 bg-gray-100 text-gray-600 border border-gray-200 dark:bg-white/10 dark:text-gray-300 dark:border-white/5 rounded-md capitalize">
                                             {block.instrument.replace(/_/g, ' ')}
                                           </span>
                                         )}
-                                        <span className={`text-[13px] tracking-tight capitalize ${isFlowBlock ? flowTextClass : isMissing ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-800 dark:text-gray-100 font-medium'}`}>
+                                        <span className={`text-[13px] tracking-tight capitalize ${isFlowBlock ? flowTextClass : 'text-gray-800 dark:text-gray-100 font-medium'}`}>
                                           {block.method.replace(/_/g, ' ')}
-                                          {hasMissingRequiredArg && (
-                                            <span title="Missing required parameter" className="inline-flex items-center ml-1.5">
+                                          {blockWarnings.length > 0 && (
+                                            <span title={blockWarnings.join('\n')} className="inline-flex items-center ml-1.5 cursor-help">
                                               <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
                                             </span>
                                           )}
@@ -386,15 +490,26 @@ export default function WorkflowEditor({
                                               const pData = block.schema!.parameters[paramKey];
                                               const val = block.params[paramKey];
                                               const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
+                                              const hashInvalid = emptyHashFields.has(hashFieldKey(listId, block.id, paramKey));
                                               return (
                                                 <div key={paramKey} className="relative flex items-center">
                                                   <input
                                                     type="text"
                                                     value={actualVal}
                                                     placeholder={paramKey.replace(/_/g, ' ')}
-                                                    onChange={(e) => handleParamChange(block.id, paramKey, e.target.value, pData.type || '', listId)}
+                                                    title={hashInvalid ? "Add a variable name after '#'" : undefined}
+                                                    onChange={(e) => {
+                                                      handleParamChange(block.id, paramKey, e.target.value, pData.type || '', listId);
+                                                      clearHashWarning(listId, block.id, paramKey);
+                                                    }}
+                                                    onBlur={(e) => {
+                                                      if (e.target.value === '' && pData.default !== undefined) {
+                                                        handleParamChange(block.id, paramKey, String(pData.default), pData.type || '', listId);
+                                                      }
+                                                      handleHashBlur(listId, block.id, paramKey, e.target.value);
+                                                    }}
                                                     onClick={(e) => e.stopPropagation()}
-                                                    className={`w-32 border ${flowInputClass} rounded px-2 py-1 text-xs focus:outline-none`}
+                                                    className={`${(paramKey === 'prompt' || paramKey === 'message') ? 'w-56' : 'w-32'} border rounded px-2 py-1 text-xs focus:outline-none ${hashInvalid ? 'border-red-400 dark:border-red-500 focus:border-red-500' : flowInputClass}`}
                                                   />
                                                 </div>
                                               )
@@ -411,6 +526,7 @@ export default function WorkflowEditor({
                                         const isNone = returnType === 'None' || returnType === 'NoneType';
                                         const isTuple = returnType.toLowerCase().startsWith('tuple[');
                                         const isObject = returnInfo?.is_object;
+                                        const hasLegacyReturn = Boolean(block.returnVar);
 
                                         let numReturns = 1;
                                         let returnLabels: string[] = [];
@@ -423,9 +539,12 @@ export default function WorkflowEditor({
                                         } else if (isObject && returnInfo.fields) {
                                           returnLabels = Object.keys(returnInfo.fields);
                                           numReturns = returnLabels.length;
+                                        } else if (hasLegacyReturn && isNone) {
+                                          numReturns = Math.max(1, (block.returnVar || '').split(',').length);
                                         }
 
-                                        if (isFlowBlock || isNone || listId === 'prep' || listId === 'cleanup') return null;
+                                        if (isFlowBlock || listId === 'prep' || listId === 'cleanup') return null;
+                                        if (isNone && !hasLegacyReturn) return null;
                                         return (
                                           <div className="flex items-center space-x-2 mr-2">
                                             <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">Save</span>
@@ -441,6 +560,7 @@ export default function WorkflowEditor({
                                                       type="text"
                                                       value={parts[i] || ''}
                                                       placeholder={`var_${i+1}`}
+                                                      onClick={(e) => e.stopPropagation()}
                                                       onChange={(e) => {
                                                         const newParts = [...parts];
                                                         while(newParts.length < numReturns) newParts.push('');
@@ -471,7 +591,14 @@ export default function WorkflowEditor({
 
                                   {/* Bottom Row: Params */}
                                   {isExpanded && !isFlowBlock && (
-                                    <div className="px-3 pb-2 pt-0">
+                                    <div className="px-3 pb-2 pt-0 flex flex-col space-y-2">
+                                      {blockWarnings.length > 0 && (
+                                        <div className="bg-amber-50/50 dark:bg-amber-900/10 border border-amber-200/50 dark:border-amber-500/20 rounded text-amber-700 dark:text-amber-400 text-[10px] px-2 py-1.5 font-medium">
+                                            <ul className="list-disc pl-4 space-y-0.5">
+                                                {blockWarnings.map((w, idx) => <li key={idx}>{w}</li>)}
+                                            </ul>
+                                        </div>
+                                      )}
                                       {(() => {
                                         if (!hasParams) return null;
                                         return (
@@ -482,7 +609,7 @@ export default function WorkflowEditor({
                                                     return (
                                                         <div key={paramKey} className="flex flex-col space-y-1 shrink-0 p-2 border border-gray-200 dark:border-white/10 rounded-lg bg-white dark:bg-[#1a1a1a]">
                                                             <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider px-1">{paramName}</span>
-                                                            <div className="flex flex-wrap gap-x-2 gap-y-1.5 pl-1 border-l-2 border-gray-300 dark:border-white/20">
+                                                            <div className="flex flex-wrap gap-x-2 gap-y-1.5">
                                                                 {Object.keys(pData.fields).map(subKey => 
                                                                     renderParam(pData.fields[subKey], `${paramKey}.${subKey}`, subKey, bId, lId, paramsObj)
                                                                 )}
@@ -494,9 +621,10 @@ export default function WorkflowEditor({
                                                 const displayType = (pData.type || '').replace(/<class '([^']+)'>/, '$1').replace('typing.', '');
                                                 const val = paramKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, paramsObj);
                                                 const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
-                                                
+                                                const hashInvalid = emptyHashFields.has(hashFieldKey(lId, bId, paramKey));
+
                                                 return (
-                                                    <div key={paramKey} className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1">
+                                                    <div key={paramKey} className={`flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border rounded-md px-2 py-1 ${hashInvalid ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}>
                                                       <label className="text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-center whitespace-nowrap">
                                                         <span>{paramName.replace(/_/g, ' ')}</span>
                                                         {pData.required && <span className="text-red-500/80 leading-none ml-0.5">*</span>}
@@ -506,9 +634,23 @@ export default function WorkflowEditor({
                                                         list={pData.options ? `datalist-${bId}-${paramKey}` : undefined}
                                                         value={actualVal}
                                                         placeholder={pData.default !== undefined ? `Default: ${pData.default}` : displayType}
-                                                        onChange={(e) => handleParamChange(bId, paramKey, e.target.value, pData.type || '', lId)}
+                                                        onChange={(e) => {
+                                                          handleParamChange(bId, paramKey, e.target.value, pData.type || '', lId);
+                                                          clearHashWarning(lId, bId, paramKey);
+                                                        }}
+                                                        onBlur={(e) => {
+                                                          if (e.target.value === '' && pData.default !== undefined) {
+                                                            handleParamChange(bId, paramKey, String(pData.default), pData.type || '', lId);
+                                                          }
+                                                          handleHashBlur(lId, bId, paramKey, e.target.value);
+                                                        }}
                                                         className={`w-28 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700`}
                                                       />
+                                                      {hashInvalid && (
+                                                        <span title="Add a variable name after '#'" className="cursor-help shrink-0">
+                                                          <AlertTriangle className="w-3 h-3 text-red-500" />
+                                                        </span>
+                                                      )}
                                                       {pData.options && (
                                                         <datalist id={`datalist-${bId}-${paramKey}`}>
                                                           {pData.options.map((opt: any) => (
@@ -520,7 +662,7 @@ export default function WorkflowEditor({
                                                 );
                                             };
 
-                                            const pData = (block.schema?.parameters as any)?.[param] || {};
+                                            const pData = (effectiveSchema as any)?.[param] || {};
                                             return renderParam(pData, param, param, block.id, listId, block.params);
                                           })}
                                         </div>
@@ -548,9 +690,9 @@ export default function WorkflowEditor({
         
         {/* Left Sidebar (Toolbox) */}
         <div className="w-72 bg-white dark:bg-[#1a1a1a] flex flex-col border-r border-gray-200 dark:border-white/10 shrink-0 z-10">
-          <div className="h-16 px-4 flex flex-col justify-center border-b border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/10 shrink-0">
-             <div className="relative">
-                <input 
+          <div className="h-16 px-4 flex items-center gap-2 border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/10 shrink-0">
+             <div className="relative flex-1">
+                <input
                   type="text"
                   placeholder="Search modules..."
                   value={searchQuery}
@@ -559,9 +701,19 @@ export default function WorkflowEditor({
                 />
                 <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
              </div>
+             <button
+                onClick={toggleAutoFillVariables}
+                title={autoFillVariables ? "Auto-fill is ON — new blocks default every param to #paramName, for Optimization. Click to turn off." : "Auto-fill is OFF. Click to make new blocks default every param to #paramName, for Optimization."}
+                className={`shrink-0 flex items-center gap-1 pl-1.5 pr-2 py-2 rounded-lg border text-[11px] font-bold transition-colors ${autoFillVariables
+                  ? 'bg-purple-50 border-purple-200 text-purple-600 dark:bg-purple-500/10 dark:border-purple-500/30 dark:text-purple-400'
+                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-600 dark:bg-white/5 dark:border-white/10 dark:hover:text-gray-300'}`}
+             >
+                <Hash className="w-3.5 h-3.5" />
+                <span>Auto</span>
+             </button>
           </div>
-          
-          <div className="flex-1 overflow-y-auto p-4 space-y-1">
+
+          <div className="flex-1 overflow-y-auto p-3 space-y-0.5">
             <Droppable 
               droppableId="toolbox" 
               isDropDisabled={true}
@@ -580,7 +732,7 @@ export default function WorkflowEditor({
                        if (bIsLib) return -1;
                        return a.localeCompare(b);
                     })
-                    .map((instrument, instIdx) => {
+                    .map((instrument) => {
                     const matchesInst = instrument.toLowerCase().includes(searchQuery.toLowerCase());
                     const matchingMethods = Object.keys(instruments[instrument]).filter(method => 
                         matchesInst || method.toLowerCase().includes(searchQuery.toLowerCase())
@@ -591,72 +743,68 @@ export default function WorkflowEditor({
                     const isExpanded = searchQuery ? true : expandedToolbox[instrument];
                     const isFlowControl = instrument === 'Flow Control' || instrument === 'Flow_Control';
                     const isLibrary = instrument === 'Library Workflows';
-                    
-                    let headerClass = "w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all duration-200 ";
-                    let titleClass = "text-[15px] capitalize font-medium tracking-wide ";
-                    
-                    if (isFlowControl) {
-                       headerClass += "bg-sky-50 hover:bg-sky-100 dark:bg-sky-900/20 dark:hover:bg-sky-900/40";
-                       titleClass += "text-sky-800 dark:text-sky-300";
-                    } else if (isLibrary) {
-                       headerClass += "bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:hover:bg-emerald-900/40";
-                       titleClass += "text-emerald-800 dark:text-emerald-300";
-                    } else {
-                       if (instIdx % 2 === 0) {
-                           headerClass += "bg-gray-100 hover:bg-gray-200 dark:bg-white/10 dark:hover:bg-white/20";
-                       } else {
-                           headerClass += "bg-transparent hover:bg-gray-100 dark:hover:bg-white/5";
-                       }
-                       titleClass += "text-gray-900 dark:text-gray-100";
-                    }
+                    const isBuiltin = isFlowControl || isLibrary;
+
+                    let nameClass = "text-[13px] font-semibold capitalize truncate ";
+                    if (isFlowControl) nameClass += "text-sky-700 dark:text-sky-400";
+                    else if (isLibrary) nameClass += "text-emerald-700 dark:text-emerald-400";
+                    else nameClass += "text-gray-700 dark:text-gray-200";
 
                     return (
                       <div key={instrument} className="flex flex-col">
-                        <button onClick={() => toggleToolbox(instrument)} className={headerClass}>
-                          <div className="flex items-center space-x-3">
-                             <span className={titleClass}>{instrument.replace(/_/g, ' ')}</span>
+                        <button onClick={() => toggleToolbox(instrument)} className="w-full flex items-center justify-between px-2 py-2 rounded-lg transition-colors hover:bg-gray-100 dark:hover:bg-white/5">
+                          <div className="flex items-center space-x-2 min-w-0">
+                             <span className={nameClass}>{instrument.replace(/_/g, ' ')}</span>
+                             {isBuiltin ? (
+                               <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isFlowControl ? 'text-sky-400 dark:text-sky-500' : 'text-emerald-400 dark:text-emerald-500'}`}>Built-in</span>
+                             ) : (
+                               <span className="text-[10px] text-gray-400 dark:text-gray-500 font-medium shrink-0">{Object.keys(instruments[instrument]).length}</span>
+                             )}
                           </div>
-                          {isExpanded ? <ChevronUp className="w-4 h-4 opacity-50" /> : <ChevronDown className="w-4 h-4 opacity-50" />}
+                          {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-gray-400 shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
                         </button>
-                        
+
                         {isExpanded && (
-                          <div className="pl-8 pr-2 mt-1 mb-2 space-y-0.5">
+                          <div className="ml-2 pl-2 border-l border-gray-100 dark:border-white/5 mt-0.5 mb-2 space-y-0.5">
+                            {matchingMethods.length === 0 && (
+                              <p className="text-[11px] text-gray-400 dark:text-gray-500 italic px-2 py-1.5">
+                                {isLibrary ? 'No saved workflows yet' : 'No modules'}
+                              </p>
+                            )}
                             {matchingMethods.map((method, idx) => (
                               <Draggable key={`${instrument}::${method}`} draggableId={`${instrument}::${method}`} index={idx}>
                               {(provided, snapshot) => (
                                 <React.Fragment>
-                                  <div 
+                                  <div
                                     ref={provided.innerRef}
                                     {...provided.draggableProps}
                                     {...provided.dragHandleProps}
-                                    className={`p-2 rounded-lg transition-all flex items-center justify-between ${snapshot.isDragging ? 'bg-white dark:bg-[#1a1a1a] shadow-xl ring-2 ring-blue-500/20' : 'bg-transparent hover:bg-gray-100 dark:hover:bg-white/10'}`}
+                                    className={`group/item pl-1.5 pr-2 py-1.5 rounded-md transition-all flex items-center gap-1.5 cursor-grab active:cursor-grabbing ${snapshot.isDragging ? 'bg-white dark:bg-[#1a1a1a] shadow-xl ring-2 ring-blue-500/20' : 'bg-transparent hover:bg-gray-50 dark:hover:bg-white/5'}`}
                                     style={provided.draggableProps.style}
                                   >
-                                    <div className="flex flex-col w-full min-w-0">
-                                      <div className="flex items-center justify-between w-full relative">
-                                        <span title={method.replace(/_/g, ' ')} className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate capitalize">{method.replace(/_/g, ' ')}</span>
-                                        {instruments[instrument][method]?.description && (
-                                          <div className="relative group/tooltip flex items-center shrink-0 ml-2">
-                                            <Info className="w-3.5 h-3.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors cursor-help" />
-                                            <div className="absolute right-0 top-full mt-2 w-[260px] p-2.5 bg-gray-900 dark:bg-gray-800 text-gray-100 text-xs rounded-lg shadow-xl opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-50 pointer-events-none whitespace-normal border border-gray-700">
-                                              {instruments[instrument][method].description}
-                                            </div>
+                                    <GripVertical className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0 opacity-0 group-hover/item:opacity-100 transition-opacity" />
+                                    <div className="flex items-center justify-between w-full min-w-0 relative">
+                                      <span title={method.replace(/_/g, ' ')} className="font-medium text-gray-700 dark:text-gray-300 text-[13px] truncate capitalize">{method.replace(/_/g, ' ')}</span>
+                                      {instruments[instrument][method]?.description && (
+                                        <div className="relative group/tooltip flex items-center shrink-0 ml-2">
+                                          <Info className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 transition-colors cursor-help" />
+                                          <div className="absolute right-0 top-full mt-2 w-[260px] p-2.5 bg-gray-900 dark:bg-gray-800 text-gray-100 text-xs rounded-lg shadow-xl opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-50 pointer-events-none whitespace-normal border border-gray-700">
+                                            {instruments[instrument][method].description}
                                           </div>
-                                        )}
-                                      </div>
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                   {snapshot.isDragging && (
-                                    <div className="p-2.5 rounded-lg flex items-center justify-between opacity-50 grayscale pointer-events-none select-none">
-                                      <div className="flex flex-col w-full min-w-0">
-                                        <div className="flex items-center justify-between w-full">
-                                          <span title={method.replace(/_/g, ' ')} className="font-medium text-gray-800 dark:text-gray-200 text-sm truncate">{method.replace(/_/g, ' ')}</span>
-                                          {instruments[instrument][method]?.description && (
-                                            <div className="shrink-0 ml-2">
-                                              <Info className="w-3.5 h-3.5 text-gray-400" />
-                                            </div>
-                                          )}
-                                        </div>
+                                    <div className="pl-1.5 pr-2 py-1.5 rounded-md flex items-center gap-1.5 opacity-50 grayscale pointer-events-none select-none">
+                                      <GripVertical className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0" />
+                                      <div className="flex items-center justify-between w-full min-w-0">
+                                        <span title={method.replace(/_/g, ' ')} className="font-medium text-gray-700 dark:text-gray-300 text-[13px] truncate">{method.replace(/_/g, ' ')}</span>
+                                        {instruments[instrument][method]?.description && (
+                                          <div className="shrink-0 ml-2">
+                                            <Info className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600" />
+                                          </div>
+                                        )}
                                       </div>
                                     </div>
                                   )}

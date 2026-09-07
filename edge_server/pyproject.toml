@@ -10,9 +10,10 @@ dependencies = [
     "pydantic",
     "python-dotenv",
     "aiohttp",
-    "sqlalchemy",
+    "sqlalchemy[asyncio]",
     "aiosqlite",
-    "paho-mqtt"
+    "paho-mqtt",
+    "httpx>=0.28.1",
 ]
 
 [build-system]

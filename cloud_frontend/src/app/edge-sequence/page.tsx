@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import WorkflowEditor, { SequenceBlock } from '@/components/WorkflowEditor';
+import { WorkflowEditor, SequenceBlock, PythonCodeView, generatePythonCode } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -106,105 +106,6 @@ export default function DesignerPage() {
     dlAnchorElem.click();
   };
 
-  const generatePythonCode = () => {
-    let code = "";
-    const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
-    const hasSleep = allBlocks.some(b => (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'Sleep');
-    if (hasSleep) code += "import time\n";
-    let instruments = Array.from(new Set(sequence.map(s => s.instrument))).filter(i => i !== 'Flow_Control' && i !== 'Flow Control');
-    
-    // Generate real imports for the instances directly
-    if (instruments.length > 0) {
-        // Group by module
-        const moduleGroups: Record<string, string[]> = {};
-        instruments.forEach(inst => {
-            const meta = instrumentMeta[inst];
-            const mod = meta ? meta.module : 'hardware';
-            if (!moduleGroups[mod]) moduleGroups[mod] = [];
-            moduleGroups[mod].push(inst);
-        });
-        
-        Object.entries(moduleGroups).forEach(([mod, insts]) => {
-            code += `from ${mod} import ${insts.join(', ')}\n`;
-        });
-        code += "\n";
-    }
-    
-    code += "def run_workflow():\n";
-    
-    if (sequence.length === 0) {
-      code += "    pass\n";
-    }
-
-    const genBlocks = (blocks: SequenceBlock[], phase: string) => {
-      if (blocks.length > 0) code += `\n    # ${phase} phase\n`;
-      let indent = 1;
-      blocks.forEach((block, idx) => {
-        const pad = '    '.repeat(indent);
-        const isFlow = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
-        
-        if (isFlow) {
-          if (block.method === 'If') {
-            code += `${pad}if ${block.params.condition || 'True'}:\n`;
-            indent++;
-            // Check if next block is Else or End_If (empty body)
-            const next = blocks[idx + 1];
-            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && (next.method === 'Else' || next.method === 'End_If')) {
-              code += `${'    '.repeat(indent)}pass\n`;
-            }
-          } else if (block.method === 'Else') {
-            indent = Math.max(1, indent - 1);
-            code += `${'    '.repeat(indent)}else:\n`;
-            indent++;
-            // Check if next block is End_If (empty else body)
-            const next = blocks[idx + 1];
-            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && next.method === 'End_If') {
-              code += `${'    '.repeat(indent)}pass\n`;
-            }
-          } else if (block.method === 'End_If') {
-            indent = Math.max(1, indent - 1);
-          } else if (block.method === 'While') {
-            code += `${pad}while ${block.params.condition || 'True'}:\n`;
-            indent++;
-            // Check if next block is End_While (empty body)
-            const next = blocks[idx + 1];
-            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && next.method === 'End_While') {
-              code += `${'    '.repeat(indent)}pass\n`;
-            }
-          } else if (block.method === 'End_While') {
-            indent = Math.max(1, indent - 1);
-          } else if (block.method === 'Sleep') {
-            code += `${pad}time.sleep(${block.params.duration_seconds || 0})\n`;
-          }
-          return;
-        }
-        
-        const formatValue = (v: any): string => {
-            if (typeof v === 'string' && !v.startsWith('#')) return `"${v}"`;
-            if (typeof v === 'object' && v !== null) {
-                // Return a valid python dict literal, preserving variable tokens if any exist
-                const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
-                return `{${dictEntries.join(', ')}}`;
-            }
-            return String(v);
-        };
-        
-        let params = Object.entries(block.params).map(([k, v]) => {
-           return `${k}=${formatValue(v)}`;
-        }).join(', ');
-        
-        let returnStr = block.returnVar ? `${block.returnVar} = ` : "";
-        code += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;
-      });
-    };
-    
-    genBlocks(prepSequence, "Prep");
-    genBlocks(sequence, "Main");
-    genBlocks(cleanupSequence, "Cleanup");
-    
-    code += "\nif __name__ == '__main__':\n    run_workflow()\n";
-    return code;
-  };
 
   // Fetch status on mount
   useEffect(() => {
@@ -442,17 +343,53 @@ export default function DesignerPage() {
   };
 
   
+  // Finds a '#' used as a dynamic parameter with no variable name after it (e.g. '#' instead of '#temperature'),
+  // searching nested object parameters too.
+  const findEmptyHashName = (blocks: SequenceBlock[]): string | null => {
+    const scan = (obj: any): string | null => {
+      if (!obj) return null;
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === 'string' && v.trim() === '#') return k;
+        if (typeof v === 'object' && v !== null) {
+          const nested = scan(v);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    };
+    for (const block of blocks) {
+      const badKey = scan(block.params);
+      if (badKey) return `${block.instrument}.${block.method} → ${badKey}`;
+    }
+    return null;
+  };
+
   const validateSequence = () => {
     const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+
+    const emptyHashLocation = findEmptyHashName(allBlocks);
+    if (emptyHashLocation) {
+      alert(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`);
+      return false;
+    }
+
     for (const block of allBlocks) {
       if (block.schema?.parameters) {
         for (const [key, param] of Object.entries(block.schema.parameters)) {
           const val = block.params[key];
           // Allow dynamic variables (strings starting with #) to pass through here, they are checked in execution/optimizer
           if (typeof val === 'string' && val.startsWith('#')) continue;
-          
+
           if (val === undefined || val === '') {
             alert(`Missing parameter '${key}' in ${block.instrument}.${block.method}`);
+            return false;
+          }
+
+          // A param typed int/float has to resolve to an actual number — anything else would
+          // only fail once the run tries to cast it, so catch it here instead.
+          const typeStr = ((param as any)?.type || '').toLowerCase();
+          if ((typeStr.includes('int') || typeStr.includes('float')) && isNaN(Number(val))) {
+            alert(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`);
             return false;
           }
         }
@@ -482,8 +419,12 @@ export default function DesignerPage() {
   if (!statusData) return <div className="p-8 text-gray-900 dark:text-white bg-gray-50 dark:bg-[#0a0a0a] min-h-screen">Loading designer...</div>;
 
   return (
-    <div className="flex h-full w-full bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden">
-      <div className="flex-1 flex flex-col overflow-hidden w-full h-full">
+    <div className="h-full w-full overflow-x-auto overflow-y-hidden bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans">
+    {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
+        panes at narrow widths (which just produces overlapping, clipped controls), it holds its
+        natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
+    <div className="flex h-full min-w-[900px]">
+      <div className="flex-1 flex flex-col overflow-hidden w-full h-full min-w-0">
         {deviceId && (
             <div className="bg-blue-500/10 border-b border-blue-500/20 px-6 py-2 text-sm text-blue-600 dark:text-blue-400 flex justify-between items-center z-10 shrink-0">
                 <span className="font-medium">Targeting Edge Device: <strong className="font-bold">{deviceId}</strong></span>
@@ -498,8 +439,8 @@ export default function DesignerPage() {
           cleanupSequence={cleanupSequence}
           setCleanupSequence={setCleanupSequence}
           header={
-            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-              <div className="flex flex-col flex-1 mr-4">
+            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-50 relative">
+              <div className="flex flex-col justify-center flex-1 mr-4 space-y-1">
                 <div className="flex items-center space-x-3">
                   <input
                     type="text"
@@ -515,6 +456,23 @@ export default function DesignerPage() {
                       <span>Offline Mode</span>
                     </span>
                   )}
+                  <div className="flex items-center space-x-1.5 pl-2 border-l border-gray-200 dark:border-white/10">
+                    <button
+                      onClick={saveWorkflow}
+                      disabled={sequence.length === 0}
+                      title="Save"
+                      className="flex items-center justify-center p-1.5 rounded transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={clearCanvas}
+                      title="Clear"
+                      className="flex items-center justify-center p-1.5 rounded transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
                 <input
                   type="text"
@@ -525,22 +483,6 @@ export default function DesignerPage() {
                 />
               </div>
               <div className="flex items-center space-x-2">
-                <button 
-                  onClick={clearCanvas}
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  <span className="hidden sm:inline">Clear</span>
-                </button>
-                
-                <button 
-                  onClick={saveWorkflow}
-                  disabled={sequence.length === 0}
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Save className="w-4 h-4" />
-                  <span className="hidden sm:inline">Save</span>
-                </button>
 
                 <div className="relative group">
                   <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
@@ -579,7 +521,7 @@ export default function DesignerPage() {
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
                   {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
-                  <span className="hidden sm:inline">{viewMode === 'canvas' ? 'View Python' : 'Back'}</span>
+                  <span className="hidden sm:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
                 </button>
                 {(() => {
                   const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
@@ -609,7 +551,7 @@ export default function DesignerPage() {
                       }`}
                     >
                       {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                      <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
+                      <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run')}</span>
                     </button>
                     {hasDynamicParams && sequence.some(s => s.returnVar) && (
                       <a 
@@ -628,15 +570,16 @@ export default function DesignerPage() {
           }
           customView={
             viewMode === 'code' ? (
-                <div className="flex-1 min-w-0 overflow-auto p-8 bg-gray-900 text-gray-100 font-mono text-sm h-full flex flex-col">
-                    <pre className="p-6 rounded-xl bg-black/50 border border-white/10 shadow-inner overflow-x-auto max-w-full flex-shrink-0">
-                        <code>{generatePythonCode()}</code>
-                    </pre>
-                </div>
+                <PythonCodeView
+                  code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta)}
+                  theme={theme}
+                  fileName={currentWorkflowName || 'sequence'}
+                />
             ) : null
           }
         />
       </div>
+    </div>
     </div>
   );
 }

@@ -5,11 +5,46 @@ import { useState, useEffect } from 'react';
 import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
+// Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
+// returned. When that value is a plain scalar — the overwhelmingly common case, since that's the
+// only thing an optimizer can ever act on — show it bare instead of as a one-key JSON object.
+// A dataclass/dict/list result (multiple fields, or a non-scalar 'result') still gets the full dump.
+const formatStepOutput = (outputs: any): string => {
+  if (outputs === null || outputs === undefined) return '';
+  if (typeof outputs === 'object' && !Array.isArray(outputs)) {
+    const keys = Object.keys(outputs);
+    if (keys.length === 1 && keys[0] === 'result') {
+      const val = outputs.result;
+      if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
+        return String(val);
+      }
+    }
+  }
+  return JSON.stringify(outputs, null, 2);
+};
+
+// The optimizer backends return each plot as a Plotly HTML fragment generated with
+// include_plotlyjs=False, so it needs its own Plotly.js and its own document to run in —
+// an iframe srcDoc executes <script> tags normally, unlike dangerouslySetInnerHTML in the main page.
+const PlotFrame = ({ html }: { html: string }) => {
+  const doc = `<!doctype html><html><head><meta charset="utf-8"/><script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script><style>body{margin:0;font-family:sans-serif;}</style></head><body>${html}</body></html>`;
+  return (
+    <iframe
+      srcDoc={doc}
+      sandbox="allow-scripts"
+      className="w-full h-[420px] border border-gray-100 dark:border-white/5 rounded-lg bg-white"
+    />
+  );
+};
+
 export default function DataPage() {
   const [history, setHistory] = useState<any[]>([]);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [selectedRun, setSelectedRun] = useState<any>(null);
+  const [plots, setPlots] = useState<Record<string, string> | null>(null);
+  const [plotsError, setPlotsError] = useState<string | null>(null);
+  const [plotsLoading, setPlotsLoading] = useState(false);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
 
   const formatRuns = (runs: any[]) => runs.map((r: any) => {
@@ -24,6 +59,52 @@ export default function DataPage() {
               data: r.steps?.map((s: any) => s.status === 'completed' ? JSON.stringify(s.outputs?.result || '').replace(/,/g, ';') : (s.error || s.status)).join(',')
           }];
           vars = r.steps?.map((s: any) => `${s.instrument}.${s.method}`) || [];
+      } else if (type === 'Optimization') {
+          const paramSpace = r.parameters?.parameter_space || [];
+          const objectiveConfig = r.parameters?.objective_config || [];
+          const seqTemplate = r.parameters?.sequence_template || [];
+          const seqLength = seqTemplate.length;
+          const paramNames = paramSpace.map((p: any) => p.name);
+          const objectiveNames = objectiveConfig.map((o: any) => o.name);
+          vars = [...paramNames, ...objectiveNames.map((n: string) => `${n} (objective)`)];
+
+          const iterationCount = seqLength > 0 ? Math.ceil((r.steps?.length || 0) / seqLength) : 0;
+          for (let i = 0; i < iterationCount; i++) {
+              const iterSteps = r.steps?.slice(i * seqLength, (i + 1) * seqLength) || [];
+              const hasError = iterSteps.some((s: any) => s.status === 'error');
+              const isRunning = iterSteps.some((s: any) => s.status === 'running');
+              const isPending = iterSteps.every((s: any) => s.status === 'pending');
+              const status = hasError ? 'error' : isRunning ? 'running' : isPending ? 'pending' : 'completed';
+
+              // The suggested value for each search-space parameter shows up as a step argument
+              // somewhere in this iteration's steps (whichever templated call actually used it).
+              const paramValues = paramNames.map((name: string) => {
+                  const step = iterSteps.find((s: any) => s.parameters && name in (s.parameters || {}));
+                  return step ? step.parameters[name] : '';
+              });
+              // The objective's value is whatever step in the template was configured with that
+              // returnVar — match by template position since steps themselves don't store returnVar.
+              const objectiveValues = objectiveNames.map((name: string) => {
+                  const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === name);
+                  const step = tmplIdx >= 0 ? iterSteps[tmplIdx] : null;
+                  return step?.outputs?.result !== undefined ? step.outputs.result : '';
+              });
+
+              rows.push({
+                  row: i + 1,
+                  status,
+                  data: [...paramValues, ...objectiveValues].join(','),
+                  details: iterSteps.map((s: any) => ({
+                      instrument: s.instrument,
+                      method: s.method,
+                      status: s.status,
+                      result: s.outputs,
+                      error: s.error,
+                      start_time: s.start_time,
+                      end_time: s.end_time
+                  }))
+              });
+          }
       } else if (type === 'Spreadsheet') {
           const rowCount = r.parameters?.rows?.length || 0;
           const seqLength = r.steps?.length ? Math.floor(r.steps.length / rowCount) : 0;
@@ -61,7 +142,15 @@ export default function DataPage() {
           timestamp: r.start_time || new Date().toISOString(),
           variables: vars,
           rows,
-          steps: r.steps
+          steps: r.steps,
+          config: type === 'Optimization' ? {
+              optimizer: r.parameters?.optimizer,
+              budget: r.parameters?.budget,
+              error_recovery: r.parameters?.error_recovery,
+              optimizer_config: r.parameters?.optimizer_config || {},
+              parameter_space: r.parameters?.parameter_space || [],
+              objective_config: r.parameters?.objective_config || []
+          } : null
       };
   });
 
@@ -105,7 +194,35 @@ export default function DataPage() {
     return () => {
         ws.close();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!selectedRun || selectedRun.type !== 'Optimization') {
+      setPlots(null);
+      setPlotsError(null);
+      return;
+    }
+    let cancelled = false;
+    setPlots(null);
+    setPlotsError(null);
+    setPlotsLoading(true);
+    fetch(`${API_BASE}/api/queue/runs/${selectedRun.id}/plots`)
+      .then(res => res.json())
+      .then(data => {
+        if (cancelled) return;
+        if (data && typeof data === 'object' && data.error) {
+          setPlotsError(data.error);
+        } else if (data && typeof data === 'object') {
+          setPlots(data);
+        } else {
+          setPlotsError('Plots are not viewable in the browser for this optimizer.');
+        }
+      })
+      .catch(() => { if (!cancelled) setPlotsError('Failed to load plots.'); })
+      .finally(() => { if (!cancelled) setPlotsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedRun?.id, selectedRun?.type]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -310,6 +427,74 @@ export default function DataPage() {
                 </header>
                 <div className="p-8 flex-1 overflow-y-auto overflow-x-hidden pb-24 min-w-0 w-full relative">
                   <div className="max-w-5xl mx-auto space-y-4 w-full min-w-0">
+                      {selectedRun.type === 'Optimization' && selectedRun.config && (
+                          <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-5 shadow-sm min-w-0">
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Configuration</h3>
+                              <div className="flex flex-wrap gap-x-8 gap-y-3 mb-4">
+                                  <div>
+                                      <div className="text-[10px] uppercase font-bold text-gray-400">Optimizer</div>
+                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.optimizer || '—'}</div>
+                                  </div>
+                                  <div>
+                                      <div className="text-[10px] uppercase font-bold text-gray-400">Budget</div>
+                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.budget ?? '—'}</div>
+                                  </div>
+                                  <div>
+                                      <div className="text-[10px] uppercase font-bold text-gray-400">Error Recovery</div>
+                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.error_recovery || '—'}</div>
+                                  </div>
+                                  {Object.entries(selectedRun.config.optimizer_config || {}).map(([stepKey, stepDef]: [string, any]) => (
+                                      <div key={stepKey}>
+                                          <div className="text-[10px] uppercase font-bold text-gray-400">{stepKey.replace('_', ' ')}</div>
+                                          <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{stepDef?.model}{stepDef?.num_samples !== undefined ? ` (${stepDef.num_samples})` : ''}</div>
+                                      </div>
+                                  ))}
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                                  {selectedRun.config.parameter_space.map((p: any) => (
+                                      <div key={p.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
+                                          <span className="text-[11px] font-bold text-blue-500 font-mono truncate">#{p.name}</span>
+                                          <span className="text-xs text-gray-600 dark:text-gray-300">
+                                              {p.type === 'choice' ? `choice: ${(p.bounds || []).join(', ')}` : `range: ${p.bounds?.[0]} – ${p.bounds?.[1]}`}
+                                              <span className="text-gray-400"> ({p.value_type})</span>
+                                          </span>
+                                      </div>
+                                  ))}
+                                  {selectedRun.config.objective_config.map((o: any) => (
+                                      <div key={o.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
+                                          <span className="text-[11px] font-bold text-green-500 font-mono truncate">{o.name}</span>
+                                          <span className="text-xs text-gray-600 dark:text-gray-300">objective — {o.minimize ? 'minimize' : 'maximize'}</span>
+                                      </div>
+                                  ))}
+                              </div>
+                          </div>
+                      )}
+                      {selectedRun.type === 'Optimization' && (
+                          <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-5 shadow-sm min-w-0">
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Optimizer Plots</h3>
+                              {plotsLoading ? (
+                                  <div className="text-sm text-gray-400 dark:text-gray-500">Loading plots…</div>
+                              ) : plotsError ? (
+                                  <div className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.03] border border-gray-100 dark:border-white/5 rounded-lg p-3">
+                                      {plotsError}
+                                      {plotsError.toLowerCase().includes('no optimizer plots available') && (
+                                          <div className="mt-1 text-xs text-gray-400">Plots are only kept in memory for the most recently completed optimization run in this server session — run this optimization again to see fresh plots here.</div>
+                                      )}
+                                  </div>
+                              ) : plots ? (
+                                  <div className="space-y-6">
+                                      {Object.entries(plots).map(([plotName, plotHtml]) => (
+                                          <div key={plotName}>
+                                              <div className="text-[10px] uppercase font-bold text-gray-400 mb-2">{plotName}</div>
+                                              <PlotFrame html={plotHtml} />
+                                          </div>
+                                      ))}
+                                  </div>
+                              ) : (
+                                  <div className="text-sm text-gray-400 dark:text-gray-500">No plots available.</div>
+                              )}
+                          </div>
+                      )}
                       {selectedRun.type === 'Sequence' ? (
                           <div className="space-y-4 min-w-0">
                               <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Execution Steps</h3>
@@ -375,7 +560,7 @@ export default function DataPage() {
                                                             <div className={`min-w-0 ${!hasParams ? 'col-span-2' : 'col-span-2 md:col-span-1'}`}>
                                                                 <div className="text-[10px] uppercase font-bold text-gray-400 mb-1">Result / Output</div>
                                                                 <pre className={`text-xs p-2 rounded border overflow-hidden max-w-full whitespace-pre-wrap break-all ${step.error ? 'bg-red-50 dark:bg-red-900/10 border-red-100 dark:border-red-500/20 text-red-600 dark:text-red-400' : 'bg-gray-50 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-600 dark:text-gray-300'}`} style={{overflowWrap: 'anywhere'}}>
-                                                                    {step.error || JSON.stringify(step.outputs, null, 2)}
+                                                                    {step.error || formatStepOutput(step.outputs)}
                                                                 </pre>
                                                             </div>
                                                         )}
@@ -443,7 +628,7 @@ export default function DataPage() {
                                                            </div>
                                                            {(step.result || step.error) && (
                                                               <pre className={`mt-2 p-2 rounded text-xs overflow-hidden w-full max-w-full whitespace-pre-wrap break-all ${step.error ? 'bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 border border-red-100 dark:border-red-500/20' : 'bg-gray-50 dark:bg-white/[0.02] text-gray-600 dark:text-gray-300 border border-gray-100 dark:border-white/5'}`} style={{overflowWrap: 'anywhere'}}>
-                                                                  {step.error || JSON.stringify(step.result, null, 2)}
+                                                                  {step.error || formatStepOutput(step.result)}
                                                               </pre>
                                                            )}
                                                       </div>

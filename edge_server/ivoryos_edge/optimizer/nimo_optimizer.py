@@ -69,7 +69,7 @@ class NIMOOptimizer(OptimizerBase):
             if p["type"] == "choice" and isinstance(p["bounds"], list):
                 param_values.append(p["bounds"])
             elif p["type"] == "range" and len(p["bounds"]) == 3:
-                values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=p["value_type"])
+                values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=p.get("value_type", "float"))
                 param_values.append(values)
             else:
                 raise ValueError(f"Unsupported parameter format: {p}")
@@ -98,7 +98,7 @@ class NIMOOptimizer(OptimizerBase):
                        output_file = self.proposals,
                        num_objectives = self.n_objectives,
                        num_proposals = n,
-                       **self.additional_params
+                       **(self.additional_params or {})
                        )
         self.current_step += 1
         # Read proposals from CSV file

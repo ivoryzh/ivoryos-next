@@ -5,8 +5,10 @@ import { useState, useEffect } from 'react';
 import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical, AlertTriangle } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import Sidebar from '@/components/Sidebar';
+import { buildRunName } from '@ivoryos/shared-ui';
 
 export default function ExecutionPage() {
+  const [experimentName, setExperimentName] = useState('');
   const [sequence, setSequence] = useState<any[]>([]);
   const [prepSequence, setPrepSequence] = useState<any[]>([]);
   const [cleanupSequence, setCleanupSequence] = useState<any[]>([]);
@@ -28,6 +30,7 @@ export default function ExecutionPage() {
 
   const [varOptions, setVarOptions] = useState<Record<string, any[]>>({});
   const [hasEmptyHashVar, setHasEmptyHashVar] = useState(false);
+  const [liveInputVars, setLiveInputVars] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     // Theme init
@@ -70,7 +73,27 @@ export default function ExecutionPage() {
       try {
         const parsedSeq = JSON.parse(savedSequence);
         setSequence(parsedSeq);
-        
+
+        const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
+        const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
+        let pSeq = [];
+        let cSeq = [];
+        if (savedPrep) pSeq = JSON.parse(savedPrep);
+        if (savedCleanup) cSeq = JSON.parse(savedCleanup);
+        setPrepSequence(pSeq);
+        setCleanupSequence(cSeq);
+
+        // Variables produced by a 'User_Input' step are resolved live on the edge server while the
+        // workflow runs, so they must not be treated as parameters this page needs pre-filled.
+        const liveVars = new Set<string>();
+        [...parsedSeq, ...pSeq, ...cSeq].forEach((block: any) => {
+            const isUserInput = (block.instrument === 'Flow_Control' || block.instrument === 'Flow Control') && block.method === 'User_Input';
+            if (isUserInput && block.params?.variable_name) {
+                liveVars.add(String(block.params.variable_name).trim());
+            }
+        });
+        setLiveInputVars(liveVars);
+
         // Extract # variables and types
         const vars = new Set<string>();
         const gVars = new Set<string>();
@@ -91,6 +114,7 @@ export default function ExecutionPage() {
                         sawEmptyHash = true;
                         return;
                     }
+                    if (liveVars.has(varName)) return; // resolved live by a User_Input step, not by this page
                     targetSet.add(varName);
 
                     if (pData?.type) vTypes[varName] = pData.type;
@@ -104,15 +128,6 @@ export default function ExecutionPage() {
         parsedSeq.forEach((block: any) => {
             extractVars(block.params, block.schema, vars);
         });
-
-        const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
-        const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
-        let pSeq = [];
-        let cSeq = [];
-        if (savedPrep) pSeq = JSON.parse(savedPrep);
-        if (savedCleanup) cSeq = JSON.parse(savedCleanup);
-        setPrepSequence(pSeq);
-        setCleanupSequence(cSeq);
 
         pSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
         cSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
@@ -327,14 +342,18 @@ export default function ExecutionPage() {
                         if (varName === '') {
                             throw new Error(`A parameter uses '#' with no variable name — fix it in the Designer before running.`);
                         }
+                        if (liveInputVars.has(varName)) return; // resolved live on the edge server, leave as '#varName'
                         let subVal: any = rowData[varName];
                         if (subVal === undefined || subVal === null || subVal === '') {
                             throw new Error(`Missing value for variable '${varName}' in row ${r + 1}`);
                         }
                         
-                        const typeHint = pData?.type || '';
+                        const typeHint = (pData?.type || '').toLowerCase();
                         if (typeHint.includes('int') || typeHint.includes('float')) {
-                            if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
+                            if (isNaN(Number(subVal))) {
+                                throw new Error(`Row ${r + 1}: '${varName}' expects a number (${pData?.type}), got '${subVal}'`);
+                            }
+                            subVal = Number(subVal);
                         }
                         obj[key] = subVal;
                     } else if (typeof val === 'object' && val !== null) {
@@ -387,14 +406,18 @@ export default function ExecutionPage() {
                       if (varName === '') {
                           throw new Error(`A parameter uses '#' with no variable name — fix it in the Designer before running.`);
                       }
+                      if (liveInputVars.has(varName)) return; // resolved live on the edge server, leave as '#varName'
                       let subVal: any = globalValues[varName];
                       if (subVal === undefined || subVal === null || subVal === '') {
                           throw new Error(`Missing global value for variable '${varName}'`);
                       }
                       
-                      const typeHint = pData?.type || '';
+                      const typeHint = (pData?.type || '').toLowerCase();
                       if (typeHint.includes('int') || typeHint.includes('float')) {
-                          if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
+                          if (isNaN(Number(subVal))) {
+                              throw new Error(`'${varName}' (Prep/Cleanup) expects a number (${pData?.type}), got '${subVal}'`);
+                          }
+                          subVal = Number(subVal);
                       }
                       obj[key] = subVal;
                   } else if (typeof val === 'object' && val !== null) {
@@ -424,7 +447,7 @@ export default function ExecutionPage() {
 
       // Submit
       const payload = {
-        name: `${localStorage.getItem('ivoryos_sequence_name') || 'Spreadsheet'} Run - ${new Date().toLocaleString()}`,
+        name: await buildRunName(`${localStorage.getItem('ivoryos_sequence_name') || 'Spreadsheet'} Run`, experimentName, API_BASE),
         parameters: { type: variables.length > 0 ? 'Spreadsheet' : 'Simple', variables, rows: variables.length > 0 ? rows.filter(row => Object.values(row).some(v => v !== undefined && v !== null && v !== '')) : [] },
         prep: resolvedPrep,
         sequence: fullSequence.map(s => ({
@@ -458,6 +481,15 @@ export default function ExecutionPage() {
     }
   };
 
+  // A cell is only flagged once it has real content — an empty/untouched cell isn't wrong yet,
+  // it's just unfilled (that's caught separately as "missing value" when Run is actually clicked).
+  const isInvalidNumericCell = (v: string, val: any) => {
+    const typeHint = (varTypes[v] || '').toLowerCase();
+    if (!typeHint.includes('int') && !typeHint.includes('float')) return false;
+    if (val === undefined || val === null || val === '') return false;
+    return isNaN(Number(val));
+  };
+
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
       {/* Sidebar */}
@@ -465,48 +497,13 @@ export default function ExecutionPage() {
 
       {/* Main Area */}
       <div className="flex-1 flex flex-col relative z-0">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Spreadsheet Editor</h2>
-          <div className="flex space-x-3">
-            <label className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10 cursor-pointer">
-              <Upload className="w-4 h-4" />
-              <span>Import CSV</span>
-              <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
-            </label>
-            <button 
-                onClick={downloadCSV}
-                className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
-            >
-              <Download className="w-4 h-4" />
-              <span>Export CSV</span>
-            </button>
-            {executionState.results.length > 0 && (
-              <button 
-                  onClick={downloadResultsCSV}
-                  className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
-              >
-                <Download className="w-4 h-4" />
-                <span>Export Results</span>
-              </button>
-            )}
-            <button 
-                onClick={() => {
-                    if (hasPendingRuns) {
-                        if (!confirm("A task is already running. Add this sequence to the execution queue?")) return;
-                    }
-                    executeSpreadsheet();
-                }}
-                disabled={variables.length === 0 && globalVariables.length === 0}
-                className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${
-                  variables.length === 0 && globalVariables.length === 0
-                    ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500 cursor-not-allowed'
-                    : 'bg-green-600 hover:bg-green-700 dark:hover:bg-green-500 text-white shadow-md'
-                }`}
-              >
-                <Play className="w-4 h-4" />
-                <span>{hasPendingRuns ? 'Add to Queue' : 'Run Sequence'}</span>
-              </button>
-          </div>
+          {variables.length > 0 && (
+            <span className="text-xs font-semibold text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-white/5 px-2 py-0.5 rounded-full">
+              {rows.length} {rows.length === 1 ? 'entry' : 'entries'}
+            </span>
+          )}
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto pb-48">
@@ -515,7 +512,7 @@ export default function ExecutionPage() {
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
               <span>
                 One or more parameters use <code className="px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/40 font-mono text-xs">#</code> with
-                no variable name after it, so they're excluded here and will fail if run. Go back to the Designer and give each one a name
+                no variable name after it, so they&apos;re excluded here and will fail if run. Go back to the Designer and give each one a name
                 (e.g. <code className="px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/40 font-mono text-xs">#temperature</code>).
               </span>
             </div>
@@ -526,20 +523,49 @@ export default function ExecutionPage() {
               {globalVariables.map(v => (
                 <div key={v} className="flex items-center gap-2">
                   <label className="text-xs font-medium text-amber-800 dark:text-amber-200 whitespace-nowrap">{v}</label>
-                  <input 
-                     type="text" 
+                  <input
+                     type="text"
                      value={globalValues[v] || ''}
                      onChange={e => {
                        const updated = {...globalValues, [v]: e.target.value};
                        setGlobalValues(updated);
                        localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
                      }}
-                     className="w-36 bg-white dark:bg-black/50 border border-amber-300 dark:border-amber-700/50 rounded-md px-2 py-1 text-sm focus:border-amber-500 outline-none"
+                     title={isInvalidNumericCell(v, globalValues[v]) ? `Expects a number (${varTypes[v]})` : undefined}
+                     className={`w-36 bg-white dark:bg-black/50 border rounded-md px-2 py-1 text-sm outline-none ${
+                       isInvalidNumericCell(v, globalValues[v])
+                         ? 'border-red-400 dark:border-red-500/60'
+                         : 'border-amber-300 dark:border-amber-700/50 focus:border-amber-500'
+                     }`}
                   />
                 </div>
               ))}
             </div>
           )}
+
+          <div className="flex items-center gap-3 mb-4">
+            <label className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10 cursor-pointer">
+              <Upload className="w-4 h-4" />
+              <span>Import CSV</span>
+              <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
+            </label>
+            <button
+                onClick={downloadCSV}
+                className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+            >
+              <Download className="w-4 h-4" />
+              <span>Export CSV</span>
+            </button>
+            {executionState.results.length > 0 && (
+              <button
+                  onClick={downloadResultsCSV}
+                  className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
+              >
+                <Download className="w-4 h-4" />
+                <span>Export Results</span>
+              </button>
+            )}
+          </div>
 
           {variables.length === 0 && globalVariables.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 text-gray-500 dark:text-gray-400 border-2 border-dashed border-gray-300 dark:border-white/10 rounded-2xl">
@@ -598,12 +624,17 @@ export default function ExecutionPage() {
                                                                     {varOptions[v].map(opt => <option key={String(opt)} value={String(opt)}>{String(opt)}</option>)}
                                                                 </select>
                                                             ) : (
-                                                                <input 
-                                                                    type="text" 
+                                                                <input
+                                                                    type="text"
                                                                     value={row[v] || ''}
                                                                     onChange={(e) => updateRow(idx, v, e.target.value)}
                                                                     placeholder={`Enter ${v}...`}
-                                                                    className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 dark:hover:border-white/20 dark:focus:border-blue-500 px-2 py-1 text-sm outline-none transition-colors"
+                                                                    title={isInvalidNumericCell(v, row[v]) ? `Expects a number (${varTypes[v]})` : undefined}
+                                                                    className={`w-full border-b px-2 py-1 text-sm outline-none transition-colors ${
+                                                                      isInvalidNumericCell(v, row[v])
+                                                                        ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-500/50'
+                                                                        : 'bg-transparent border-transparent hover:border-gray-300 focus:border-blue-500 dark:hover:border-white/20 dark:focus:border-blue-500'
+                                                                    }`}
                                                                 />
                                                             )}
                                                         </td>
@@ -629,6 +660,31 @@ export default function ExecutionPage() {
                         <span>Add Row</span>
                     </button>
                 </div>
+            </div>
+          )}
+
+          {(variables.length > 0 || globalVariables.length > 0) && (
+            <div className="flex flex-col items-end pt-4 gap-2">
+              <input
+                type="text"
+                value={experimentName}
+                onChange={e => setExperimentName(e.target.value)}
+                placeholder="Experiment name (optional)"
+                title="Shown in Data History instead of the default run label"
+                className="w-56 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-green-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-500"
+              />
+              <button
+                  onClick={() => {
+                      if (hasPendingRuns) {
+                          if (!confirm("A task is already running. Add this sequence to the execution queue?")) return;
+                      }
+                      executeSpreadsheet();
+                  }}
+                  className="flex items-center space-x-2 px-6 py-3 bg-green-600 hover:bg-green-700 dark:hover:bg-green-500 text-white rounded-xl transition-colors font-bold shadow-lg shadow-green-500/20"
+                >
+                  <Play className="w-5 h-5" />
+                  <span>{hasPendingRuns ? 'Add to Queue' : 'Run'}</span>
+                </button>
             </div>
           )}
         </div>

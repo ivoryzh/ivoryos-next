@@ -4,7 +4,7 @@ import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect, useRef } from 'react';
 import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import WorkflowEditor, { SequenceBlock } from '@/components/WorkflowEditor';
+import { WorkflowEditor, SequenceBlock, PythonCodeView, generatePythonCode, buildRunName } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
@@ -105,106 +105,6 @@ export default function DesignerPage() {
     dlAnchorElem.click();
   };
 
-  const generatePythonCode = () => {
-    let code = "";
-    const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
-    const hasSleep = allBlocks.some(b => (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'Sleep');
-    if (hasSleep) code += "import time\n";
-    let instruments = Array.from(new Set(sequence.map(s => s.instrument))).filter(i => i !== 'Flow_Control' && i !== 'Flow Control');
-
-    // Generate real imports for the instances directly
-    if (instruments.length > 0) {
-      // Group by module
-      const moduleGroups: Record<string, string[]> = {};
-      instruments.forEach(inst => {
-        const meta = instrumentMeta[inst];
-        const mod = meta ? meta.module : 'hardware';
-        if (!moduleGroups[mod]) moduleGroups[mod] = [];
-        moduleGroups[mod].push(inst);
-      });
-
-      Object.entries(moduleGroups).forEach(([mod, insts]) => {
-        code += `from ${mod} import ${insts.join(', ')}\n`;
-      });
-      code += "\n";
-    }
-
-    code += "def run_workflow():\n";
-
-    if (sequence.length === 0) {
-      code += "    pass\n";
-    }
-
-    const genBlocks = (blocks: SequenceBlock[], phase: string) => {
-      if (blocks.length > 0) code += `\n    # ${phase} phase\n`;
-      let indent = 1;
-      blocks.forEach((block, idx) => {
-        const pad = '    '.repeat(indent);
-        const isFlow = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
-
-        if (isFlow) {
-          if (block.method === 'If') {
-            code += `${pad}if ${block.params.condition || 'True'}:\n`;
-            indent++;
-            // Check if next block is Else or End_If (empty body)
-            const next = blocks[idx + 1];
-            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && (next.method === 'Else' || next.method === 'End_If')) {
-              code += `${'    '.repeat(indent)}pass\n`;
-            }
-          } else if (block.method === 'Else') {
-            indent = Math.max(1, indent - 1);
-            code += `${'    '.repeat(indent)}else:\n`;
-            indent++;
-            // Check if next block is End_If (empty else body)
-            const next = blocks[idx + 1];
-            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && next.method === 'End_If') {
-              code += `${'    '.repeat(indent)}pass\n`;
-            }
-          } else if (block.method === 'End_If') {
-            indent = Math.max(1, indent - 1);
-          } else if (block.method === 'While') {
-            code += `${pad}while ${block.params.condition || 'True'}:\n`;
-            indent++;
-            // Check if next block is End_While (empty body)
-            const next = blocks[idx + 1];
-            if (next && (next.instrument === 'Flow_Control' || next.instrument === 'Flow Control') && next.method === 'End_While') {
-              code += `${'    '.repeat(indent)}pass\n`;
-            }
-          } else if (block.method === 'End_While') {
-            indent = Math.max(1, indent - 1);
-          } else if (block.method === 'Sleep') {
-            code += `${pad}time.sleep(${block.params.duration_seconds || 0})\n`;
-          }
-          return;
-        }
-
-        const formatValue = (v: any): string => {
-          if (typeof v === 'string' && !v.startsWith('#')) return `"${v}"`;
-          if (typeof v === 'object' && v !== null) {
-            // Return a valid python dict literal, preserving variable tokens if any exist
-            const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
-            return `{${dictEntries.join(', ')}}`;
-          }
-          return String(v);
-        };
-
-        let params = Object.entries(block.params).map(([k, v]) => {
-          return `${k}=${formatValue(v)}`;
-        }).join(', ');
-
-        let returnStr = block.returnVar ? `${block.returnVar} = ` : "";
-        code += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;
-      });
-    };
-
-    genBlocks(prepSequence, "Prep");
-    genBlocks(sequence, "Main");
-    genBlocks(cleanupSequence, "Cleanup");
-
-    code += "\nif __name__ == '__main__':\n    run_workflow()\n";
-    return code;
-  };
-
   // Fetch status on mount
   useEffect(() => {
     // Theme init
@@ -278,7 +178,9 @@ export default function DesignerPage() {
           data.instruments["Flow Control"] = {
             If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
             While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-            Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
+            Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" },
+            User_Input: { description: "Pause and ask a person to type in a value (human-in-the-loop)", parameters: { prompt: { type: "str", required: true }, variable_name: { type: "str", required: true } }, return_type: "None" },
+            Comment: { description: "Add a note to the run log — like Python's print()", parameters: { message: { type: "str", required: true } }, return_type: "None" }
           };
 
           data.instruments["Library Workflows"] = {};
@@ -452,6 +354,19 @@ export default function DesignerPage() {
   };
 
 
+  // Variable names produced by a 'User_Input' step — these are resolved live on the edge server
+  // while the workflow runs, so they shouldn't be treated as parameters the user must pre-fill.
+  const getLiveInputVars = (blocks: SequenceBlock[]): Set<string> => {
+    const vars = new Set<string>();
+    blocks.forEach(b => {
+      const isUserInput = (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'User_Input';
+      if (isUserInput && b.params?.variable_name) {
+        vars.add(String(b.params.variable_name).trim());
+      }
+    });
+    return vars;
+  };
+
   // Finds a '#' used as a dynamic parameter with no variable name after it (e.g. '#' instead of '#temperature'),
   // searching nested object parameters too.
   const findEmptyHashName = (blocks: SequenceBlock[]): string | null => {
@@ -493,6 +408,14 @@ export default function DesignerPage() {
             alert(`Missing parameter '${key}' in ${block.instrument}.${block.method}`);
             return false;
           }
+
+          // A param typed int/float has to resolve to an actual number — anything else would
+          // only fail once the run tries to cast it, so catch it here instead.
+          const typeStr = ((param as any)?.type || '').toLowerCase();
+          if ((typeStr.includes('int') || typeStr.includes('float')) && isNaN(Number(val))) {
+            alert(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`);
+            return false;
+          }
         }
       }
     }
@@ -516,7 +439,7 @@ export default function DesignerPage() {
 
       // 1. Submit Sequence to Edge Queue
       const payload = {
-        name: `${currentWorkflowName || 'Designer'} Run - ${new Date().toLocaleString()}`,
+        name: await buildRunName(`${currentWorkflowName || 'Designer'} Run`, '', API_BASE),
         parameters: { type: 'Sequence' },
         prep: prepSequence.filter(b => !b.isHidden).map(blockToPayload),
         sequence: sequence.filter(b => !b.isHidden).map(blockToPayload),
@@ -551,12 +474,16 @@ export default function DesignerPage() {
 
 
   return (
-    <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
+    <div className={`h-screen w-screen overflow-x-auto overflow-y-hidden bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans ${theme}`}>
+    {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
+        panes at narrow widths (which just produces overlapping, clipped controls), it holds its
+        natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
+    <div className="flex h-full min-w-[1080px]">
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
       {/* Main Designer Area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <WorkflowEditor
           statusData={statusData}
           prepSequence={prepSequence}
@@ -652,8 +579,11 @@ export default function DesignerPage() {
                 </button>
                 {(() => {
                   const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+                  const liveInputVars = getLiveInputVars(allBlocks);
                   const hasDynamicParams = allBlocks.some(block =>
-                    Object.values(block.params).some(val => typeof val === 'string' && val.startsWith('#'))
+                    Object.values(block.params).some(val =>
+                      typeof val === 'string' && val.startsWith('#') && !liveInputVars.has(val.substring(1).trim())
+                    )
                   );
                   const hasNoSteps = prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0;
                   return (
@@ -683,7 +613,7 @@ export default function DesignerPage() {
                           }`}
                       >
                         {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                        <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run Sequence')}</span>
+                        <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run')}</span>
                       </button>
                       {hasDynamicParams && sequence.some(s => s.returnVar) && (
                         <a
@@ -702,17 +632,16 @@ export default function DesignerPage() {
           }
           customView={
             viewMode === 'code' ? (
-              <div className="flex-1 min-w-0 overflow-auto p-8 bg-gray-900 text-gray-100 font-mono text-sm h-full flex flex-col">
-                <pre className="p-6 rounded-xl bg-black/50 border border-white/10 shadow-inner overflow-x-auto max-w-full flex-shrink-0">
-                  <code>{generatePythonCode()}</code>
-                </pre>
-              </div>
+              <PythonCodeView
+                code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta)}
+                theme={theme}
+                fileName={currentWorkflowName || 'sequence'}
+              />
             ) : null
           }
         />
       </div>
-
-
+    </div>
     </div>
   );
 }

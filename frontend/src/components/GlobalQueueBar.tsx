@@ -110,7 +110,7 @@ export default function GlobalQueueBar() {
         {/* Progress Bar (Top edge) */}
         <div className="h-1.5 w-full bg-gray-100 dark:bg-white/5">
             <div 
-                className="h-full bg-blue-500 transition-all duration-500 ease-in-out" 
+                className="h-full bg-indigo-500 transition-all duration-500 ease-in-out" 
                 style={{ width: `${progressPercent}%` }}
             />
         </div>
@@ -121,7 +121,7 @@ export default function GlobalQueueBar() {
            onClick={() => setExpanded(!expanded)}
         >
             <div className="flex items-center space-x-3 truncate">
-                <div className={`p-1.5 rounded-full ${['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 animate-pulse'}`}>
+                <div className={`p-1.5 rounded-full ${['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 animate-pulse'}`}>
                    <Activity className="w-4 h-4" />
                 </div>
                 <div className="flex flex-col truncate">
@@ -177,7 +177,7 @@ export default function GlobalQueueBar() {
                             </button>
                         ) : activeRun.status === 'error' ? (
                             <>
-                            <button onClick={() => resolveError('retry')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 rounded transition-colors text-xs font-bold dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30">
+                            <button onClick={() => resolveError('retry')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 rounded transition-colors text-xs font-bold dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30">
                                 <RefreshCcw className="w-3.5 h-3.5" /> <span>Retry</span>
                             </button>
                             <button onClick={() => resolveError('skip')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 rounded transition-colors text-xs font-bold dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">

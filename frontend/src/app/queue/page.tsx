@@ -198,7 +198,7 @@ export default function QueuePage() {
                     {/* Currently Executing Section */}
                     <div>
                         <h2 className="text-xs  tracking-wider font-bold text-gray-500 mb-4 ml-1 flex items-center space-x-2">
-                           <Play className="w-4 h-4 text-blue-500" /> <span>Currently Executing</span>
+                           <Play className="w-4 h-4 text-indigo-500" /> <span>Currently Executing</span>
                         </h2>
                     <div className="bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-2xl p-6 shadow-sm">
                         <div className="flex items-center justify-between mb-4">
@@ -211,7 +211,7 @@ export default function QueuePage() {
                                 </div>
                             </div>
                             <div className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
-                                workflow.status === 'running' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                                workflow.status === 'running' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' :
                                 ['paused', 'pausing'].includes(workflow.status) ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
                                 workflow.status === 'cancelling' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 animate-pulse' :
                                 workflow.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
@@ -293,7 +293,7 @@ export default function QueuePage() {
 
                                     elements.push(
                                         <div key={step.id} className={`p-4 rounded-xl border ${
-                                            step.status === 'running' ? 'bg-blue-50 border-blue-200 dark:bg-blue-900/10 dark:border-blue-500/30' :
+                                            step.status === 'running' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/10 dark:border-indigo-500/30' :
                                             step.status === 'completed' ? 'bg-gray-50 border-gray-200 dark:bg-white/[0.02] dark:border-white/5 opacity-70' :
                                             step.status === 'error' ? 'bg-red-50 border-red-200 dark:bg-red-900/10 dark:border-red-500/30' :
                                             'bg-white border-gray-200 dark:bg-white/5 dark:border-white/10'
@@ -301,7 +301,7 @@ export default function QueuePage() {
                                             <div className="flex items-start justify-between">
                                                 <div className="flex items-center space-x-4">
                                                     <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
-                                                        step.status === 'running' ? 'bg-blue-500 text-white' :
+                                                        step.status === 'running' ? 'bg-indigo-500 text-white' :
                                                         step.status === 'completed' ? 'bg-green-500 text-white' :
                                                         step.status === 'error' ? 'bg-red-500 text-white' :
                                                         'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
@@ -311,16 +311,16 @@ export default function QueuePage() {
                                                     <div>
                                                         <h4 className="font-semibold text-gray-800 dark:text-gray-200">
                                                             {(step.instrument === 'Flow_Control' || step.instrument === 'Flow Control') ? (
-                                                                <span className="text-blue-600 dark:text-blue-400">{step.method}</span>
+                                                                <span className="text-indigo-600 dark:text-indigo-400">{step.method}</span>
                                                             ) : (
-                                                                <>{step.instrument} <span className="text-gray-400 dark:text-gray-500 font-normal">.</span> <span className="text-blue-600 dark:text-blue-400">{step.method}</span></>
+                                                                <>{step.instrument} <span className="text-gray-400 dark:text-gray-500 font-normal">.</span> <span className="text-indigo-600 dark:text-indigo-400">{step.method}</span></>
                                                             )}
                                                         </h4>
                                                         
                                                         {editingStep === step.id ? (
                                                             <div className="mt-2 space-y-2">
                                                                 <textarea 
-                                                                    className="w-full text-xs font-mono p-2 bg-gray-100 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded resize-y outline-none focus:border-blue-500"
+                                                                    className="w-full text-xs font-mono p-2 bg-gray-100 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded resize-y outline-none focus:border-indigo-500"
                                                                     rows={3}
                                                                     value={editParams}
                                                                     onChange={(e) => setEditParams(e.target.value)}
@@ -345,7 +345,7 @@ export default function QueuePage() {
                                                 {step.status === 'pending' && editingStep !== step.id && (
                                                     <button 
                                                         onClick={() => startEdit(step)}
-                                                        className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
+                                                        className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded transition-colors"
                                                     >
                                                         <Edit3 className="w-4 h-4" />
                                                     </button>

@@ -5,15 +5,15 @@
         "description": "A complex method with many parameters to stress test the UI.\nRequires temperature, solvent name, and optionally safety checks and timeout settings.",
         "parameters": {
           "target_temperature": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": true
           },
           "solvent_name": {
-            "type": "<class 'str'>",
+            "type": "str",
             "required": true
           },
           "enable_safety_checks": {
-            "type": "<class 'bool'>",
+            "type": "bool",
             "required": false,
             "options": [
               "True",
@@ -22,12 +22,12 @@
             "default": true
           },
           "retries": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": false,
             "default": 3
           },
           "timeout_seconds": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": false,
             "default": 60.0
           }
@@ -40,7 +40,7 @@
         "description": "A blocking task to test execution cancellation.",
         "parameters": {
           "duration": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": true
           }
         },
@@ -52,7 +52,7 @@
         "description": "Sets the flow rate of the pump.",
         "parameters": {
           "rate": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": true
           }
         },
@@ -108,7 +108,7 @@
         "description": "Throws an exception if should_fail is True.",
         "parameters": {
           "should_fail": {
-            "type": "<class 'bool'>",
+            "type": "bool",
             "required": false,
             "options": [
               "True",
@@ -130,7 +130,7 @@
             "is_object": true,
             "fields": {
               "target_speed": {
-                "type": "<class 'float'>",
+                "type": "float",
                 "required": true
               },
               "direction": {
@@ -143,7 +143,7 @@
                 ]
               },
               "enable_safety_valves": {
-                "type": "<class 'bool'>",
+                "type": "bool",
                 "required": false,
                 "options": [
                   "True",
@@ -154,7 +154,7 @@
             }
           },
           "duration": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": false,
             "default": 5
           }
@@ -167,7 +167,7 @@
         "description": "Testing long names on the frontend display.",
         "parameters": {
           "super_long_parameter_name_that_should_wrap": {
-            "type": "<class 'str'>",
+            "type": "str",
             "required": false,
             "default": "default_val"
           }
@@ -182,15 +182,15 @@
         "description": "A complex method with many parameters to stress test the UI.\nRequires temperature, solvent name, and optionally safety checks and timeout settings.",
         "parameters": {
           "target_temperature": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": true
           },
           "solvent_name": {
-            "type": "<class 'str'>",
+            "type": "str",
             "required": true
           },
           "enable_safety_checks": {
-            "type": "<class 'bool'>",
+            "type": "bool",
             "required": false,
             "options": [
               "True",
@@ -199,12 +199,12 @@
             "default": true
           },
           "retries": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": false,
             "default": 3
           },
           "timeout_seconds": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": false,
             "default": 60.0
           }
@@ -217,7 +217,7 @@
         "description": "A blocking task to test execution cancellation.",
         "parameters": {
           "duration": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": true
           }
         },
@@ -229,7 +229,7 @@
         "description": "Sets the flow rate of the pump.",
         "parameters": {
           "rate": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": true
           }
         },
@@ -285,7 +285,7 @@
         "description": "Throws an exception if should_fail is True.",
         "parameters": {
           "should_fail": {
-            "type": "<class 'bool'>",
+            "type": "bool",
             "required": false,
             "options": [
               "True",
@@ -307,7 +307,7 @@
             "is_object": true,
             "fields": {
               "target_speed": {
-                "type": "<class 'float'>",
+                "type": "float",
                 "required": true
               },
               "direction": {
@@ -320,7 +320,7 @@
                 ]
               },
               "enable_safety_valves": {
-                "type": "<class 'bool'>",
+                "type": "bool",
                 "required": false,
                 "options": [
                   "True",
@@ -331,7 +331,7 @@
             }
           },
           "duration": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": false,
             "default": 5
           }
@@ -344,7 +344,7 @@
         "description": "Testing long names on the frontend display.",
         "parameters": {
           "super_long_parameter_name_that_should_wrap": {
-            "type": "<class 'str'>",
+            "type": "str",
             "required": false,
             "default": "default_val"
           }
@@ -359,13 +359,13 @@
         "description": "An async long running task.",
         "parameters": {
           "duration": {
-            "type": "<class 'int'>",
+            "type": "int",
             "required": true
           }
         },
         "return_type": "<class 'dict'>",
         "return_info": {
-          "type": "<class 'dict'>",
+          "type": "dict",
           "required": true
         },
         "is_coroutine": true
@@ -375,7 +375,7 @@
         "parameters": {},
         "return_type": "<class 'dict'>",
         "return_info": {
-          "type": "<class 'dict'>",
+          "type": "dict",
           "required": true
         },
         "is_coroutine": true
@@ -385,7 +385,7 @@
         "parameters": {},
         "return_type": "<class 'dict'>",
         "return_info": {
-          "type": "<class 'dict'>",
+          "type": "dict",
           "required": true
         },
         "is_coroutine": false
@@ -396,17 +396,17 @@
         "description": "Evaluates a simulated objective function: -(x-3)^2 - (y-2)^2 + 10\nOptimal parameters are x=3, y=2, yielding max=10.",
         "parameters": {
           "x": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": true
           },
           "y": {
-            "type": "<class 'float'>",
+            "type": "float",
             "required": true
           }
         },
         "return_type": "<class 'float'>",
         "return_info": {
-          "type": "<class 'float'>",
+          "type": "float",
           "required": true
         },
         "is_coroutine": false

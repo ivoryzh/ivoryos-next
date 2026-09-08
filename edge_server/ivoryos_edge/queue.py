@@ -1,4 +1,6 @@
 import asyncio
+import re
+import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import traceback
@@ -7,6 +9,40 @@ import inspect
 from sqlalchemy import update, select
 from sqlalchemy.orm import selectinload
 from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
+
+def substitute_workflow_vars(obj, context: Dict[str, Any]):
+    """Recursively resolve '#varname' parameter values against the live run's workflow_context.
+
+    Values produced by a 'User_Input' step (or any step's return var) only exist once that
+    step has actually run, so an unresolved reference raises rather than sending a literal
+    '#varname' string to a real instrument.
+    """
+    if isinstance(obj, str) and obj.startswith("#"):
+        var_name = obj[1:].strip()
+        if var_name == "":
+            return obj
+        if var_name not in context:
+            raise Exception(f"Variable '#{var_name}' is not available yet — no earlier step has set it.")
+        return context[var_name]
+    if isinstance(obj, dict):
+        return {k: substitute_workflow_vars(v, context) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [substitute_workflow_vars(v, context) for v in obj]
+    return obj
+
+
+def interpolate_message(text: str, context: Dict[str, Any]) -> str:
+    """Replaces every '#varname' found inside free text (a Comment message or a User_Input
+    prompt) with that variable's current value — a lightweight f-string using the same '#name'
+    syntax as every other dynamic reference in the app. Unlike substitute_workflow_vars, this
+    matches substrings within a larger message, and leaves an unresolved '#name' as literal text
+    rather than raising, since a stray '#' in prose shouldn't take down the whole message.
+    """
+    def replace(match: "re.Match[str]") -> str:
+        var_name = match.group(1)
+        return str(context[var_name]) if var_name in context else match.group(0)
+    return re.sub(r"#(\w+)", replace, text)
+
 
 class WorkflowQueueManager:
     def __init__(self, app):
@@ -21,10 +57,19 @@ class WorkflowQueueManager:
         self.current_task: Optional[asyncio.Task] = None
         self.current_step_task: Optional[asyncio.Future] = None
         self._runner_lock: Optional[asyncio.Lock] = None
-        
+
         # WebSocket tracking: run_id -> list of WebSockets
         self.active_connections: Dict[int, List[Any]] = {}
         self.global_connections: List[Any] = []
+
+        # Human-in-the-loop "User_Input" step support: run_id -> pending Event/value
+        self.pending_input_event: Dict[int, asyncio.Event] = {}
+        self.pending_input_value: Dict[int, Any] = {}
+
+        # The live optimizer instance for the active Optimization run, if any, so its
+        # get_plots()/append_existing_data() can be reached from outside the execution loop.
+        self.active_optimizer: Optional[Any] = None
+        self.active_optimizer_run_id: Optional[int] = None
 
     async def init_asyncio(self):
         if self.pause_event is None:
@@ -145,7 +190,16 @@ class WorkflowQueueManager:
         self.cancelled = True
         if self.current_step_task and not self.current_step_task.done():
             self.current_step_task.cancel()
+        for event in self.pending_input_event.values():
+            event.set() # Wake up any step waiting on human input so it observes the cancellation
         self.resume() # Make sure it wakes up to cancel
+
+    def submit_input(self, run_id: int, value: Any):
+        """Provide the value a running 'User_Input' step is waiting on."""
+        self.pending_input_value[run_id] = value
+        event = self.pending_input_event.get(run_id)
+        if event:
+            event.set()
     async def subscribe(self, run_id: int, websocket: Any):
         if run_id not in self.active_connections:
             self.active_connections[run_id] = []
@@ -317,7 +371,53 @@ class WorkflowQueueManager:
                                     await self.broadcast_updates(run_id)
                                     index += 1
                                     continue
-                                    
+
+                                elif method == "Comment":
+                                    message = interpolate_message(str(args.get("message", "")), workflow_context)
+                                    print(f"[Run {run_id}] {message}")
+                                    step.status = "completed"
+                                    step.outputs = {"message": message}
+                                    step.end_time = datetime.utcnow()
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+                                    index += 1
+                                    continue
+
+                                elif method == "User_Input":
+                                    var_name = (args.get("variable_name") or "").strip()
+                                    if not var_name:
+                                        raise Exception("User Input step is missing a variable name")
+                                    prompt = interpolate_message(str(args.get("prompt", "Input required")), workflow_context)
+
+                                    step.status = "waiting_input"
+                                    step.outputs = {"prompt": prompt}
+                                    run.status = "waiting_input"
+                                    event = asyncio.Event()
+                                    self.pending_input_event[run_id] = event
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+
+                                    await event.wait()
+                                    self.pending_input_event.pop(run_id, None)
+                                    value = self.pending_input_value.pop(run_id, None)
+
+                                    if self.cancelled:
+                                        step.status = "error"
+                                        step.error = "Cancelled while waiting for input"
+                                        step.end_time = datetime.utcnow()
+                                        await session.commit()
+                                        break
+
+                                    workflow_context[var_name] = value
+                                    step.status = "completed"
+                                    step.outputs = {"result": value}
+                                    step.end_time = datetime.utcnow()
+                                    run.status = "running"
+                                    await session.commit()
+                                    await self.broadcast_updates(run_id)
+                                    index += 1
+                                    continue
+
                                 elif method == "If":
                                     condition = args.get("condition", "False")
                                     try:
@@ -479,8 +579,8 @@ class WorkflowQueueManager:
                                 raise Exception(f"Method {step.method} not found on {step.instrument}")
                                 
                             method = getattr(instance, step.method)
-                            args = step.parameters or {}
-                            
+                            args = substitute_workflow_vars(step.parameters or {}, workflow_context)
+
                             from ivoryos_edge.introspection import cast_arguments
                             args = cast_arguments(method, args)
                             
@@ -631,31 +731,72 @@ class WorkflowQueueManager:
 
     async def _execute_optimization_run(self, run_id: int, session, parameters: dict):
         """Executes an optimization loop run, generating steps dynamically."""
+        import os
         from ivoryos_edge.optimizer.registry import OPTIMIZER_REGISTRY
         import inspect
-        
+
         opt_name = parameters.get("optimizer", "ax")
         budget = parameters.get("budget", 5)
         param_space = parameters.get("parameter_space", [])
         obj_config = parameters.get("objective_config", [])
+        opt_config = parameters.get("optimizer_config", {})
+        parameter_constraints = parameters.get("parameter_constraints")
+        additional_params = parameters.get("additional_params")
         error_recovery = parameters.get("error_recovery", "stop")
         seq_template = parameters.get("sequence_template", [])
-        
+        early_stop = parameters.get("early_stop")
+        # A var excluded from the search space can still differ per iteration (spreadsheet-style,
+        # set on the Optimize page) instead of being one constant for the whole run — each is a
+        # list of budget length, one literal value per iteration index.
+        iteration_values = parameters.get("iteration_values", {})
+        # How many trials the optimizer suggests, runs, and reports back at once per round —
+        # default 1 (ask/run/tell one at a time, the original behavior). >1 means the optimizer
+        # picks that many points together each round, useful when several identical setups can
+        # run in parallel; every optimizer already supports suggest(n)/observe(list) in that shape.
+        batch_size = max(1, parameters.get("batch_size", 1))
+        # Prior data (e.g. from an earlier compatible run, or uploaded) to seed the optimizer with
+        # before the first suggestion — a list of {param_or_objective_name: value} dicts. Every
+        # optimizer backend already implements append_existing_data(); this was just never wired
+        # up to a real run before.
+        existing_data = parameters.get("existing_data")
+
         OptClass = OPTIMIZER_REGISTRY.get(opt_name)
         if not OptClass:
             raise Exception(f"Optimizer {opt_name} not found")
-            
+
+        optimizer_data_dir = os.path.join(os.path.dirname(__file__), "optimizer_data")
+        os.makedirs(optimizer_data_dir, exist_ok=True)
+
         optimizer = OptClass(
             experiment_name=f"OptRun_{run_id}",
             parameter_space=param_space,
             objective_config=obj_config,
-            optimizer_config={}
+            optimizer_config=opt_config,
+            parameter_constraints=parameter_constraints,
+            datapath=optimizer_data_dir,
+            additional_params=additional_params
         )
-        
+        self.active_optimizer = optimizer
+        self.active_optimizer_run_id = run_id
+
+
         run = await session.get(WorkflowRun, run_id)
         run.status = "running"
         await session.commit()
         await self.broadcast_updates(run_id)
+
+        if existing_data:
+            try:
+                import pandas as pd
+                loop = asyncio.get_running_loop()
+                df = pd.DataFrame(existing_data)
+                await loop.run_in_executor(None, lambda: optimizer.append_existing_data(df))
+            except Exception as e:
+                run.status = "error"
+                await session.commit()
+                await self.broadcast_updates(run_id)
+                print(f"Failed to append existing data: {e}\n{traceback.format_exc()}")
+                return
         
         step_index = 0
         
@@ -721,6 +862,7 @@ class WorkflowQueueManager:
                     await self.broadcast_updates(run_id)
                 except Exception as e:
                     db_step.status = "error"
+                    db_step.error = str(e) + "\n" + traceback.format_exc()
                     db_step.end_time = datetime.utcnow()
                     run.status = "error"
                     await session.commit()
@@ -738,172 +880,235 @@ class WorkflowQueueManager:
                 await self.broadcast_updates(run_id)
                 return
 
-        for iteration in range(budget):
+        # Trials are grouped into rounds of up to `batch_size`: the optimizer suggests a whole
+        # round at once, every trial in the round runs, and only then does the whole round get
+        # reported back via one observe() call — not one ask/run/tell per trial. batch_size=1
+        # (the default) makes this behave exactly like the original one-at-a-time loop.
+        completed = 0
+        while completed < budget:
             if self.cancelled:
                 break
             await self.pause_event.wait()
-            
-            # 1. Ask optimizer for suggestion
+
+            n_this_round = min(batch_size, budget - completed)
+
+            # 1. Ask optimizer for this round's suggestions
             try:
                 loop = asyncio.get_running_loop()
-                suggestion = await loop.run_in_executor(None, lambda: optimizer.suggest(n=1))
-                if isinstance(suggestion, list) and len(suggestion) > 0:
-                    suggestion = suggestion[0]
+                suggestions = await loop.run_in_executor(None, lambda: optimizer.suggest(n=n_this_round))
+                if not isinstance(suggestions, list):
+                    suggestions = [suggestions]
             except Exception as e:
                 print(f"Optimizer suggest error: {e}")
                 run.status = "error"
                 break
-                
-            # 2. Build steps from template
-            iteration_steps = []
-            for tmpl_step in seq_template:
-                args = {}
-                for k, v in tmpl_step.get("params", {}).items():
-                    if isinstance(v, str) and v.startswith("#"):
-                        var_name = v[1:]
-                        args[k] = suggestion.get(var_name, v)
-                    else:
-                        args[k] = v
-                        
-                db_step = WorkflowStep(
-                    run_id=run_id,
-                    sequence_index=step_index,
-                    instrument=tmpl_step["instrument"],
-                    method=tmpl_step["method"],
-                    parameters=args,
-                    status="pending"
-                )
-                session.add(db_step)
-                iteration_steps.append((db_step, tmpl_step.get("returnVar")))
-                step_index += 1
-                
-            await session.commit()
-            await self.broadcast_updates(run_id)
-            
-            # 3. Execute steps
-            iteration_failed = False
-            objective_values = {}
-            
-            for db_step, return_var in iteration_steps:
+
+            round_results = []
+
+            for offset, suggestion in enumerate(suggestions):
+                global_iteration = completed + offset
+
+                # 2. Build steps from template for this one trial
+                iteration_steps = []
+                for tmpl_step in seq_template:
+                    args = {}
+                    for k, v in tmpl_step.get("params", {}).items():
+                        if isinstance(v, str) and v.startswith("#"):
+                            var_name = v[1:]
+                            if var_name in iteration_values:
+                                values_for_var = iteration_values[var_name]
+                                args[k] = values_for_var[global_iteration] if global_iteration < len(values_for_var) else v
+                            else:
+                                args[k] = suggestion.get(var_name, v)
+                        else:
+                            args[k] = v
+
+                    db_step = WorkflowStep(
+                        run_id=run_id,
+                        sequence_index=step_index,
+                        instrument=tmpl_step["instrument"],
+                        method=tmpl_step["method"],
+                        parameters=args,
+                        status="pending"
+                    )
+                    session.add(db_step)
+                    iteration_steps.append((db_step, tmpl_step.get("returnVar")))
+                    step_index += 1
+
+                await session.commit()
+                await self.broadcast_updates(run_id)
+
+                # 3. Execute steps for this trial
+                trial_failed = False
+                objective_values = {}
+
+                for db_step, return_var in iteration_steps:
+                    if self.cancelled:
+                        break
+                    await self.pause_event.wait()
+
+                    db_step.status = "running"
+                    db_step.start_time = datetime.utcnow()
+                    await session.commit()
+                    await self.broadcast_updates(run_id)
+
+                    try:
+                        instruments = getattr(self.app.state, "instruments", {})
+                        if db_step.instrument not in instruments:
+                            raise Exception(f"Instrument {db_step.instrument} not found")
+                        instance = instruments[db_step.instrument]
+                        method = getattr(instance, db_step.method)
+
+                        from ivoryos_edge.introspection import cast_arguments
+                        casted_args = cast_arguments(method, db_step.parameters or {})
+
+                        if inspect.iscoroutinefunction(method):
+                            self.current_step_task = asyncio.create_task(method(**casted_args))
+                        else:
+                            loop = asyncio.get_running_loop()
+                            self.current_step_task = loop.run_in_executor(None, lambda: method(**casted_args))
+
+                        result = await self.current_step_task
+                        self.current_step_task = None
+
+                        def serialize_output(res):
+                            import dataclasses
+                            if dataclasses.is_dataclass(res):
+                                return dataclasses.asdict(res)
+                            try:
+                                from pydantic import BaseModel
+                                if isinstance(res, BaseModel):
+                                    return res.model_dump() if hasattr(res, "model_dump") else res.dict()
+                            except ImportError:
+                                pass
+                            if hasattr(res, '_asdict'):
+                                return res._asdict()
+                            import enum
+                            if isinstance(res, enum.Enum):
+                                return res.value
+                            if isinstance(res, dict):
+                                return {k: serialize_output(v) for k, v in res.items()}
+                            if isinstance(res, list) or isinstance(res, tuple):
+                                return [serialize_output(v) for v in res]
+                            return res
+
+                        serialized_res = serialize_output(result)
+                        db_step.status = "completed"
+                        db_step.outputs = {"result": serialized_res}
+
+                        if return_var:
+                            ret_vars = [v.strip() for v in return_var.split(",") if v.strip()]
+
+                            if len(ret_vars) > 1 and isinstance(serialized_res, dict):
+                                for k, v in zip(ret_vars, serialized_res.values()):
+                                    try:
+                                        objective_values[k] = float(v)
+                                    except:
+                                        pass
+                            elif len(ret_vars) > 1 and isinstance(result, (tuple, list)):
+                                for k, v in zip(ret_vars, result):
+                                    try:
+                                        objective_values[k] = float(v)
+                                    except:
+                                        pass
+                            else:
+                                var_key = ret_vars[0] if ret_vars else return_var
+                                if isinstance(result, dict) and var_key in result:
+                                    objective_values[var_key] = float(result[var_key])
+                                else:
+                                    try:
+                                        objective_values[var_key] = float(result)
+                                    except:
+                                        pass
+                    except asyncio.CancelledError:
+                        self.current_step_task = None
+                        db_step.status = "error"
+                        db_step.error = "Step execution cancelled"
+                        trial_failed = True
+                    except Exception as e:
+                        self.current_step_task = None
+                        db_step.status = "error"
+                        # traceback is imported at module level — a local re-import here (even
+                        # this deep in a nested except) would make Python treat the name as local
+                        # to the whole enclosing function, breaking the earlier, legitimate
+                        # module-level traceback.format_exc() call in the existing-data handler
+                        # above (UnboundLocalError, since it runs before this line ever would).
+                        db_step.error = str(e) + "\n" + traceback.format_exc()
+                        trial_failed = True
+
+                    db_step.end_time = datetime.utcnow()
+                    await session.commit()
+                    await self.broadcast_updates(run_id)
+
+                    if trial_failed:
+                        break
+
                 if self.cancelled:
                     break
-                await self.pause_event.wait()
-                
-                db_step.status = "running"
-                db_step.start_time = datetime.utcnow()
-                await session.commit()
-                await self.broadcast_updates(run_id)
-                
-                try:
-                    instruments = getattr(self.app.state, "instruments", {})
-                    if db_step.instrument not in instruments:
-                        raise Exception(f"Instrument {db_step.instrument} not found")
-                    instance = instruments[db_step.instrument]
-                    method = getattr(instance, db_step.method)
-                    
-                    if inspect.iscoroutinefunction(method):
-                        self.current_step_task = asyncio.create_task(method(**(db_step.parameters or {})))
-                    else:
-                        loop = asyncio.get_running_loop()
-                        self.current_step_task = loop.run_in_executor(None, lambda: method(**(db_step.parameters or {})))
-                        
-                    result = await self.current_step_task
-                    self.current_step_task = None
-                        
-                    def serialize_output(res):
-                        import dataclasses
-                        if dataclasses.is_dataclass(res):
-                            return dataclasses.asdict(res)
-                        try:
-                            from pydantic import BaseModel
-                            if isinstance(res, BaseModel):
-                                return res.model_dump() if hasattr(res, "model_dump") else res.dict()
-                        except ImportError:
-                            pass
-                        if hasattr(res, '_asdict'):
-                            return res._asdict()
-                        import enum
-                        if isinstance(res, enum.Enum):
-                            return res.value
-                        if isinstance(res, dict):
-                            return {k: serialize_output(v) for k, v in res.items()}
-                        if isinstance(res, list) or isinstance(res, tuple):
-                            return [serialize_output(v) for v in res]
-                        return res
 
-                    serialized_res = serialize_output(result)
-                    db_step.status = "completed"
-                    db_step.outputs = {"result": serialized_res}
-                    
-                    if return_var:
-                        ret_vars = [v.strip() for v in return_var.split(",") if v.strip()]
-                        
-                        if len(ret_vars) > 1 and isinstance(serialized_res, dict):
-                            for k, v in zip(ret_vars, serialized_res.values()):
-                                try:
-                                    objective_values[k] = float(v)
-                                except:
-                                    pass
-                        elif len(ret_vars) > 1 and isinstance(result, (tuple, list)):
-                            for k, v in zip(ret_vars, result):
-                                try:
-                                    objective_values[k] = float(v)
-                                except:
-                                    pass
-                        else:
-                            var_key = ret_vars[0] if ret_vars else return_var
-                            if isinstance(result, dict) and var_key in result:
-                                objective_values[var_key] = float(result[var_key])
-                            else:
-                                try:
-                                    objective_values[var_key] = float(result)
-                                except:
-                                    pass
-                except asyncio.CancelledError:
-                    self.current_step_task = None
-                    db_step.status = "error"
-                    db_step.error = "Step execution cancelled"
-                    iteration_failed = True
-                except Exception as e:
-                    self.current_step_task = None
-                    db_step.status = "error"
-                    import traceback
-                    db_step.error = str(e) + "\n" + traceback.format_exc()
-                    iteration_failed = True
-                    
-                db_step.end_time = datetime.utcnow()
-                await session.commit()
-                await self.broadcast_updates(run_id)
-                
-                if iteration_failed:
-                    break
-                    
-            if self.cancelled:
+                # 4. Handle this trial's result
+                if trial_failed:
+                    if error_recovery == "stop":
+                        run.status = "error"
+                        break
+                    # "skip" and "retry" both just drop this trial from the round without
+                    # observing it — "retry" doesn't actually retry yet, same simplification as
+                    # the original single-trial loop had.
+                else:
+                    round_results.append(objective_values)
+
+            if self.cancelled or run.status == "error":
                 break
-                
-            # 4. Handle results & tell optimizer
-            if iteration_failed:
-                if error_recovery == "stop":
-                    run.status = "error"
-                    break
-                elif error_recovery == "skip":
-                    # provide dummy bad data or ignore
-                    try:
-                        # pass NaN or some large penalty? Actually Baybe/Ax might crash on NaN.
-                        # For now we'll just not observe it if skipped.
-                        pass
-                    except: pass
-                elif error_recovery == "retry":
-                    # In a real system, we'd decrement iteration and continue
-                    # For simplicity, treat retry as skip for the optimizer loop
-                    pass
-            else:
+
+            # 5. Tell the optimizer about however many trials in this round actually succeeded,
+            # then check early-stop against each of them.
+            if round_results:
                 try:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, lambda: optimizer.observe(objective_values))
+                    await loop.run_in_executor(None, lambda: optimizer.observe(round_results))
                 except Exception as e:
                     print(f"Optimizer observe error: {e}")
-                    
+
+                # Early stop: each objective can carry its own target threshold (direction is
+                # derived from that objective's own minimize/maximize goal). With multiple
+                # criteria defined, "mode" decides whether ANY one of them or ALL of them must
+                # be met by a given trial to end the budget loop early. Ending early still
+                # finishes the run as "completed", not "error".
+                stop_early = False
+                for trial_num, objective_values in enumerate(round_results):
+                    if early_stop and early_stop.get("criteria"):
+                        mode = early_stop.get("mode", "any")
+                        reached_flags = []
+                        for criterion in early_stop["criteria"]:
+                            metric = criterion.get("metric")
+                            threshold = criterion.get("threshold")
+                            if metric not in objective_values or threshold is None:
+                                continue
+                            value = objective_values[metric]
+                            minimize = next((o.get("minimize") for o in obj_config if o.get("name") == metric), False)
+                            reached_flags.append((value <= threshold) if minimize else (value >= threshold))
+                        if reached_flags:
+                            stop = all(reached_flags) if mode == "all" else any(reached_flags)
+                            if stop:
+                                print(f"Early stop ({mode}): criteria met after {completed + trial_num + 1} trial(s)")
+                                stop_early = True
+                                break
+                if stop_early:
+                    break
+
+            completed += n_this_round
+
+        # 2. Execute Cleanup Phase — runs once after the budget loop, mirroring Prep. This was
+        # previously never executed at all for Optimization runs even though the Optimize page
+        # already lets you configure one. Skipped on cancellation: execute_template_block bails
+        # out immediately once self.cancelled is set, so cleanup can't run through a cancel yet —
+        # that would need its own bypass, left for later if it turns out to matter.
+        cleanup_template = parameters.get("cleanup_template", [])
+        if cleanup_template and not self.cancelled:
+            success, _ = await execute_template_block(cleanup_template)
+            if not success:
+                run.status = "error"
+
         # Finish run
         run = await session.get(WorkflowRun, run_id)
         if self.cancelled:

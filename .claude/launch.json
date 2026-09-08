@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "edge-server-demo",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--project", "edge_server", "python", "example/demo.py"],
+      "port": 8080
+    },
+    {
+      "name": "core-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "-p", "3001"],
+      "port": 3001
+    }
+  ]
+}

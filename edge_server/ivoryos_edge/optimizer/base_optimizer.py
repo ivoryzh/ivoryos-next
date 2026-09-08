@@ -39,10 +39,11 @@ class OptimizerBase(ABC):
         pass
 
     @abstractmethod
-    def observe(self, results: dict):
+    def observe(self, results: list):
         """
         observe
-        :param results: {"objective_name": "value"}
+        :param results: one dict of {"objective_name": "value"} per trial, matching the batch
+            suggest(n) returned — even for n=1 this is a list of a single dict, not a bare dict.
         """
 
     @abstractmethod

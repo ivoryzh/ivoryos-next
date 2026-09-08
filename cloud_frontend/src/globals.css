@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source "../../packages/shared-ui/src";
 @custom-variant dark (&:is(.dark *));
 
 @layer base {

@@ -221,6 +221,13 @@ def get_status():
         "queue_paused": queue_manager.paused
     }
 
+@app.get("/api/optimizers")
+def get_optimizers():
+    """Lists the optimizer backends actually available in this environment, with each one's
+    real configuration schema (parameter types, phases/models it supports, extra fields)."""
+    from ivoryos_edge.optimizer.registry import OPTIMIZER_REGISTRY
+    return {name: cls.get_schema() for name, cls in OPTIMIZER_REGISTRY.items()}
+
 # --- Queue Manager Endpoints ---
 
 @app.get("/api/queue/runs")
@@ -334,12 +341,30 @@ async def get_run(run_id: int):
         return JSONResponse(status_code=404, content={"error": "Not found"})
     return status
 
+@app.get("/api/queue/runs/{run_id}/plots")
+def get_run_plots(run_id: int, plot_type: str = "default"):
+    if queue_manager.active_optimizer_run_id != run_id or queue_manager.active_optimizer is None:
+        return JSONResponse(status_code=400, content={"error": "No optimizer plots available for this run."})
+    try:
+        return queue_manager.active_optimizer.get_plots(plot_type)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.post("/api/queue/runs/{run_id}/resolve")
 async def resolve_run_error(run_id: int, req: Request):
     data = await req.json()
     action = data.get("action")
     if queue_manager.active_run_id == run_id:
         queue_manager.error_action = action
+    return {"status": "success"}
+
+@app.post("/api/queue/runs/{run_id}/input")
+async def submit_run_input(run_id: int, req: Request):
+    data = await req.json()
+    value = data.get("value", "")
+    if queue_manager.active_run_id != run_id or run_id not in queue_manager.pending_input_event:
+        return JSONResponse(status_code=400, content={"error": "This run is not waiting for input"})
+    queue_manager.submit_input(run_id, value)
     return {"status": "success"}
 
 @app.websocket("/api/ws/runs/{run_id}")

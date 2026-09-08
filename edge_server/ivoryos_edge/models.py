@@ -13,7 +13,7 @@ class WorkflowRun(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), default="Run")
-    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending, running, paused, completed, error, cancelled
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending, running, paused, waiting_input, completed, error, cancelled
     start_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     end_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     
@@ -45,7 +45,7 @@ class WorkflowStep(Base):
     
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     outputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending, running, completed, error, skipped
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending, running, waiting_input, completed, error, skipped
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
     start_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

@@ -63,7 +63,7 @@ export default function Home() {
         <div className="flex-1 overflow-y-auto p-8 bg-gray-100 dark:bg-transparent">
           <div className="max-w-6xl mx-auto space-y-8">
             {/* Hero Section */}
-            <div className="relative overflow-hidden rounded-2xl bg-white dark:bg-gradient-to-br dark:from-blue-900/40 dark:to-purple-900/40 border border-gray-200 dark:border-white/10 p-8 shadow-sm dark:shadow-none">
+            <div className="relative overflow-hidden rounded-2xl bg-white dark:bg-gradient-to-br dark:from-indigo-900/40 dark:to-purple-900/40 border border-gray-200 dark:border-white/10 p-8 shadow-sm dark:shadow-none">
               <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-5 dark:opacity-10 mix-blend-overlay pointer-events-none"></div>
               <div className="relative z-10">
                 <h1 className="text-3xl font-bold mb-3 text-gray-900 dark:text-white">Welcome to IvoryOS NextGen</h1>
@@ -75,7 +75,7 @@ export default function Home() {
                 <div className="flex space-x-4">
                   <button 
                     onClick={downloadSchema}
-                    className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold tracking-wider rounded-lg shadow-sm transition-colors cursor-pointer"
+                    className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold tracking-wider rounded-lg shadow-sm transition-colors cursor-pointer"
                   >
                     <Download className="w-4 h-4" />
                     <span>Download Schema JSON</span>

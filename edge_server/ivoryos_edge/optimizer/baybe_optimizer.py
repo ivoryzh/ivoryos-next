@@ -13,7 +13,7 @@ class BaybeOptimizer(OptimizerBase):
                 "Install it with `pip install baybe`."
             ) from e
 
-        super().__init__(experiment_name, parameter_space, objective_config, optimizer_config, parameter_constraints, additional_params)
+        super().__init__(experiment_name, parameter_space, objective_config, optimizer_config, parameter_constraints, datapath, additional_params)
         self._trial_id = 0
         self._trials = {}
 
@@ -76,21 +76,22 @@ class BaybeOptimizer(OptimizerBase):
         from baybe.searchspace import SearchSpace
         parameters = []
         for p in parameter_space:
+            value_type = p.get("value_type", "float")
             if p["type"] == "range":
                 if len(p["bounds"]) == 3:
-                    values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=p["value_type"])
+                    values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=value_type)
                     parameters.append(NumericalDiscreteParameter(name=p["name"], values=values))
-                elif p["value_type"] == "float":
-                    parameters.append(NumericalContinuousParameter(name=p["name"], bounds=p["bounds"]))
-                elif p["value_type"] == "int":
+                elif value_type == "int":
                     values = tuple([int(v) for v in range(p["bounds"][0], p["bounds"][1] + 1)])
                     parameters.append(NumericalDiscreteParameter(name=p["name"], values=values))
+                else:
+                    parameters.append(NumericalContinuousParameter(name=p["name"], bounds=p["bounds"]))
 
             elif p["type"] == "choice":
-                if p["value_type"] == "str":
-                    parameters.append(CategoricalParameter(name=p["name"], values=p["bounds"]))
-                elif p["value_type"] in ["int", "float"]:
+                if value_type in ["int", "float"]:
                     parameters.append(NumericalDiscreteParameter(name=p["name"], values=p["bounds"]))
+                else:
+                    parameters.append(CategoricalParameter(name=p["name"], values=p["bounds"]))
         return SearchSpace.from_product(parameters)
 
     def _convert_objective_to_baybe_format(self, objective_config):
@@ -152,7 +153,60 @@ class BaybeOptimizer(OptimizerBase):
         )
 
     def get_plots(self, plot_type):
-        return None
+        try:
+            import plotly.express as px
+            import pandas as pd
+            
+            plots = {}
+            if not hasattr(self.experiment, 'measurements') or self.experiment.measurements.empty:
+                return {"error": "No measurements collected yet. Please wait for the first iteration to finish and try again."}
+                
+            df = self.experiment.measurements
+            
+            # --- Raw Data Plots ---
+            # 1. Parallel Coordinates
+            param_names = [p["name"] for p in self.parameter_space]
+            available_params = [p for p in param_names if p in df.columns]
+            
+            if available_params and self.objective_config:
+                obj_name = self.objective_config[0]["name"]
+                if obj_name in df.columns:
+                    plot_df = df.copy()
+                    categorical_maps = {}
+                    for col in available_params:
+                        if plot_df[col].dtype == 'object' or plot_df[col].dtype.name == 'category':
+                            plot_df[col] = pd.Categorical(plot_df[col])
+                            plot_df[col] = plot_df[col].cat.codes
+                    
+                    fig_par = px.parallel_coordinates(
+                        plot_df, 
+                        dimensions=available_params + [obj_name],
+                        color=obj_name,
+                        title='Parallel Coordinates'
+                    )
+                    fig_par.update_layout(margin=dict(l=60, r=60, t=60, b=40))
+                    plots['Parallel Coordinates'] = fig_par.to_html(full_html=False, include_plotlyjs=False)
+            
+            # 2. Pareto Frontier (if multiple objectives)
+            if len(self.objective_config) > 1:
+                obj1 = self.objective_config[0]["name"]
+                obj2 = self.objective_config[1]["name"]
+                
+                if obj1 in df.columns and obj2 in df.columns:
+                    fig_pareto = px.scatter(
+                        df, 
+                        x=obj1, 
+                        y=obj2,
+                        title='Objective Trade-offs (Pareto)',
+                        hover_data=available_params
+                    )
+                    plots['Pareto Frontier'] = fig_pareto.to_html(full_html=False, include_plotlyjs=False)
+                    
+            return plots if plots else {"error": "Plots could not be generated. Check if parameters/objectives match the dataset."}
+            
+        except Exception as e:
+            print(f"Failed to generate BayBE plots: {e}")
+            return {"error": f"Failed to generate BayBE plots: {str(e)}"}
 
     @staticmethod
     def get_schema():

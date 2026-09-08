@@ -1,8 +1,8 @@
 "use client";
-import { API_BASE } from '@/config';
+import { API_BASE, WS_BASE } from '@/config';
 
-import { useEffect, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Blocks, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu, Cloud } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu, Cloud, HandHelping } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 
@@ -14,14 +14,22 @@ interface SidebarProps {
 export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [plugins, setPlugins] = useState<any[]>([]);
-  const [isExpanded, setIsExpanded] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('ivoryos_sidebar_expanded');
-      if (saved !== null) return saved === 'true';
-    }
-    return true;
-  });
+  // Starts at the same default on server and client, then corrects from localStorage in an
+  // effect (client-only, runs after hydration) — reading localStorage inside the useState
+  // initializer would make the client's first render disagree with the server-rendered HTML
+  // whenever the saved preference differs from the default, causing a hydration mismatch.
+  const [isExpanded, setIsExpanded] = useState(true);
   const pathname = usePathname();
+
+  useEffect(() => {
+    const saved = localStorage.getItem('ivoryos_sidebar_expanded');
+    if (saved !== null) setIsExpanded(saved === 'true');
+  }, []);
+
+  const [waitingRun, setWaitingRun] = useState<{ id: number; prompt: string } | null>(null);
+  const [inputValue, setInputValue] = useState('');
+  const [submittingInput, setSubmittingInput] = useState(false);
+  const lastWaitingRunId = useRef<number | null>(null);
 
   const toggleExpanded = () => {
     const next = !isExpanded;
@@ -45,6 +53,50 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
       .catch(err => console.error(err));
   }, []);
 
+  // Human-in-the-loop: watch every page for a run paused on a 'User_Input' step and
+  // pop up a global prompt, so the operator sees it no matter where they're browsing.
+  useEffect(() => {
+    const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const runs = data.runs || [];
+        const active = runs.find((r: any) => r.status === 'waiting_input');
+        if (active) {
+          const step = (active.steps || []).find((s: any) => s.status === 'waiting_input');
+          const prompt = step?.outputs?.prompt || 'Input required';
+          if (lastWaitingRunId.current !== active.id) {
+            lastWaitingRunId.current = active.id;
+            setInputValue('');
+          }
+          setWaitingRun({ id: active.id, prompt });
+        } else {
+          lastWaitingRunId.current = null;
+          setWaitingRun(null);
+        }
+      } catch (e) { }
+    };
+    return () => ws.close();
+  }, []);
+
+  const submitWaitingInput = async () => {
+    if (!waitingRun) return;
+    setSubmittingInput(true);
+    try {
+      await fetch(`${API_BASE}/api/queue/runs/${waitingRun.id}/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: inputValue })
+      });
+      setWaitingRun(null);
+      lastWaitingRunId.current = null;
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSubmittingInput(false);
+    }
+  };
+
   const navItem = (href: string, label: string, icon: React.ReactNode) => {
     const isActive = pathname === href;
     return (
@@ -53,7 +105,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         title={!isExpanded ? label : undefined}
         className={`flex items-center py-3 rounded-lg overflow-hidden mx-3 ${
           isActive 
-            ? 'bg-blue-50 dark:bg-white/10 text-blue-600 dark:text-white' 
+            ? 'bg-indigo-50 dark:bg-white/10 text-indigo-600 dark:text-white' 
             : 'hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'
         }`}
       >
@@ -66,7 +118,40 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   };
 
   return (
-    <aside suppressHydrationWarning className={`shrink-0 bg-white dark:bg-white/5 backdrop-blur-md border-r border-gray-200 dark:border-white/10 flex flex-col py-6 space-y-6 z-10 overflow-hidden ${isExpanded ? 'w-64' : 'w-[72px]'}`}>
+    <>
+    {waitingRun && (
+      <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+        <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-pink-200 dark:border-pink-500/30 rounded-2xl shadow-2xl p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-9 h-9 rounded-lg bg-pink-50 dark:bg-pink-500/10 flex items-center justify-center shrink-0">
+              <HandHelping className="w-5 h-5 text-pink-600 dark:text-pink-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Input needed to continue</h2>
+              <p className="text-[11px] text-gray-400 dark:text-gray-500">The workflow is paused and waiting for you</p>
+            </div>
+          </div>
+          <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">{waitingRun.prompt}</p>
+          <input
+            type="text"
+            autoFocus
+            value={inputValue}
+            onChange={e => setInputValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submitWaitingInput(); }}
+            placeholder="Type your answer..."
+            className="w-full bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-pink-400 dark:focus:border-pink-500 mb-4"
+          />
+          <button
+            onClick={submitWaitingInput}
+            disabled={submittingInput}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-pink-600 hover:bg-pink-700 disabled:opacity-50 text-white transition-colors"
+          >
+            {submittingInput ? 'Submitting...' : 'Continue Workflow'}
+          </button>
+        </div>
+      </div>
+    )}
+    <aside className={`shrink-0 bg-white dark:bg-white/5 backdrop-blur-md border-r border-gray-200 dark:border-white/10 flex flex-col py-6 space-y-6 z-10 overflow-hidden ${isExpanded ? 'w-64' : 'w-[72px]'}`}>
       <div className="flex items-center w-full px-3">
         <button onClick={toggleExpanded} className="w-[44px] h-[44px] text-gray-500 hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 flex items-center justify-center rounded-lg transition-colors">
           <Menu className="w-5 h-5 shrink-0" />
@@ -82,7 +167,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
       <nav className="flex-1 space-y-2 text-sm font-medium text-gray-600 dark:text-gray-400 overflow-y-auto w-full">
         {navItem('/', 'Dashboard', <LayoutDashboard className="w-5 h-5 shrink-0" />)}
         {navItem('/library', 'Library', <Library className="w-5 h-5 shrink-0" />)}
-        {navItem('/designer', 'Designer', <Blocks className="w-5 h-5 shrink-0" />)}
+        {navItem('/designer', 'Designer', <Workflow className="w-5 h-5 shrink-0" />)}
         {navItem('/execution', 'Configure', <Settings2 className="w-5 h-5 shrink-0" />)}
         {navItem('/optimize', 'Optimize', <Zap className="w-5 h-5 shrink-0" />)}
         {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}
@@ -133,5 +218,6 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         </button>
       </div>
     </aside>
+    </>
   );
 }

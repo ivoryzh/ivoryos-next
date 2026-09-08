@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IvoryOS Schema Extractor</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; background-color: #f9fafb; color: #111827; }
+        .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        h1 { margin-top: 0; color: #1f2937; }
+        .form-group { margin-bottom: 1.5rem; }
+        label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
+        input[type="text"] { width: 100%; padding: 0.75rem; border: 1px solid #d1d5db; border-radius: 4px; box-sizing: border-box; font-size: 1rem; }
+        .help-text { font-size: 0.875rem; color: #6b7280; margin-top: 0.25rem; display: block; }
+        button { background-color: #3b82f6; color: white; border: none; padding: 0.75rem 1.5rem; font-size: 1rem; font-weight: 600; border-radius: 4px; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #2563eb; }
+        button:disabled { background-color: #9ca3af; cursor: not-allowed; }
+        #result-container { margin-top: 2rem; display: none; }
+        pre { background: #1f2937; color: #f3f4f6; padding: 1rem; border-radius: 4px; overflow-x: auto; font-family: monospace; font-size: 0.875rem; white-space: pre-wrap; }
+        .error { color: #dc2626; font-weight: 500; margin-top: 1rem; display: none; }
+        #loader { display: none; margin-left: 1rem; font-size: 0.875rem; color: #6b7280; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Schema Extractor</h1>
+        <p>Extract JSON schemas from Python modules on-the-fly.</p>
+        
+        <form id="extract-form">
+            <div class="form-group">
+                <label for="install_url">Install URL (Optional)</label>
+                <input type="text" id="install_url" name="install_url" placeholder="e.g. requests, git+https://github.com/org/repo.git">
+                <span class="help-text">Leave blank if the module is already installed or standard library.</span>
+            </div>
+            
+            <div class="form-group">
+                <label for="module_name">Module Name *</label>
+                <input type="text" id="module_name" name="module_name" placeholder="e.g. requests.sessions" required>
+                <span class="help-text">The import path of the module.</span>
+            </div>
+            
+            <div class="form-group">
+                <label for="class_name">Class Name (Optional)</label>
+                <input type="text" id="class_name" name="class_name" placeholder="e.g. Session">
+                <span class="help-text">Specific class to extract. Leave blank to extract all classes.</span>
+            </div>
+            
+            <div style="display: flex; align-items: center;">
+                <button type="submit" id="submit-btn">Extract Schema</button>
+                <span id="loader">⏳ Creating isolated environment and extracting...</span>
+            </div>
+            <div id="error-msg" class="error"></div>
+        </form>
+    </div>
+
+    <div class="card" id="result-container">
+        <h2>Extracted Schema</h2>
+        <pre id="result-json"></pre>
+    </div>
+
+    <script>
+        document.getElementById('extract-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const btn = document.getElementById('submit-btn');
+            const loader = document.getElementById('loader');
+            const errorMsg = document.getElementById('error-msg');
+            const resultContainer = document.getElementById('result-container');
+            const resultJson = document.getElementById('result-json');
+            
+            // Reset state
+            btn.disabled = true;
+            loader.style.display = 'inline';
+            errorMsg.style.display = 'none';
+            resultContainer.style.display = 'none';
+            
+            const payload = {
+                module_name: document.getElementById('module_name').value
+            };
+            
+            const installUrl = document.getElementById('install_url').value;
+            if (installUrl) payload.install_url = installUrl;
+            
+            const className = document.getElementById('class_name').value;
+            if (className) payload.class_name = className;
+            
+            try {
+                const response = await fetch('/extract', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || 'An error occurred during extraction');
+                }
+                
+                resultJson.textContent = JSON.stringify(data, null, 2);
+                resultContainer.style.display = 'block';
+            } catch (err) {
+                errorMsg.textContent = `Error: ${err.message}`;
+                errorMsg.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                loader.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

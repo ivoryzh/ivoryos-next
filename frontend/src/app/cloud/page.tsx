@@ -127,7 +127,7 @@ export default function CloudSettingsPage() {
                   onChange={e => setToken(e.target.value)}
                   placeholder="Paste your Base64 Connection Token here..."
                   rows={6}
-                  className="w-full px-4 py-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm font-mono"
+                  className="w-full px-4 py-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-sm font-mono"
                 />
                 <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                   This secure token configures your edge device's connection to the Cloud message broker. It supports both local MQTT testing and AWS IoT Core.
@@ -155,7 +155,7 @@ export default function CloudSettingsPage() {
                 <button 
                   onClick={saveSettings}
                   disabled={isSaving}
-                  className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-blue-600 hover:bg-blue-700 text-white transition-colors shadow-sm shadow-blue-500/20 disabled:opacity-50"
+                  className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-sm shadow-indigo-500/20 disabled:opacity-50"
                 >
                   <Save className="w-4 h-4 shrink-0" />
                   <span>{isSaving ? 'Saving...' : 'Save Configuration'}</span>

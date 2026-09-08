@@ -1,0 +1,9 @@
+{
+  "name": "ivoryos-nextgen-root",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "cloud_frontend",
+    "packages/*"
+  ]
+}

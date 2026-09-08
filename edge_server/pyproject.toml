@@ -2,7 +2,7 @@
 name = "ivoryos-edge"
 version = "0.1.0"
 description = "IvoryOS Edge Server"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi",
     "uvicorn",

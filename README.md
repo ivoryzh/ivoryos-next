@@ -8,7 +8,7 @@ This repository contains the IvoryOS next-generation architecture, including the
 
 The edge server manages instruments and provides an API/Socket.IO interface.
 
-**Requirements**: Python 3.9+
+**Requirements**: Python 3.10+
 
 **Installation**:
 It is recommended to use a virtual environment.

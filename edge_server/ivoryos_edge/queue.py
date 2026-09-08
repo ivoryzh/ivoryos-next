@@ -1028,7 +1028,11 @@ class WorkflowQueueManager:
                     except Exception as e:
                         self.current_step_task = None
                         db_step.status = "error"
-                        import traceback
+                        # traceback is imported at module level — a local re-import here (even
+                        # this deep in a nested except) would make Python treat the name as local
+                        # to the whole enclosing function, breaking the earlier, legitimate
+                        # module-level traceback.format_exc() call in the existing-data handler
+                        # above (UnboundLocalError, since it runs before this line ever would).
                         db_step.error = str(e) + "\n" + traceback.format_exc()
                         trial_failed = True
 

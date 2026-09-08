@@ -69,14 +69,14 @@ function PluginContent() {
         <div className="flex-1 overflow-hidden relative bg-white dark:bg-[#0a0a0a]">
             {loading ? (
                 <div className="flex items-center justify-center h-full">
-                    <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                    <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
                 </div>
             ) : plugin ? (
-                <iframe 
-                    src={plugin.url}
+                <iframe
+                    src={plugin.url.startsWith('http') ? plugin.url : `${API_BASE}${plugin.url}`}
                     className="w-full h-full border-none"
                     title={plugin.name}
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
                 />
             ) : (
                 <div className="flex items-center justify-center h-full flex-col space-y-4">
@@ -91,7 +91,7 @@ function PluginContent() {
 
 export default function PluginPage() {
     return (
-        <Suspense fallback={<div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-[#0a0a0a]"><Loader2 className="w-8 h-8 animate-spin text-blue-500" /></div>}>
+        <Suspense fallback={<div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-[#0a0a0a]"><Loader2 className="w-8 h-8 animate-spin text-indigo-500" /></div>}>
             <PluginContent />
         </Suspense>
     );

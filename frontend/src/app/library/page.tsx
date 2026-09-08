@@ -130,7 +130,7 @@ export default function LibraryPage() {
                         placeholder="Search workflows..." 
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full pl-10 pr-4 py-2 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full pl-10 pr-4 py-2 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                 </div>
                 <div className="flex items-center space-x-3 w-full sm:w-auto">
@@ -141,7 +141,7 @@ export default function LibraryPage() {
                     <select 
                         value={sortBy}
                         onChange={(e) => setSortBy(e.target.value as any)}
-                        className="bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                         <option value="updated_at">Last Modified</option>
                         <option value="created_at">Date Created</option>
@@ -188,7 +188,7 @@ export default function LibraryPage() {
                     <div className="mt-6 flex justify-end">
                         <button 
                             onClick={() => loadWorkflow(workflow.name)}
-                            className="flex items-center space-x-2 px-4 py-2 bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/30 dark:hover:bg-blue-800/40 text-blue-600 dark:text-blue-300 rounded-lg transition-colors text-sm font-medium"
+                            className="flex items-center space-x-2 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:hover:bg-indigo-800/40 text-indigo-600 dark:text-indigo-300 rounded-lg transition-colors text-sm font-medium"
                         >
                             <Download className="w-4 h-4" />
                             <span>Load to Designer</span>

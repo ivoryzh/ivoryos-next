@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Search, Hash } from 'lucide-react';
+import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Search, Hash, Layers } from 'lucide-react';
 
 export type SequenceBlock = {
   id: string;
@@ -13,6 +13,11 @@ export type SequenceBlock = {
   isExpanded?: boolean;
   returnVar?: string;
   isHidden?: boolean;
+  // Only meaningful in the Main Workflow. Default (false/undefined) = "per-sample": when run
+  // against a spreadsheet, this step repeats once per row. true = "batch": the step runs once
+  // per batch group (a configurable number of consecutive rows, e.g. 4 samples heated together),
+  // not once per row — its #vars are read from whichever one row in the group has them filled in.
+  isBatchAction?: boolean;
 };
 
 interface WorkflowEditorProps {
@@ -248,6 +253,10 @@ export default function WorkflowEditor({
 
   const toggleHideBlock = (blockId: string, listId: string) => {
     updateBlock(listId, blockId, block => ({ ...block, isHidden: !block.isHidden }));
+  };
+
+  const toggleBatchAction = (blockId: string, listId: string) => {
+    updateBlock(listId, blockId, block => ({ ...block, isBatchAction: !block.isBatchAction }));
   };
 
   const toggleToolbox = (instName: string) => {
@@ -579,6 +588,21 @@ export default function WorkflowEditor({
 
                                       {/* Action Buttons */}
                                       <div className="flex items-center space-x-1 border-l border-gray-200 dark:border-white/10 pl-3">
+                                        {!isFlowBlock && listId === 'canvas' && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); toggleBatchAction(block.id, listId); }}
+                                            title={block.isBatchAction ? "Batch step: runs once per batch group (set the group size on the Configure page), not once per row. Click to make it per-sample again." : "Per-sample step: repeats once per row when run against a spreadsheet. Click to make it a batch step (runs once per batch group instead)."}
+                                            className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-bold transition-colors ${
+                                              block.isBatchAction
+                                                ? 'bg-teal-50 border-teal-300 text-teal-700 dark:bg-teal-500/20 dark:border-teal-700/40 dark:text-teal-300'
+                                                : 'bg-white border-gray-200 text-gray-500 hover:text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-400 dark:hover:text-gray-200'
+                                            }`}
+                                          >
+                                            <Layers className="w-3.5 h-3.5" />
+                                            <span>{block.isBatchAction ? 'Batch' : 'Per-Sample'}</span>
+                                          </button>
+                                        )}
                                         <button onClick={(e) => { e.stopPropagation(); toggleHideBlock(block.id, listId); }} className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
                                           {block.isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                                         </button>

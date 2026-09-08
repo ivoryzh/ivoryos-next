@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ivoryos-schema-worker"
+version = "0.1.0"
+description = "A microservice to extract JSON schemas from Python modules."
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "httpx"
+]

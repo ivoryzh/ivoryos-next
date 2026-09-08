@@ -51,7 +51,8 @@ export default function DesignerPage() {
             params: b.args || b.params || {},
             returnVar: b.return || b.returnVar || '',
             schema: {},
-            isExpanded: false
+            isExpanded: false,
+            isBatchAction: !!b.batch_action
           }));
         };
 
@@ -317,7 +318,7 @@ export default function DesignerPage() {
         args: block.params,
         arg_types: argTypes,
         return: block.returnVar || "",
-        batch_action: false,
+        batch_action: !!block.isBatchAction,
         consolidate_batch_args: false
       };
     });
@@ -515,7 +516,7 @@ export default function DesignerPage() {
                       onClick={saveWorkflow}
                       disabled={sequence.length === 0}
                       title="Save"
-                      className="flex items-center justify-center p-1.5 rounded transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex items-center justify-center p-1.5 rounded transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Save className="w-3.5 h-3.5" />
                     </button>
@@ -608,7 +609,7 @@ export default function DesignerPage() {
                         className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
                             ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                             : hasDynamicParams
-                              ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50 shadow-sm'
+                              ? 'bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50 shadow-sm'
                               : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
                           }`}
                       >

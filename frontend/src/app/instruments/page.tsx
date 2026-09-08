@@ -180,7 +180,7 @@ export default function InstrumentsPage() {
                     onClick={() => setActiveTab(instName)}
                     className={`px-4 py-2 font-medium text-sm transition-colors border-b-2 whitespace-nowrap capitalize ${
                       activeTab === instName
-                        ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                        ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                         : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
                     }`}
                   >
@@ -199,10 +199,10 @@ export default function InstrumentsPage() {
                       <div key={methodName} className="p-5 rounded-2xl bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 flex flex-col shadow-sm dark:shadow-none">
                         <div className="flex items-center justify-between mb-5">
                           <div className="flex items-center space-x-2">
-                            <h4 className="font-semibold text-blue-600 dark:text-blue-400 break-all capitalize">{methodName.replace(/_/g, ' ')}</h4>
+                            <h4 className="font-semibold text-indigo-600 dark:text-indigo-400 break-all capitalize">{methodName.replace(/_/g, ' ')}</h4>
                             {methodData.description && (
                               <div className="relative group">
-                                <Info className="w-4 h-4 text-gray-400 hover:text-blue-500 cursor-help" />
+                                <Info className="w-4 h-4 text-gray-400 hover:text-indigo-500 cursor-help" />
                                 <div className="hidden group-hover:block absolute left-1/2 -translate-x-1/2 top-full mt-2 w-64 p-3 bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-xs rounded-lg shadow-xl z-50 whitespace-pre-wrap max-h-48 overflow-y-auto">
                                   {methodData.description}
                                 </div>
@@ -238,7 +238,7 @@ export default function InstrumentsPage() {
                                   {displayType.includes('bool') ? (
                                     <select
                                       value={currentValue !== undefined ? currentValue.toString() : (pData.default !== undefined ? pData.default.toString() : '')}
-                                      className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-blue-500 transition-colors text-gray-900 dark:text-white"
+                                      className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors text-gray-900 dark:text-white"
                                       onChange={(e) => handleInputChange(instName, methodName, paramPath, e.target.value === 'true')}
                                     >
                                       <option value="">Select boolean...</option>
@@ -250,7 +250,7 @@ export default function InstrumentsPage() {
                                       type={displayType.includes('int') || displayType.includes('float') ? 'number' : 'text'}
                                       step={displayType.includes('float') ? 'any' : '1'}
                                       value={currentValue !== undefined ? currentValue : (pData.default !== undefined ? pData.default : '')}
-                                      className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-blue-500 transition-colors text-gray-900 dark:text-white"
+                                      className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors text-gray-900 dark:text-white"
                                       placeholder={displayType}
                                       onChange={(e) => {
                                         let val: any = e.target.value;
@@ -276,7 +276,7 @@ export default function InstrumentsPage() {
                             className={`w-full py-2 text-sm rounded-lg font-medium transition-all shadow-sm ${
                               executing[key] 
                                 ? 'bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400 cursor-not-allowed' 
-                                : 'bg-gray-100 hover:bg-blue-600 hover:text-white dark:bg-white/10 dark:hover:bg-blue-600 text-gray-700 dark:text-white border border-gray-200 dark:border-transparent'
+                                : 'bg-gray-100 hover:bg-indigo-600 hover:text-white dark:bg-white/10 dark:hover:bg-indigo-600 text-gray-700 dark:text-white border border-gray-200 dark:border-transparent'
                             }`}
                           >
                             {executing[key] ? 'Executing...' : 'Execute'}
@@ -305,7 +305,7 @@ export default function InstrumentsPage() {
                 <div key={i} className="flex flex-col text-gray-700 dark:text-gray-300 items-start border-b border-gray-100 dark:border-white/5 pb-2 mb-2 last:border-0 last:mb-0 last:pb-0">
                   <div className="flex w-full space-x-3 items-center mb-1">
                     <span className="text-gray-400 dark:text-gray-600 shrink-0 text-[10px]">[{log.time}]</span>
-                    <span className="text-blue-600 dark:text-blue-400 font-semibold truncate flex-1" title={log.key}>{log.key}</span>
+                    <span className="text-indigo-600 dark:text-indigo-400 font-semibold truncate flex-1" title={log.key}>{log.key}</span>
                     <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold ${
                       log.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 
                       log.status === 'started' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :

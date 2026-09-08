@@ -1,0 +1,107 @@
+<?xml version="1.0" ?>
+<robot name="ur5e">
+  <!-- Base Link -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/base.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <!-- Shoulder Link -->
+  <link name="shoulder_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/shoulder.dae"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="shoulder_pan_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 0.1625" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28" upper="6.28" effort="150.0" velocity="3.14"/>
+  </joint>
+
+  <!-- Upper Arm Link -->
+  <link name="upper_arm_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/upperarm.dae"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="shoulder_lift_joint" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0.138 0" rpy="0 1.57079632679 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-6.28" upper="6.28" effort="150.0" velocity="3.14"/>
+  </joint>
+
+  <!-- Forearm Link -->
+  <link name="forearm_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/forearm.dae"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="elbow_joint" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="0 -0.131 0.425" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="150.0" velocity="3.14"/>
+  </joint>
+
+  <!-- Wrist 1 Link -->
+  <link name="wrist_1_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/wrist1.dae"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="wrist_1_joint" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_1_link"/>
+    <origin xyz="0 0 0.3922" rpy="0 1.57079632679 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-6.28" upper="6.28" effort="28.0" velocity="6.28"/>
+  </joint>
+
+  <!-- Wrist 2 Link -->
+  <link name="wrist_2_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/wrist2.dae"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="wrist_2_joint" type="revolute">
+    <parent link="wrist_1_link"/>
+    <child link="wrist_2_link"/>
+    <origin xyz="0 0.127 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28" upper="6.28" effort="28.0" velocity="6.28"/>
+  </joint>
+
+  <!-- Wrist 3 Link -->
+  <link name="wrist_3_link">
+    <visual>
+      <geometry>
+        <mesh filename="universal_robot/ur_description/meshes/ur5e/visual/wrist3.dae"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="wrist_3_joint" type="revolute">
+    <parent link="wrist_2_link"/>
+    <child link="wrist_3_link"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-6.28" upper="6.28" effort="28.0" velocity="6.28"/>
+  </joint>
+</robot>

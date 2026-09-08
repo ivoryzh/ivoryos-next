@@ -14,14 +14,17 @@ interface SidebarProps {
 export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [plugins, setPlugins] = useState<any[]>([]);
-  const [isExpanded, setIsExpanded] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('ivoryos_sidebar_expanded');
-      if (saved !== null) return saved === 'true';
-    }
-    return true;
-  });
+  // Starts at the same default on server and client, then corrects from localStorage in an
+  // effect (client-only, runs after hydration) — reading localStorage inside the useState
+  // initializer would make the client's first render disagree with the server-rendered HTML
+  // whenever the saved preference differs from the default, causing a hydration mismatch.
+  const [isExpanded, setIsExpanded] = useState(true);
   const pathname = usePathname();
+
+  useEffect(() => {
+    const saved = localStorage.getItem('ivoryos_sidebar_expanded');
+    if (saved !== null) setIsExpanded(saved === 'true');
+  }, []);
 
   const [waitingRun, setWaitingRun] = useState<{ id: number; prompt: string } | null>(null);
   const [inputValue, setInputValue] = useState('');
@@ -102,7 +105,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         title={!isExpanded ? label : undefined}
         className={`flex items-center py-3 rounded-lg overflow-hidden mx-3 ${
           isActive 
-            ? 'bg-blue-50 dark:bg-white/10 text-blue-600 dark:text-white' 
+            ? 'bg-indigo-50 dark:bg-white/10 text-indigo-600 dark:text-white' 
             : 'hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'
         }`}
       >
@@ -148,7 +151,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         </div>
       </div>
     )}
-    <aside suppressHydrationWarning className={`shrink-0 bg-white dark:bg-white/5 backdrop-blur-md border-r border-gray-200 dark:border-white/10 flex flex-col py-6 space-y-6 z-10 overflow-hidden ${isExpanded ? 'w-64' : 'w-[72px]'}`}>
+    <aside className={`shrink-0 bg-white dark:bg-white/5 backdrop-blur-md border-r border-gray-200 dark:border-white/10 flex flex-col py-6 space-y-6 z-10 overflow-hidden ${isExpanded ? 'w-64' : 'w-[72px]'}`}>
       <div className="flex items-center w-full px-3">
         <button onClick={toggleExpanded} className="w-[44px] h-[44px] text-gray-500 hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 flex items-center justify-center rounded-lg transition-colors">
           <Menu className="w-5 h-5 shrink-0" />

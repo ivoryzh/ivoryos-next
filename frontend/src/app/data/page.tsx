@@ -106,18 +106,33 @@ export default function DataPage() {
               });
           }
       } else if (type === 'Spreadsheet') {
+          const inputVars = vars;
           const rowCount = r.parameters?.rows?.length || 0;
-          const seqLength = r.steps?.length ? Math.floor(r.steps.length / rowCount) : 0;
-          
+          // Only present on runs submitted after this was added — older persisted runs have no
+          // record of which step is "the" output, so they fall back to input-only columns below
+          // (their outputs are still visible per-row in the UI, and via Export Log).
+          const seqTemplate = r.parameters?.sequence_template || [];
+          const returnVars = seqTemplate.filter((t: any) => t.returnVar).map((t: any) => t.returnVar);
+          const seqLength = seqTemplate.length || (rowCount > 0 && r.steps?.length ? Math.floor(r.steps.length / rowCount) : 0);
+          vars = [...inputVars, ...returnVars];
+
           for(let i=0; i<rowCount; i++) {
               const rowSteps = r.steps?.slice(i * seqLength, (i+1) * seqLength) || [];
               const hasError = rowSteps.some((s: any) => s.status === 'error');
               const isRunning = rowSteps.some((s: any) => s.status === 'running');
               const isPending = rowSteps.every((s: any) => s.status === 'pending');
               const status = hasError ? 'error' : isRunning ? 'running' : isPending ? 'pending' : 'completed';
-              
-              const dataStr = vars.map((v: string) => r.parameters.rows[i][v]).join(',');
-              
+
+              const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
+              // Match each returnVar to the step at the same position in the per-row template —
+              // rowSteps mirrors seqTemplate's order since every row repeats the same block sequence.
+              const outputVals = returnVars.map((rv: string) => {
+                  const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === rv);
+                  const step = tmplIdx >= 0 ? rowSteps[tmplIdx] : null;
+                  return step?.outputs?.result !== undefined ? step.outputs.result : '';
+              });
+              const dataStr = [...inputVals, ...outputVals].join(',');
+
               rows.push({
                   row: i + 1,
                   status,
@@ -383,7 +398,7 @@ export default function DataPage() {
                         <div 
                            key={run.id}
                            onClick={() => setSelectedRun(run)}
-                           className={`p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
+                           className={`p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
                         >
                            <div className="flex justify-between items-center mb-1">
                                <span className="text-xs font-bold text-gray-800 dark:text-gray-200">{run.name.split(' - ')[0]}</span>
@@ -403,7 +418,7 @@ export default function DataPage() {
                 <>
                 <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
                   <div className="flex items-center space-x-3">
-                    <Database className="w-5 h-5 text-blue-500" />
+                    <Database className="w-5 h-5 text-indigo-500" />
                     <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">{selectedRun.name.split(' - ')[0]}</h2>
                   </div>
                   <div className="flex items-center space-x-2">
@@ -418,7 +433,7 @@ export default function DataPage() {
                     )}
                     <button 
                         onClick={() => downloadRunLogCSV(selectedRun)}
-                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50"
+                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
                     >
                       <Download className="w-4 h-4" />
                       <span>Export Log</span>
@@ -453,7 +468,7 @@ export default function DataPage() {
                               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
                                   {selectedRun.config.parameter_space.map((p: any) => (
                                       <div key={p.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
-                                          <span className="text-[11px] font-bold text-blue-500 font-mono truncate">#{p.name}</span>
+                                          <span className="text-[11px] font-bold text-indigo-500 font-mono truncate">#{p.name}</span>
                                           <span className="text-xs text-gray-600 dark:text-gray-300">
                                               {p.type === 'choice' ? `choice: ${(p.bounds || []).join(', ')}` : `range: ${p.bounds?.[0]} – ${p.bounds?.[1]}`}
                                               <span className="text-gray-400"> ({p.value_type})</span>
@@ -523,7 +538,7 @@ export default function DataPage() {
                                                 <div className={`flex items-center justify-between ${(!isFlowControl && (hasParams || hasResult || step.error)) ? 'mb-3' : ''}`}>
                                                     <div className="flex items-center space-x-3">
                                                         <span className="text-gray-400 font-mono text-xs">[{idx + 1}]</span>
-                                                        <span className="font-bold text-blue-600 dark:text-blue-400 break-words">
+                                                        <span className="font-bold text-indigo-600 dark:text-indigo-400 break-words">
                                                             {isFlowControl ? step.method : `${step.instrument}.${step.method}`}
                                                             {isFlowControl && step.method === 'If' && <span className="ml-2 font-mono text-xs text-indigo-500 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded border border-indigo-100 dark:border-indigo-500/30">condition: {paramsWithoutPhase.condition}</span>}
                                                             {isFlowControl && step.method === 'While' && <span className="ml-2 font-mono text-xs text-indigo-500 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded border border-indigo-100 dark:border-indigo-500/30">condition: {paramsWithoutPhase.condition}</span>}
@@ -538,7 +553,7 @@ export default function DataPage() {
                                                         <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
                                                             step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 
                                                             step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 
-                                                            step.status === 'running' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                                                            step.status === 'running' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' :
                                                             'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
                                                         }`}>
                                                             {step.status}
@@ -622,7 +637,7 @@ export default function DataPage() {
                                                            <div className="flex justify-between items-center mb-1 min-w-0">
                                                               <div className="flex items-center space-x-2 min-w-0">
                                                                   <span className="text-gray-400 font-mono text-[10px] shrink-0">[{sIdx + 1}]</span>
-                                                                  <span className="font-bold text-blue-600 dark:text-blue-400 text-xs truncate">{step.instrument}.{step.method}</span>
+                                                                  <span className="font-bold text-indigo-600 dark:text-indigo-400 text-xs truncate">{step.instrument}.{step.method}</span>
                                                               </div>
                                                               <span className={`px-2 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold shrink-0 ml-2 ${step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-100 text-gray-500'}`}>{step.status}</span>
                                                            </div>

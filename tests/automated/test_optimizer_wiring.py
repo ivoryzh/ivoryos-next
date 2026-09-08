@@ -12,8 +12,11 @@ class MockOptimizer(OptimizerBase):
     instead of the old hardcoded optimizer_config={}.
     """
     init_calls = []
-    suggest_calls = 0
+    suggest_calls = 0       # count of suggest() calls made (one per round, not per trial)
+    suggest_n_values = []   # the `n` actually requested on each of those calls, in order
     observe_calls = []
+    append_existing_data_calls = []
+    _counter = 0
 
     def __init__(self, experiment_name, parameter_space, objective_config, optimizer_config,
                  parameter_constraints=None, datapath=None, additional_params=None):
@@ -28,13 +31,18 @@ class MockOptimizer(OptimizerBase):
 
     def suggest(self, n=1):
         MockOptimizer.suggest_calls += 1
-        return [{"x": 0.5}]
+        MockOptimizer.suggest_n_values.append(n)
+        suggestions = []
+        for _ in range(n):
+            MockOptimizer._counter += 1
+            suggestions.append({"x": MockOptimizer._counter * 0.1})
+        return suggestions
 
     def observe(self, results):
         MockOptimizer.observe_calls.append(results)
 
     def append_existing_data(self, existing_data, file_path=None):
-        pass
+        MockOptimizer.append_existing_data_calls.append(existing_data)
 
     def get_plots(self, plot_type):
         return {"plot_type_seen": plot_type, "Trace": "<div>fake plot</div>"}
@@ -54,7 +62,10 @@ def register_mock_optimizer():
     OPTIMIZER_REGISTRY["mock"] = MockOptimizer
     MockOptimizer.init_calls = []
     MockOptimizer.suggest_calls = 0
+    MockOptimizer.suggest_n_values = []
     MockOptimizer.observe_calls = []
+    MockOptimizer.append_existing_data_calls = []
+    MockOptimizer._counter = 0
     yield
     del OPTIMIZER_REGISTRY["mock"]
 
@@ -119,6 +130,87 @@ async def test_optimization_run_passes_real_config_to_optimizer():
         # return the last run's plots.
         no_plots_resp = await ac.get("/api/queue/runs/999999/plots")
         assert no_plots_resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_optimization_run_batches_suggestions_per_round():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "name": "Test Batch Size",
+            "parameters": {
+                "type": "Optimization",
+                "optimizer": "mock",
+                "budget": 4,
+                "batch_size": 2,
+                "optimizer_config": {"step_1": {"model": "TestModel", "num_samples": 2}},
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "y", "minimize": True}],
+                "sequence_template": [
+                    {"instrument": "dummy", "method": "echo_method", "params": {"value": "0"}, "returnVar": "y"}
+                ]
+            }
+        }
+        response = await ac.post("/api/queue/runs", json=payload)
+        run_id = response.json()["run_id"]
+
+        status = "pending"
+        run = None
+        for _ in range(50):
+            resp = await ac.get("/api/queue/runs")
+            runs = resp.json()["runs"]
+            run = next((r for r in runs if r["id"] == run_id), None)
+            if run and run["status"] in ["completed", "error", "cancelled"]:
+                status = run["status"]
+                break
+            await asyncio.sleep(0.05)
+
+        assert status == "completed", f"Expected 'completed', got {status}; steps={run and run.get('steps')}"
+        # budget=4, batch_size=2 -> exactly 2 rounds of 2 trials each, not 4 rounds of 1.
+        assert MockOptimizer.suggest_n_values == [2, 2]
+        # Each round's observe() call carries both trials' results together, not one call per trial.
+        assert len(MockOptimizer.observe_calls) == 2
+        for call in MockOptimizer.observe_calls:
+            assert isinstance(call, list) and len(call) == 2
+        # Still 4 real steps executed overall (1 templated step x 4 trials).
+        assert len(run["steps"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_optimization_run_appends_existing_data_before_first_suggestion():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        seed_rows = [{"x": 0.2, "y": 1.5}, {"x": 0.7, "y": 3.1}]
+        payload = {
+            "name": "Test Existing Data",
+            "parameters": {
+                "type": "Optimization",
+                "optimizer": "mock",
+                "budget": 1,
+                "optimizer_config": {"step_1": {"model": "TestModel", "num_samples": 2}},
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "y", "minimize": True}],
+                "existing_data": seed_rows,
+                "sequence_template": [
+                    {"instrument": "dummy", "method": "echo_method", "params": {"value": "0"}, "returnVar": "y"}
+                ]
+            }
+        }
+        response = await ac.post("/api/queue/runs", json=payload)
+        run_id = response.json()["run_id"]
+
+        status = "pending"
+        for _ in range(50):
+            resp = await ac.get("/api/queue/runs")
+            runs = resp.json()["runs"]
+            run = next((r for r in runs if r["id"] == run_id), None)
+            if run and run["status"] in ["completed", "error", "cancelled"]:
+                status = run["status"]
+                break
+            await asyncio.sleep(0.05)
+
+        assert status == "completed", f"Expected 'completed', got {status}"
+        assert len(MockOptimizer.append_existing_data_calls) == 1
+        seeded_df = MockOptimizer.append_existing_data_calls[0]
+        assert seeded_df.to_dict(orient="records") == seed_rows
 
 
 @pytest.mark.asyncio
@@ -252,6 +344,46 @@ async def test_optimization_run_all_mode_waits_for_every_criterion():
         # 6 iterations x 2 templated steps each — stopped once z (the slower criterion) also
         # reached 3, not at iteration 3 when only y had reached it.
         assert len(run["steps"]) == 12
+
+
+@pytest.mark.asyncio
+async def test_optimization_run_uses_per_iteration_values_for_excluded_var():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "name": "Test Per-Iteration Values",
+            "parameters": {
+                "type": "Optimization",
+                "optimizer": "mock",
+                "budget": 3,
+                "optimizer_config": {"step_1": {"model": "TestModel", "num_samples": 2}},
+                # 'vial_index' is deliberately NOT in parameter_space — it's excluded from the
+                # search space and given its own value per iteration instead of one fixed value.
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "y", "minimize": True}],
+                "iteration_values": {"vial_index": ["1", "2", "3"]},
+                "sequence_template": [
+                    {"instrument": "dummy", "method": "echo_method", "params": {"value": "#vial_index"}, "returnVar": "y"}
+                ]
+            }
+        }
+
+        response = await ac.post("/api/queue/runs", json=payload)
+        run_id = response.json()["run_id"]
+
+        status = "pending"
+        run = None
+        for _ in range(50):
+            resp = await ac.get("/api/queue/runs")
+            runs = resp.json()["runs"]
+            run = next((r for r in runs if r["id"] == run_id), None)
+            if run and run["status"] in ["completed", "error", "cancelled"]:
+                status = run["status"]
+                break
+            await asyncio.sleep(0.05)
+
+        assert status == "completed", f"Expected 'completed', got {status}; steps={run and run.get('steps')}"
+        vial_indices = [s["parameters"].get("value") for s in run["steps"]]
+        assert vial_indices == ["1", "2", "3"]
 
 
 @pytest.mark.asyncio

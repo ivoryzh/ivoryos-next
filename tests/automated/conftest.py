@@ -29,6 +29,11 @@ class DummyInstrument:
         self.counter_b += 0.5
         return self.counter_b
 
+    def echo_method(self, value: str = ""):
+        """Returns whatever it's given — no side effects, no sleep. Lets a test assert on the
+        exact value a step actually received without caring what the value means."""
+        return value
+
 import pytest_asyncio
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

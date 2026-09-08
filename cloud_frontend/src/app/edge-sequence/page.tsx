@@ -52,7 +52,8 @@ export default function DesignerPage() {
             params: b.args || b.params || {},
             returnVar: b.return || b.returnVar || '',
             schema: {},
-            isExpanded: false
+            isExpanded: false,
+            isBatchAction: !!b.batch_action
           }));
         };
 
@@ -311,7 +312,7 @@ export default function DesignerPage() {
           args: block.params,
           arg_types: argTypes,
           return: block.returnVar || "",
-          batch_action: false,
+          batch_action: !!block.isBatchAction,
           consolidate_batch_args: false
         };
     });

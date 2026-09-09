@@ -42,6 +42,7 @@ class LocalMQTTBroker(MessageBroker):
 
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
+        self.client.on_disconnect = self._on_disconnect
         self.loop = None
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
@@ -49,6 +50,12 @@ class LocalMQTTBroker(MessageBroker):
             print(f"Connected to MQTT Broker at {self.host}:{self.port}")
         else:
             print(f"Failed to connect to MQTT broker, return code {rc}")
+
+    def _on_disconnect(self, client, userdata, *args):
+        # *args absorbs both paho v1 (rc) and v2 (DisconnectFlags, ReasonCode, properties) call
+        # shapes. Kept deliberately minimal — this exists for connection-stability visibility
+        # (e.g. spotting an unexpected disconnect loop), not routine noise on every reconnect.
+        print(f"Disconnected from broker at {self.host}:{self.port}")
 
     def set_will(self, topic: str, payload: dict, retain: bool = False):
         """Registers a Last Will and Testament: the broker publishes this on our behalf if we

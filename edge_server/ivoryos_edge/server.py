@@ -139,12 +139,28 @@ def publish_sequences(broker, topic_prefix, client_id):
 async def status_loop(broker, topic_prefix, client_id):
     """A cheap, frequent liveness signal — deliberately just {online, ts}, not the schema. Kept
     small on purpose: at a 5s interval this is what actually gets billed per-message on AWS IoT,
-    and 'online' is also covered by the LWT for the ungraceful-disconnect case (see setup_broker)."""
+    and 'online' is also covered by the LWT for the ungraceful-disconnect case (see setup_broker).
+
+    Also periodically re-publishes schema/sequences (every 12th tick, ~60s) — NOT just once on
+    connect the way setup_broker's initial calls do. Those initial calls are one-shot QoS-1
+    publishes with no retry; a real, reproduced bug was AWS IoT's connection needing a few rapid
+    client-initiated reconnects to settle right after startup (root cause of *that* churn still
+    open), which raced the one-shot schema/sequences publish and silently dropped it — status
+    itself never showed a symptom because it's QoS-0 and re-sent every 5s regardless, so it just
+    self-healed on the next tick. Confirmed directly: 284 'status' messages arrived at the
+    daemon during testing, zero 'schema' or 'sequences' ones, from the exact same connection.
+    Folding schema/sequences into this already-repeating loop gives them the same self-healing
+    property instead of trying to fix the one-shot call to race-proof itself."""
+    tick = 0
     while True:
         try:
             broker.publish(f"{topic_prefix}/{client_id}/status", {"online": True, "ts": time.time()}, retain=True, qos=0)
+            if tick % 12 == 0:
+                publish_schema(broker, topic_prefix, client_id)
+                publish_sequences(broker, topic_prefix, client_id)
         except Exception as e:
             print(f"Error publishing status: {e}")
+        tick += 1
         await asyncio.sleep(5)
 
 async def setup_broker():

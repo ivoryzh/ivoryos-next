@@ -15,6 +15,7 @@
     "@ivoryos/shared-ui": "*",
     "@supabase/supabase-js": "^2.116.0",
     "@xyflow/react": "^12.11.6",
+    "dotenv": "^17.4.2",
     "lucide-react": "^1.39.0",
     "mqtt": "^5.15.2",
     "next": "^16.3.0",

@@ -8,6 +8,11 @@
 // by design. It does NOT yet publish `execute` tasks back to devices; that's the dispatch half of
 // the Cloud orchestrator (src/lib/orchestrator.ts) and still needs to be wired to this same
 // connection — tracked separately, not done here.
+// Unlike Next.js (which auto-loads .env.local for the app), a plain `node daemon.js` process
+// starts with none of that — without this, every var below would be undefined even with a fully
+// filled-in .env.local sitting right next to this file.
+require('dotenv').config({ path: require('path').join(__dirname, '.env.local') });
+
 const mqtt = require('mqtt');
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');

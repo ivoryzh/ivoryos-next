@@ -9,8 +9,10 @@ export default function CloudSettingsPage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [token, setToken] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState('');
+  // 'idle' means "not attempted this session" — distinct from 'disconnected', which means the
+  // edge server itself confirmed there's no active broker connection (e.g. token was cleared).
+  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected' | 'error' | 'disconnected'>('idle');
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme') || 'light';
@@ -23,6 +25,8 @@ export default function CloudSettingsPage() {
       .then(res => res.json())
       .then(data => {
         if (data.token !== undefined) setToken(data.token);
+        if (data.connection_state) setConnectionState(data.connection_state);
+        if (data.connection_error) setError(data.connection_error);
       })
       .catch(err => {
         console.error("Failed to fetch cloud settings", err);
@@ -38,9 +42,13 @@ export default function CloudSettingsPage() {
     else document.documentElement.classList.remove('dark');
   };
 
+  // Validate: the POST below blocks on the edge server actually attempting the connection (up to
+  // ~5s — see setup_broker's is_connected() poll) and its response IS the real outcome, so there's
+  // no separate "click save, then hope" step — a bad cert or wrong endpoint comes back as an
+  // explicit error here, not silence.
   const saveSettings = async () => {
     setIsSaving(true);
-    setSaveSuccess(false);
+    setConnectionState('connecting');
     setError('');
 
     try {
@@ -49,15 +57,21 @@ export default function CloudSettingsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token })
       });
-      
+      const data = await res.json();
+
       if (res.ok) {
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 3000);
+        setConnectionState(data.connection_state || 'error');
+        // 'disconnected' is a valid, non-error outcome (e.g. the token field was left empty) —
+        // only 'error' actually means the connection attempt failed.
+        if (data.connection_state === 'error') {
+          setError(data.connection_error || 'Failed to connect — check the token and try again.');
+        }
       } else {
-        const data = await res.json();
+        setConnectionState('error');
         setError(data.error || 'Failed to save settings.');
       }
     } catch (err: any) {
+      setConnectionState('error');
       setError(err.message || 'Network error.');
     } finally {
       setIsSaving(false);
@@ -66,7 +80,6 @@ export default function CloudSettingsPage() {
 
   const disconnectCloud = async () => {
     setIsSaving(true);
-    setSaveSuccess(false);
     setError('');
 
     try {
@@ -75,11 +88,10 @@ export default function CloudSettingsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: "" })
       });
-      
+
       if (res.ok) {
         setToken("");
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 3000);
+        setConnectionState('disconnected');
       } else {
         const data = await res.json();
         setError(data.error || 'Failed to disconnect.');
@@ -105,9 +117,25 @@ export default function CloudSettingsPage() {
             <div className="mb-8">
               <h2 className="text-xl font-semibold mb-2">Edge-to-Cloud Registration</h2>
               <p className="text-gray-500 dark:text-gray-400 text-sm">
-                Configure your edge device to connect to a centralized IvoryOS SaaS Cloud Orchestrator. 
-                When connected, this device will securely poll the cloud for distributed execution tasks.
+                Configure your edge device to connect to a centralized IvoryOS SaaS Cloud Orchestrator.
+                When connected, this device publishes its status, schema, and saved workflows to the cloud over MQTT.
               </p>
+            </div>
+
+            <div className="mb-6 flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${
+                connectionState === 'connected' ? 'bg-green-500' :
+                connectionState === 'connecting' ? 'bg-amber-500 animate-pulse' :
+                connectionState === 'error' ? 'bg-red-500' :
+                'bg-gray-300 dark:bg-gray-600'
+              }`} />
+              <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                {connectionState === 'connected' ? 'Connected' :
+                 connectionState === 'connecting' ? 'Connecting…' :
+                 connectionState === 'error' ? 'Connection failed' :
+                 connectionState === 'disconnected' ? 'Disconnected' :
+                 'Not configured'}
+              </span>
             </div>
 
             {error && (
@@ -137,10 +165,10 @@ export default function CloudSettingsPage() {
 
             <div className="mt-8 pt-6 border-t border-gray-200 dark:border-white/10 flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                {saveSuccess && (
+                {connectionState === 'connected' && !isSaving && (
                   <span className="flex items-center space-x-1.5 text-sm font-medium text-green-600 dark:text-green-400">
                     <CheckCircle2 className="w-4 h-4" />
-                    <span>Settings saved</span>
+                    <span>Validated — broker connection confirmed</span>
                   </span>
                 )}
               </div>
@@ -158,7 +186,7 @@ export default function CloudSettingsPage() {
                   className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-sm shadow-indigo-500/20 disabled:opacity-50"
                 >
                   <Save className="w-4 h-4 shrink-0" />
-                  <span>{isSaving ? 'Saving...' : 'Save Configuration'}</span>
+                  <span>{isSaving ? 'Connecting…' : 'Save & Validate'}</span>
                 </button>
               </div>
             </div>

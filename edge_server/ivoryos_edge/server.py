@@ -38,6 +38,11 @@ CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
 global_broker = None
 global_topic_prefix = None
 global_client_id = None
+# Surfaces *why* a connection attempt failed (bad cert, wrong endpoint, refused, timed out) so the
+# Cloud Connect page can show an actionable message instead of just a red X — previously a failure
+# in setup_broker() only ever reached a server-side print(), invisible to the frontend entirely.
+cloud_connection_state = "disconnected"  # "disconnected" | "connecting" | "connected" | "error"
+cloud_connection_error = None
 
 class CloudSettingsRequest(BaseModel):
     token: str
@@ -46,35 +51,45 @@ class CloudSettingsRequest(BaseModel):
 def get_cloud_settings():
     return {
         "token": CLOUD_TOKEN,
+        "connection_state": cloud_connection_state,
+        "connection_error": cloud_connection_error,
     }
 
 @app.post("/api/cloud-settings")
 async def update_cloud_settings(req: CloudSettingsRequest):
     global CLOUD_TOKEN
     CLOUD_TOKEN = req.token
-    
+
     # Save to .env
     env_lines = []
     if os.path.exists(ENV_PATH):
         with open(ENV_PATH, "r") as f:
             env_lines = f.readlines()
-            
+
     token_found = False
     for i, line in enumerate(env_lines):
         if line.startswith("CLOUD_TOKEN="):
             env_lines[i] = f"CLOUD_TOKEN={CLOUD_TOKEN}\n"
             token_found = True
-            
+
     if not token_found:
         env_lines.append(f"CLOUD_TOKEN={CLOUD_TOKEN}\n")
-        
+
     with open(ENV_PATH, "w") as f:
         f.writelines(env_lines)
-        
-    # Apply token immediately
-    asyncio.create_task(setup_broker())
-        
-    return {"status": "success"}
+
+    # Awaited (not fire-and-forget) so this response IS the validation result — the frontend
+    # doesn't need a separate poll loop to find out whether the token actually works.
+    await setup_broker()
+
+    # Clearing the token is a deliberate, successful disconnect, not a failed connection attempt —
+    # only report "error" when a token was actually supplied and it failed to connect.
+    succeeded = (not CLOUD_TOKEN) or cloud_connection_state == "connected"
+    return {
+        "status": "success" if succeeded else "error",
+        "connection_state": cloud_connection_state,
+        "connection_error": cloud_connection_error,
+    }
 
 from .broker import LocalMQTTBroker, AWSIoTBroker
 
@@ -133,14 +148,19 @@ async def status_loop(broker, topic_prefix, client_id):
         await asyncio.sleep(5)
 
 async def setup_broker():
-    global global_broker
+    global global_broker, cloud_connection_state, cloud_connection_error
     if global_broker:
         global_broker.disconnect()
         global_broker = None
-        
+
     if not CLOUD_TOKEN:
+        cloud_connection_state = "disconnected"
+        cloud_connection_error = None
         return
-        
+
+    cloud_connection_state = "connecting"
+    cloud_connection_error = None
+
     try:
         # Standardize token decoding: support raw JSON fallback if user didn't base64 encode
         try:
@@ -189,6 +209,19 @@ async def setup_broker():
             # forever after a hard failure.
             global_broker.set_will(f"{topic_prefix}/{client_id}/status", {"online": False, "ts": time.time()}, retain=True)
             global_broker.connect()
+
+            # connect() only starts the handshake — paho reports the real CONNACK result
+            # asynchronously via the on_connect callback, on a background thread. Poll briefly for
+            # that instead of reporting "success" the instant the socket call returns, so a bad
+            # cert or unreachable endpoint actually surfaces as a failure here rather than a
+            # false-positive "connected" that only reveals itself later as silence.
+            for _ in range(50):  # up to ~5s
+                if global_broker.client.is_connected():
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise TimeoutError("Timed out waiting to connect — check the endpoint and, for AWS IoT, that the certificate is registered and its policy allows this Thing to connect.")
+
             global_broker.subscribe(f"{topic_prefix}/{client_id}/execute")
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
@@ -199,9 +232,20 @@ async def setup_broker():
             publish_sequences(global_broker, topic_prefix, client_id)
 
             asyncio.create_task(status_loop(global_broker, topic_prefix, client_id))
-            
+
+            cloud_connection_state = "connected"
+            cloud_connection_error = None
+
     except Exception as e:
         print(f"Failed to setup broker from token: {e}")
+        cloud_connection_state = "error"
+        cloud_connection_error = str(e)
+        if global_broker:
+            try:
+                global_broker.disconnect()
+            except Exception:
+                pass
+            global_broker = None
 
 class ExecuteRequest(BaseModel):
     module: str

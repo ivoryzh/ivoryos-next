@@ -10,6 +10,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@aws-sdk/client-iot": "^3.1128.0",
     "@hello-pangea/dnd": "^18.0.1",
     "@ivoryos/shared-ui": "*",
     "@supabase/supabase-js": "^2.116.0",

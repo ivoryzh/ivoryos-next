@@ -12,7 +12,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# A bare, unscoped "lib/" line used to live here and silently matched (and dropped from git
+# entirely, with no warning) cloud_frontend/src/lib/ — a real source directory, nothing to do
+# with Python packaging. It's not missed: build/ already covers a setuptools build/lib/ output
+# dir on its own, and .venv/ / venv/ below already cover a real virtualenv's lib/ subdirectory.
 lib64/
 parts/
 sdist/

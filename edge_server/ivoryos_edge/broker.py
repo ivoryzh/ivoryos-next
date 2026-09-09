@@ -55,6 +55,10 @@ class LocalMQTTBroker(MessageBroker):
         # *args absorbs both paho v1 (rc) and v2 (DisconnectFlags, ReasonCode, properties) call
         # shapes. Kept deliberately minimal — this exists for connection-stability visibility
         # (e.g. spotting an unexpected disconnect loop), not routine noise on every reconnect.
+        # If this fires repeatedly in rapid succession (sub-2s intervals) without
+        # LocalMQTTBroker.disconnect() ever being called, it's not application code — see
+        # AGENTS.md's Cloud section for how this was root-caused to a local network issue
+        # (VPN/security software interfering with the long-lived TLS connection), not a bug here.
         print(f"Disconnected from broker at {self.host}:{self.port}")
 
     def set_will(self, topic: str, payload: dict, retain: bool = False):

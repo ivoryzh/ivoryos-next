@@ -64,7 +64,7 @@ export default function CloudDesignerPage() {
     try {
       const res = await fetch(`/api/devices`);
       const data = await res.json();
-      setCloudDevices(data);
+      setCloudDevices(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error("Cloud orchestrator offline or unavailable", e);
     }
@@ -82,7 +82,7 @@ export default function CloudDesignerPage() {
       .then(res => res.json())
       .then(devices => {
           const aggregated: any = { instruments: {} };
-          for (const device of devices) {
+          for (const device of (Array.isArray(devices) ? devices : [])) {
             if (device.schema && device.schema.instruments) {
               for (const [inst, methods] of Object.entries(device.schema.instruments)) {
                 if (!aggregated.instruments[inst]) {

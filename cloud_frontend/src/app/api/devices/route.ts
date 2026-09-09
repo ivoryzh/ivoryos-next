@@ -11,7 +11,13 @@ export async function GET() {
     .order('last_seen', { ascending: false });
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    // Every caller of this route (the orchestrator canvas especially) assumes the response is
+    // always an array — that was true of the old in-memory getDevices() this replaced, which
+    // could never fail. Keep that contract even on failure (e.g. Supabase not configured yet)
+    // rather than returning an error object a `.map()` call downstream can't handle; log
+    // server-side instead of changing the response shape.
+    console.error('Failed to fetch devices from Supabase:', error.message);
+    return NextResponse.json([]);
   }
   return NextResponse.json(data);
 }

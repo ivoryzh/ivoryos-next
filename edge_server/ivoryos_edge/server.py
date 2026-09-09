@@ -2,6 +2,7 @@ import os
 import asyncio
 import inspect
 import sys
+import time
 import uuid
 import httpx
 import base64
@@ -35,6 +36,8 @@ app.add_middleware(
 
 CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
 global_broker = None
+global_topic_prefix = None
+global_client_id = None
 
 class CloudSettingsRequest(BaseModel):
     token: str
@@ -88,22 +91,45 @@ async def handle_broker_message(topic: str, payload: dict):
             {"cloud_run_id": runId, "cloud_node_id": nodeId}
         )
 
-async def heartbeat_loop(broker, topic_prefix, client_id):
+def publish_schema(broker, topic_prefix, client_id):
+    """Retained, published once per (re)connect rather than on every heartbeat — the instrument
+    schema doesn't change without a server restart, and it's the one payload here big enough
+    (many methods x type hints x docstrings) to actually matter for AWS IoT's per-5KB message
+    metering if it were sent every few seconds like the old combined heartbeat did."""
+    schema = {
+        "instruments": dict(getattr(app.state, "instrument_schemas", {})),
+        "instrument_meta": getattr(app.state, "instrument_meta", {})
+    }
+    broker.publish(f"{topic_prefix}/{client_id}/schema", schema, retain=True, qos=1)
+
+def publish_sequences(broker, topic_prefix, client_id):
+    """Retained, one message per saved workflow, republished on every (re)connect — this is the
+    whole 'sync on reconnect' mechanism: a subscriber that comes online (or was already
+    subscribed) always receives the latest retained body for every topic the moment it
+    (re)subscribes, with no polling or explicit sync request needed on either side."""
+    try:
+        for f in os.listdir(WORKFLOWS_DIR):
+            if not f.endswith(".json"):
+                continue
+            name = f[:-5]
+            try:
+                with open(os.path.join(WORKFLOWS_DIR, f), 'r') as fp:
+                    data = json.load(fp)
+                broker.publish(f"{topic_prefix}/{client_id}/sequences/{name}", data, retain=True, qos=1)
+            except Exception as e:
+                print(f"Failed to publish sequence '{name}': {e}")
+    except Exception as e:
+        print(f"Failed to list workflows for sync: {e}")
+
+async def status_loop(broker, topic_prefix, client_id):
+    """A cheap, frequent liveness signal — deliberately just {online, ts}, not the schema. Kept
+    small on purpose: at a 5s interval this is what actually gets billed per-message on AWS IoT,
+    and 'online' is also covered by the LWT for the ungraceful-disconnect case (see setup_broker)."""
     while True:
         try:
-            current_instruments = dict(getattr(app.state, "instrument_schemas", {}))
-            schema = {
-                "instruments": current_instruments,
-                "instrument_meta": getattr(app.state, "instrument_meta", {})
-            }
-            payload = {
-                "deviceId": client_id,
-                "schema": schema,
-                "status": "online"
-            }
-            broker.publish(f"{topic_prefix}/{client_id}/heartbeat", payload)
+            broker.publish(f"{topic_prefix}/{client_id}/status", {"online": True, "ts": time.time()}, retain=True, qos=0)
         except Exception as e:
-            print(f"Error publishing heartbeat: {e}")
+            print(f"Error publishing status: {e}")
         await asyncio.sleep(5)
 
 async def setup_broker():
@@ -132,6 +158,10 @@ async def setup_broker():
         client_id = token_data.get("client_id", str(uuid.uuid4()))
         topic_prefix = token_data.get("topic_prefix", "ivoryos/edge")
         
+        global global_topic_prefix, global_client_id
+        global_topic_prefix = topic_prefix
+        global_client_id = client_id
+
         if protocol == "mqtt":
             global_broker = LocalMQTTBroker(client_id, endpoint, port)
         elif protocol == "aws_iot":
@@ -154,11 +184,21 @@ async def setup_broker():
             
         if global_broker:
             global_broker.set_callback(handle_broker_message)
+            # If we drop off ungracefully (crash, network loss), the broker publishes this on our
+            # behalf — otherwise a subscriber's last-known retained status would say "online"
+            # forever after a hard failure.
+            global_broker.set_will(f"{topic_prefix}/{client_id}/status", {"online": False, "ts": time.time()}, retain=True)
             global_broker.connect()
             global_broker.subscribe(f"{topic_prefix}/{client_id}/execute")
-            
-            # Start publishing heartbeats
-            asyncio.create_task(heartbeat_loop(global_broker, topic_prefix, client_id))
+
+            # Republish current state on every (re)connect — this IS the sync mechanism: a
+            # subscriber (Cloud) always receives the latest retained schema/sequence bodies the
+            # moment it (re)subscribes, so reconnecting after being offline needs no special
+            # "catch me up" request/response round-trip on either side.
+            publish_schema(global_broker, topic_prefix, client_id)
+            publish_sequences(global_broker, topic_prefix, client_id)
+
+            asyncio.create_task(status_loop(global_broker, topic_prefix, client_id))
             
     except Exception as e:
         print(f"Failed to setup broker from token: {e}")
@@ -561,6 +601,13 @@ async def save_workflow(name: str, req: Request):
     try:
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=4)
+        # Push the change up immediately rather than waiting for the next reconnect — a saved
+        # workflow should show up in Cloud right away, not just after a restart.
+        if global_broker and global_topic_prefix and global_client_id:
+            try:
+                global_broker.publish(f"{global_topic_prefix}/{global_client_id}/sequences/{name}", data, retain=True, qos=1)
+            except Exception as e:
+                print(f"Failed to publish saved workflow '{name}': {e}")
         return {"status": "success", "name": name}
     except Exception as e:
         return {"error": str(e)}, 500

@@ -6,11 +6,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "daemon": "node daemon.js",
     "lint": "eslint"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",
     "@ivoryos/shared-ui": "*",
+    "@supabase/supabase-js": "^2.116.0",
     "@xyflow/react": "^12.11.6",
     "lucide-react": "^1.39.0",
     "mqtt": "^5.15.2",

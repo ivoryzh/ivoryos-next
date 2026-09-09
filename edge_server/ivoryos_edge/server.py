@@ -205,9 +205,11 @@ async def setup_broker():
         if global_broker:
             global_broker.set_callback(handle_broker_message)
             # If we drop off ungracefully (crash, network loss), the broker publishes this on our
-            # behalf — otherwise a subscriber's last-known retained status would say "online"
-            # forever after a hard failure.
-            global_broker.set_will(f"{topic_prefix}/{client_id}/status", {"online": False, "ts": time.time()}, retain=True)
+            # behalf. Not retained — see set_will()'s docstring: AWS IoT Core silently refuses the
+            # whole connection if the Last Will is retained. Only a client already subscribed at
+            # the moment we drop sees this live; the periodic retained status_loop publish plus
+            # daemon.js's staleness sweep is what catches everyone else.
+            global_broker.set_will(f"{topic_prefix}/{client_id}/status", {"online": False, "ts": time.time()}, retain=False)
             global_broker.connect()
 
             # connect() only starts the handshake — paho reports the real CONNACK result

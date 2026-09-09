@@ -24,7 +24,7 @@ class MessageBroker:
     def subscribe(self, topic: str):
         raise NotImplementedError
 
-    def set_will(self, topic: str, payload: dict, retain: bool = True):
+    def set_will(self, topic: str, payload: dict, retain: bool = False):
         raise NotImplementedError
 
 
@@ -50,10 +50,17 @@ class LocalMQTTBroker(MessageBroker):
         else:
             print(f"Failed to connect to MQTT broker, return code {rc}")
 
-    def set_will(self, topic: str, payload: dict, retain: bool = True):
+    def set_will(self, topic: str, payload: dict, retain: bool = False):
         """Registers a Last Will and Testament: the broker publishes this on our behalf if we
-        disconnect uncleanly (crash, network loss) — without it, an ungraceful drop leaves a
-        subscriber's last-known 'online' retained message stale forever. Must be called before
+        disconnect uncleanly (crash, network loss). retain defaults to False because AWS IoT Core
+        silently refuses the entire CONNECT (no CONNACK, ever — just hangs until the client times
+        out) if the Last Will has retain=True; confirmed by direct testing against a live AWS IoT
+        endpoint, request logs show no rejection reason. A plain local MQTT broker (Mosquitto etc.)
+        has no such restriction, which is why this only breaks against real AWS IoT. Practical
+        effect: the will only reaches subscribers who are already connected at the moment we drop
+        — anyone who (re)subscribes afterward won't see it. status_loop's periodic retained
+        'online' publish plus daemon.js's own staleness sweep (no update in 15s -> mark offline)
+        is what actually catches the "subscriber wasn't watching live" case. Must be called before
         connect()."""
         self.client.will_set(topic, json.dumps(payload, default=str), qos=1, retain=retain)
 

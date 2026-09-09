@@ -1,3 +1,8 @@
+# Real device credentials written at runtime by setup_broker() when an AWS IoT CLOUD_TOKEN is
+# configured (the device certificate + private key) — never commit these, they're per-device
+# secrets, not source.
+edge_server/ivoryos_edge/.certs/
+
 # Python
 __pycache__/
 .pytest_cache/

@@ -57,12 +57,16 @@ client.on('connect', () => {
     client.subscribe(`${TOPIC_PREFIX}/+/status`);
     client.subscribe(`${TOPIC_PREFIX}/+/schema`);
     client.subscribe(`${TOPIC_PREFIX}/+/sequences/+`);
+    client.subscribe(`${TOPIC_PREFIX}/+/task-status`);
     // Retained messages replay immediately on subscribe — this is the entire "catch up on
     // reconnect" mechanism, for both this daemon restarting AND an edge device reconnecting.
     // No polling, no explicit sync request needed on either side.
 });
 
 client.on('error', (err) => console.error('[Daemon] MQTT error:', err.message));
+client.on('reconnect', () => console.log('[Daemon] Reconnecting...'));
+client.on('close', () => console.log('[Daemon] Connection closed.'));
+client.on('offline', () => console.log('[Daemon] Offline (no connection).'));
 
 client.on('message', async (topic, message) => {
     const parts = topic.split('/'); // ivoryos/edge/{deviceId}/(status|schema|sequences/{name})
@@ -103,9 +107,143 @@ client.on('message', async (topic, message) => {
             }, { onConflict: 'device_id,name' });
             if (error) console.error(`[Daemon] Failed to upsert sequence ${deviceId}/${name}:`, error.message);
             else console.log(`[Daemon] Synced sequence ${deviceId}/${name}`);
+        } else if (kind === 'task-status') {
+            await handleTaskStatus(payload);
         }
     } catch (e) {
         console.error(`[Daemon] Error handling ${topic}:`, e.message);
+    }
+});
+
+// --- Dispatch: the other half of the orchestrator loop. Cloud's "Run" button (see
+// api/cloud-workflows/runs) inserts run_tasks rows with status 'pending' for every node whose
+// dependencies are already satisfied; everything else starts 'blocked'. This daemon is the only
+// process holding a live, authenticated MQTT connection, so it's also the only thing that can
+// actually publish to a device's execute topic — that's the "dispatch" AGENTS.md flagged as
+// never having been wired up. A Realtime subscription (rather than polling) reacts the moment a
+// task becomes pending, whether that's from a fresh run or from a task just having unblocked one
+// further downstream (see handleTaskStatus below).
+const TERMINAL_TASK_STATUSES = ['completed', 'error', 'cancelled'];
+
+async function handleTaskStatus(payload) {
+    const { runId, nodeId, status } = payload;
+    if (!runId || !nodeId || !status) return;
+
+    // MQTT QoS 1 only guarantees at-least-once, in-order delivery per publisher connection — but
+    // a "running" message sent moments before "completed" can still arrive after it (observed
+    // directly: a run that genuinely completed on the edge showed completed->running in this log,
+    // stale "running" landing late during a reconnect). Once a task reaches a terminal status,
+    // refuse to move it backwards — the `.not(...in...)` guard means this update simply matches
+    // zero rows (not an error) if the task already finished.
+    const { data, error } = await supabase
+        .from('run_tasks')
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq('run_id', runId)
+        .eq('node_id', nodeId)
+        .not('status', 'in', `(${TERMINAL_TASK_STATUSES.join(',')})`)
+        .select('status');
+    if (error) {
+        console.error(`[Daemon] Failed to update run_task ${runId}/${nodeId}:`, error.message);
+        return;
+    }
+    if (!data || data.length === 0) {
+        console.log(`[Daemon] Ignored stale '${status}' for already-finished task ${runId}/${nodeId}`);
+        return;
+    }
+    console.log(`[Daemon] Task ${runId}/${nodeId} -> ${status}`);
+
+    if (status === 'error') {
+        await supabase.from('runs').update({ status: 'error', updated_at: new Date().toISOString() }).eq('id', runId);
+        return;
+    }
+    if (status === 'completed') {
+        await advanceRun(runId);
+    }
+}
+
+// Mirrors the dependency-unlocking logic the old in-memory orchestrator.ts had (checkReadyNodes)
+// — a node becomes dispatchable once every node it depends on (via the stored edges) has
+// completed. Flow Control nodes aren't dispatched to any device at all (no run_tasks row exists
+// for them), so they're always treated as already-satisfied dependencies.
+async function advanceRun(runId) {
+    const { data: run, error: runError } = await supabase.from('runs').select('nodes, edges, status').eq('id', runId).single();
+    if (runError || !run || run.status !== 'running') return;
+
+    const { data: tasks, error: tasksError } = await supabase.from('run_tasks').select('node_id, status').eq('run_id', runId);
+    if (tasksError || !tasks) return;
+
+    const taskByNode = new Map(tasks.map(t => [t.node_id, t.status]));
+    const flowControlNodeIds = new Set(
+        (run.nodes || [])
+            .filter(n => n.data?.block?.instrument === 'Flow Control')
+            .map(n => n.id)
+    );
+
+    const incoming = new Map();
+    for (const e of (run.edges || [])) {
+        if (!incoming.has(e.target)) incoming.set(e.target, []);
+        incoming.get(e.target).push(e.source);
+    }
+
+    const isSatisfied = (nodeId) => flowControlNodeIds.has(nodeId) || taskByNode.get(nodeId) === 'completed';
+
+    const toUnblock = [];
+    for (const [nodeId, status] of taskByNode.entries()) {
+        if (status !== 'blocked') continue;
+        const deps = incoming.get(nodeId) || [];
+        if (deps.every(isSatisfied)) toUnblock.push(nodeId);
+    }
+
+    for (const nodeId of toUnblock) {
+        await supabase.from('run_tasks').update({ status: 'pending', updated_at: new Date().toISOString() }).eq('run_id', runId).eq('node_id', nodeId);
+    }
+
+    const stillActive = Array.from(taskByNode.values()).some(s => s !== 'completed') || toUnblock.length > 0;
+    if (!stillActive) {
+        await supabase.from('runs').update({ status: 'completed', updated_at: new Date().toISOString() }).eq('id', runId);
+        console.log(`[Daemon] Run ${runId} completed.`);
+    }
+}
+
+// Dispatch: publish one pending task to its device's execute topic and flip it to 'queued'.
+// Shared by the Realtime handler below (new/just-unblocked tasks) and the startup catch-up scan
+// (tasks that were left 'pending' from before this process's last restart or MQTT drop — Realtime
+// only streams changes going forward, it doesn't replay rows that were already pending when the
+// subscription opened, so without this catch-up step a daemon restart mid-run would strand them).
+async function dispatchTask(task) {
+    if (!task || task.status !== 'pending') return;
+    const execTopic = `${TOPIC_PREFIX}/${task.device_id}/execute`;
+    const execPayload = JSON.stringify({ block: task.block, runId: task.run_id, nodeId: task.node_id });
+    client.publish(execTopic, execPayload, { qos: 1 }, async (err) => {
+        if (err) {
+            console.error(`[Daemon] Failed to publish task ${task.run_id}/${task.node_id}:`, err.message);
+            return;
+        }
+        const { error } = await supabase
+            .from('run_tasks')
+            .update({ status: 'queued', dispatched_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+            .eq('run_id', task.run_id)
+            .eq('node_id', task.node_id)
+            .eq('status', 'pending'); // guard against a double-dispatch race
+        if (error) console.error(`[Daemon] Failed to mark task ${task.run_id}/${task.node_id} queued:`, error.message);
+        else console.log(`[Daemon] Dispatched ${task.run_id}/${task.node_id} to ${task.device_id}`);
+    });
+}
+
+const dispatchChannel = supabase.channel('run_tasks_dispatch').on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: 'run_tasks', filter: 'status=eq.pending' },
+    ({ new: task }) => dispatchTask(task)
+).subscribe(async (status) => {
+    if (status === 'SUBSCRIBED') {
+        console.log('[Daemon] Watching run_tasks for dispatch.');
+        const { data: strandedTasks, error } = await supabase.from('run_tasks').select('*').eq('status', 'pending');
+        if (error) {
+            console.error('[Daemon] Failed to scan for stranded pending tasks:', error.message);
+        } else if (strandedTasks?.length) {
+            console.log(`[Daemon] Found ${strandedTasks.length} stranded pending task(s) from before startup, dispatching now.`);
+            for (const task of strandedTasks) await dispatchTask(task);
+        }
     }
 });
 

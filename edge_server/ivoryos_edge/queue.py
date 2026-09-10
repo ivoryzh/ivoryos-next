@@ -342,15 +342,21 @@ class WorkflowQueueManager:
                             await self.broadcast_updates(run_id)
                             try:
                                 if run.parameters and run.parameters.get("cloud_run_id"):
-                                    from ivoryos_edge.server import global_broker
+                                    from ivoryos_edge.server import global_broker, global_topic_prefix
                                     if global_broker:
                                         payload = {
                                             "runId": run.parameters["cloud_run_id"],
                                             "nodeId": run.parameters["cloud_node_id"],
                                             "status": "running"
                                         }
-                                        # Use topic prefix from broker context, but default to ivoryos/edge
-                                        global_broker.publish(f"ivoryos/edge/{global_broker.client_id}/status", payload)
+                                        # A dedicated topic, NOT .../status — that one is the plain
+                                        # {online, ts} device heartbeat daemon.js reads with
+                                        # `payload.online`, which is undefined (falsy) on this
+                                        # payload shape; publishing there was incorrectly flipping
+                                        # the device to "offline" in Supabase every time a cloud
+                                        # run started or finished. task-status is its own topic so
+                                        # daemon.js can tell the two apart.
+                                        global_broker.publish(f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload, qos=1)
                             except Exception as e:
                                 print(f"Failed to emit cloud running status: {e}")
                         else:
@@ -696,14 +702,14 @@ class WorkflowQueueManager:
                     
                     try:
                         if run.parameters and run.parameters.get("cloud_run_id"):
-                            from ivoryos_edge.server import global_broker
+                            from ivoryos_edge.server import global_broker, global_topic_prefix
                             if global_broker:
                                 payload = {
                                     "runId": run.parameters["cloud_run_id"],
                                     "nodeId": run.parameters["cloud_node_id"],
                                     "status": run.status
                                 }
-                                global_broker.publish(f"ivoryos/edge/{global_broker.client_id}/status", payload)
+                                global_broker.publish(f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload, qos=1)
                                 print(f"Published cloud status for {run.parameters['cloud_node_id']}: {run.status}")
                     except Exception as e:
                         print(f"Failed to emit cloud completion status: {e}")

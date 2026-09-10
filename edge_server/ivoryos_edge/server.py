@@ -110,7 +110,14 @@ def publish_schema(broker, topic_prefix, client_id):
     """Retained, published once per (re)connect rather than on every heartbeat — the instrument
     schema doesn't change without a server restart, and it's the one payload here big enough
     (many methods x type hints x docstrings) to actually matter for AWS IoT's per-5KB message
-    metering if it were sent every few seconds like the old combined heartbeat did."""
+    metering if it were sent every few seconds like the old combined heartbeat did.
+
+    Retained publishing needs the `iot:RetainPublish` action granted alongside `iot:Publish` in
+    the device's IoT policy — a plain `iot:Publish` allow does NOT cover it. Without it, AWS IoT
+    denies every retained publish with AUTHORIZATION_FAILURE and disconnects the client; since
+    QoS-1 messages are auto-retried on reconnect, the still-denied retry disconnects it again,
+    forever. That misconfigured policy (fixed now) was the actual cause of what earlier looked
+    like an unrelated, unexplained connection-instability bug — see git history / AGENTS.md."""
     schema = {
         "instruments": dict(getattr(app.state, "instrument_schemas", {})),
         "instrument_meta": getattr(app.state, "instrument_meta", {})
@@ -121,7 +128,8 @@ def publish_sequences(broker, topic_prefix, client_id):
     """Retained, one message per saved workflow, republished on every (re)connect — this is the
     whole 'sync on reconnect' mechanism: a subscriber that comes online (or was already
     subscribed) always receives the latest retained body for every topic the moment it
-    (re)subscribes, with no polling or explicit sync request needed on either side."""
+    (re)subscribes, with no polling or explicit sync request needed on either side. See
+    publish_schema's docstring for the IoT policy permission retained publishing needs."""
     try:
         for f in os.listdir(WORKFLOWS_DIR):
             if not f.endswith(".json"):

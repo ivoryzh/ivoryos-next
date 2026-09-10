@@ -34,6 +34,51 @@ export default function DesignerPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Shared by file-upload, and by loading a sequence saved to the Cloud database — both hand this
+  // the same legacy {prep, script, cleanup} (or {script_dict: {...}}) shape.
+  const loadLegacyJson = (json: any) => {
+    const migrateBlocks = (blocks: any[]): SequenceBlock[] => {
+      return blocks.map(b => ({
+        id: String(b.uuid || b.id || Math.random()),
+        instrument: b.instrument ? b.instrument.replace('deck.', '') : 'unknown',
+        method: b.action || b.method || 'unknown',
+        params: b.args || b.params || {},
+        returnVar: b.return || b.returnVar || '',
+        schema: {},
+        isExpanded: false,
+        isBatchAction: !!b.batch_action
+      }));
+    };
+
+    let newPrep, newSeq, newClean, name = '';
+
+    if (json.script_dict) {
+      // Legacy format detected
+      newPrep = migrateBlocks(json.script_dict.prep || []);
+      newSeq = migrateBlocks(json.script_dict.script || []);
+      newClean = migrateBlocks(json.script_dict.cleanup || []);
+      name = json.name || '';
+    } else if (json.script || json.prep || json.cleanup) {
+      // Legacy format without the script_dict wrapper (e.g. edge-synced / cloud-saved sequences)
+      newPrep = migrateBlocks(json.prep || []);
+      newSeq = migrateBlocks(json.script || json.sequence || []);
+      newClean = migrateBlocks(json.cleanup || []);
+      name = json.name || '';
+    } else {
+      // New format
+      newPrep = json.prep || [];
+      newSeq = json.sequence || [];
+      newClean = json.cleanup || [];
+      name = json.name || '';
+    }
+
+    setPrepSequence(newPrep);
+    setSequence(newSeq);
+    setCleanupSequence(newClean);
+    if (name) setCurrentWorkflowName(name);
+    if (json.description) setCurrentWorkflowDescription(json.description);
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -41,49 +86,12 @@ export default function DesignerPage() {
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const json = JSON.parse(event.target?.result as string);
-        
-        // Auto-migrate legacy sequence format
-        const migrateBlocks = (blocks: any[]): SequenceBlock[] => {
-          return blocks.map(b => ({
-            id: String(b.uuid || b.id || Math.random()),
-            instrument: b.instrument ? b.instrument.replace('deck.', '') : 'unknown',
-            method: b.action || b.method || 'unknown',
-            params: b.args || b.params || {},
-            returnVar: b.return || b.returnVar || '',
-            schema: {},
-            isExpanded: false,
-            isBatchAction: !!b.batch_action
-          }));
-        };
-
-        let newPrep, newSeq, newClean, name = '';
-
-        if (json.script_dict) {
-          // Legacy format detected
-          newPrep = migrateBlocks(json.script_dict.prep || []);
-          newSeq = migrateBlocks(json.script_dict.script || []);
-          newClean = migrateBlocks(json.script_dict.cleanup || []);
-          name = json.name || '';
-        } else {
-          // New format
-          newPrep = json.prep || [];
-          newSeq = json.sequence || json.script || [];
-          newClean = json.cleanup || [];
-          name = json.name || '';
-        }
-
-        setPrepSequence(newPrep);
-        setSequence(newSeq);
-        setCleanupSequence(newClean);
-        if (name) setCurrentWorkflowName(name);
-        if (json.description) setCurrentWorkflowDescription(json.description);
-
+        loadLegacyJson(JSON.parse(event.target?.result as string));
       } catch (error) {
         console.error("Failed to parse JSON file", error);
         alert("Failed to parse JSON file.");
       }
-      
+
       // Reset input
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -201,7 +209,22 @@ export default function DesignerPage() {
 
     const urlParams = new URLSearchParams(window.location.search);
     const targetDeviceId = urlParams.get('deviceId');
+    const targetSequenceName = urlParams.get('sequence');
     setDeviceId(targetDeviceId);
+
+    if (targetDeviceId && targetSequenceName) {
+        fetch(`/api/edge-sequences?device_id=${encodeURIComponent(targetDeviceId)}`)
+          .then(res => res.json())
+          .then((sequences: any[]) => {
+              const match = (Array.isArray(sequences) ? sequences : []).find(s => s.name === targetSequenceName);
+              if (match) {
+                  loadLegacyJson({ name: match.name, description: match.description, ...match.body });
+              } else {
+                  console.error(`Sequence '${targetSequenceName}' not found for device ${targetDeviceId}.`);
+              }
+          })
+          .catch(err => console.error('Failed to load cloud sequence', err));
+    }
 
     if (targetDeviceId) {
         fetch(`/api/devices`)
@@ -337,9 +360,28 @@ export default function DesignerPage() {
       localStorage.setItem('ivoryos_editing_workflow_desc', currentWorkflowDescription);
       localStorage.setItem('ivoryos_is_unsaved', 'false');
       setIsUnsaved(false);
-      alert("Workflow saved locally to Library!");
+
+      // Also persist to the Cloud database (shared, visible in the Library) when this sequence
+      // targets a specific device — edge_sequences is keyed by device_id, so there's nowhere to
+      // put an un-targeted sequence there; it stays browser-local-only in that case.
+      if (deviceId) {
+        const res = await fetch('/api/edge-sequences', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device_id: deviceId,
+            name,
+            description: currentWorkflowDescription,
+            body: legacyFormat,
+          }),
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Cloud save failed');
+        alert("Workflow saved to the Cloud Library!");
+      } else {
+        alert("Workflow saved locally — assign a target device to also save it to the Cloud Library.");
+      }
     } catch (e: any) {
-      alert("Error saving workflow: " + e.message);
+      alert("Saved locally, but failed to save to the Cloud database: " + e.message);
     }
   };
 

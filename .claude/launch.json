@@ -12,6 +12,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "-p", "3001"],
       "port": 3001
+    },
+    {
+      "name": "cloud-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "cloud_frontend", "run", "dev", "--", "-p", "3002"],
+      "port": 3002
     }
   ]
 }

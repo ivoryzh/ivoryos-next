@@ -1,3 +1,11 @@
+# Real device credentials written at runtime by setup_broker() when an AWS IoT CLOUD_TOKEN is
+# configured (the device certificate + private key) — never commit these, they're per-device
+# secrets, not source.
+edge_server/ivoryos_edge/.certs/
+# The Cloud daemon's own AWS IoT Thing certificate + private key (see .env.local.example's
+# AWS_IOT_CA_PATH/AWS_IOT_CERT_PATH/AWS_IOT_KEY_PATH) — a real, privileged secret, not source.
+cloud_frontend/certs/
+
 # Python
 __pycache__/
 .pytest_cache/
@@ -12,7 +20,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# A bare, unscoped "lib/" line used to live here and silently matched (and dropped from git
+# entirely, with no warning) cloud_frontend/src/lib/ — a real source directory, nothing to do
+# with Python packaging. It's not missed: build/ already covers a setuptools build/lib/ output
+# dir on its own, and .venv/ / venv/ below already cover a real virtualenv's lib/ subdirectory.
 lib64/
 parts/
 sdist/

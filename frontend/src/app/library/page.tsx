@@ -2,7 +2,7 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle } from 'lucide-react';
+import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import { workflowSignature } from '@ivoryos/shared-ui';
 
@@ -23,6 +23,8 @@ export default function LibraryPage() {
   // Loading a workflow overwrites whatever is on the designer canvas. If that canvas holds
   // unsaved edits, legacy IvoryOS stopped and asked first instead of silently discarding them.
   const [pendingLoad, setPendingLoad] = useState<{ name: string; draftName: string } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     // Theme init
@@ -141,6 +143,21 @@ export default function LibraryPage() {
     }
   };
 
+  const deleteWorkflow = async (name: string) => {
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/workflows/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete workflow');
+      setWorkflows(prev => prev.filter(w => w.name !== name));
+      setPendingDelete(null);
+    } catch (e: any) {
+      alert("Failed to delete workflow: " + e.message);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
       {pendingLoad && (
@@ -174,6 +191,36 @@ export default function LibraryPage() {
                 className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition-colors"
               >
                 Discard &amp; load
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingDelete && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-red-200 dark:border-red-500/30 rounded-2xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-9 h-9 rounded-lg bg-red-50 dark:bg-red-500/10 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-red-600 dark:text-red-400" />
+              </div>
+              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Delete this workflow?</h2>
+            </div>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+              <span className="font-semibold text-gray-800 dark:text-gray-200">{pendingDelete}</span> will be permanently removed. This can&rsquo;t be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingDelete(null)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteWorkflow(pendingDelete)}
+                disabled={isDeleting}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white transition-colors"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>
@@ -252,8 +299,15 @@ export default function LibraryPage() {
                             <span>Modified: {workflow.updated_at ? new Date(workflow.updated_at).toLocaleString() : 'N/A'}</span>
                         </div>
                     </div>
-                    <div className="mt-6 flex justify-end">
-                        <button 
+                    <div className="mt-6 flex justify-end items-center gap-2">
+                        <button
+                            onClick={() => setPendingDelete(workflow.name)}
+                            title="Delete workflow"
+                            className="flex items-center justify-center w-9 h-9 bg-gray-50 hover:bg-red-50 dark:bg-white/5 dark:hover:bg-red-900/20 text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded-lg transition-colors shrink-0"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                        </button>
+                        <button
                             onClick={() => requestLoad(workflow.name)}
                             className="flex items-center space-x-2 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:hover:bg-indigo-800/40 text-indigo-600 dark:text-indigo-300 rounded-lg transition-colors text-sm font-medium"
                         >

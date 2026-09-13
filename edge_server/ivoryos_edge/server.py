@@ -647,6 +647,21 @@ async def save_workflow(name: str, req: Request):
     except Exception as e:
         return {"error": str(e)}, 500
 
+@app.delete("/api/workflows/{name}")
+def delete_workflow(name: str):
+    filepath = os.path.join(WORKFLOWS_DIR, f"{name}.json")
+    # A destructive endpoint, unlike the read/write ones above, so it's worth the extra check
+    # that `name` didn't escape WORKFLOWS_DIR via path traversal (e.g. "../../etc/passwd").
+    if os.path.commonpath([os.path.abspath(filepath), os.path.abspath(WORKFLOWS_DIR)]) != os.path.abspath(WORKFLOWS_DIR):
+        return JSONResponse(status_code=400, content={"error": "Invalid workflow name"})
+    if not os.path.exists(filepath):
+        return JSONResponse(status_code=404, content={"error": "Workflow not found"})
+    try:
+        os.remove(filepath)
+        return {"status": "deleted", "name": name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 # Frontend mounting is deferred to run() to ensure plugins are mounted first
 
 

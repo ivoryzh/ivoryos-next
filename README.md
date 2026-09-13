@@ -22,11 +22,20 @@ pip install -e ./edge_server
 ```
 
 **Running the Demo**:
-We provide a demo script that starts the edge server with some simulated ("dummy") drivers.
+We provide a demo script that starts the edge server with a simulated self-driving lab.
 ```bash
 python example/demo.py
 ```
-This will start the edge server with standard `PumpDriver` as well as test async implementations like `AsyncPumpDriver`.
+The deck (`example/lab_drivers.py`) is a Suzuki-Miyaura coupling screen: three syringe
+pumps charge a vial, a heater-stirrer holds it at temperature, and a UV-Vis probe and
+HPLC read out how much product formed. The instruments share one reaction model that
+integrates A --k1--> P --k2--> D with Arrhenius rate constants, so yield responds to
+temperature, catalyst loading, reaction time and stoichiometry the way a real screen
+would -- there is a genuine interior optimum (~65 C, ~2.5 mol% Pd) for an optimization
+run to find. Simulated time is compressed, so a two-hour hold takes a couple of seconds.
+
+A ready-made `Suzuki coupling screen` workflow ships in the workflow library with
+`temperature_c`, `catalyst_ml` and `reaction_time_min` exposed as parameters.
 
 ### 2. Frontend (Next.js)
 
@@ -48,7 +57,19 @@ The application will be available at [http://localhost:3000](http://localhost:30
 
 ## Example Drivers
 
-If you are developing new drivers or testing async implementations, take a look at `example/dummy_driver.py` which contains:
+`example/lab_drivers.py` is the demo deck described above, and a reasonable template for
+writing your own drivers.
+
+`example/dummy_driver.py` is the synthetic test deck: it exercises introspection and
+execution edge cases rather than modelling anything. It is kept out of the demo deck so
+the UI stays readable, and is loaded alongside it on request:
+
+```bash
+IVORYOS_DEMO_TEST_DRIVERS=1 python example/demo.py
+```
+
+It contains:
 - Standard synchronous methods (`PumpDriver`)
 - Pure asynchronous methods (`AsyncPumpDriver.async_start_pump`)
 - Synchronous methods that spin up a thread to run an async event loop (`AsyncPumpDriver.sync_to_async_thread_test`)
+- Enum, `Literal` and nested-dataclass parameters, deliberately long names, and a method that raises

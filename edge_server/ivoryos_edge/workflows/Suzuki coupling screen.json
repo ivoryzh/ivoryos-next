@@ -1,0 +1,252 @@
+{
+    "name": "Suzuki coupling screen",
+    "description": "",
+    "prep": [
+        {
+            "id": 1,
+            "uuid": 898056666,
+            "instrument": "pump_1",
+            "action": "prime",
+            "args": {
+                "cycles": 3
+            },
+            "arg_types": {
+                "cycles": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 959346212,
+            "instrument": "pump_2",
+            "action": "prime",
+            "args": {
+                "cycles": 3
+            },
+            "arg_types": {
+                "cycles": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 3,
+            "uuid": 897541250,
+            "instrument": "pump_3",
+            "action": "prime",
+            "args": {
+                "cycles": 3
+            },
+            "arg_types": {
+                "cycles": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 4,
+            "uuid": 126740254,
+            "instrument": "uv_vis",
+            "action": "blank",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "script": [
+        {
+            "id": 1,
+            "uuid": 513741818,
+            "instrument": "reactor",
+            "action": "load_vial",
+            "args": {
+                "vial_id": "#vial_id"
+            },
+            "arg_types": {
+                "vial_id": "str"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 76554851,
+            "instrument": "pump_1",
+            "action": "dispense",
+            "args": {
+                "volume_ml": 0.2,
+                "flow_rate_ml_min": 2
+            },
+            "arg_types": {
+                "volume_ml": "float",
+                "flow_rate_ml_min": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 3,
+            "uuid": 794034852,
+            "instrument": "pump_2",
+            "action": "dispense",
+            "args": {
+                "volume_ml": "#boronic_acid_ml",
+                "flow_rate_ml_min": 2
+            },
+            "arg_types": {
+                "volume_ml": "float",
+                "flow_rate_ml_min": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 4,
+            "uuid": 170628326,
+            "instrument": "pump_3",
+            "action": "dispense",
+            "args": {
+                "volume_ml": "#catalyst_ml",
+                "flow_rate_ml_min": 1
+            },
+            "arg_types": {
+                "volume_ml": "float",
+                "flow_rate_ml_min": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 5,
+            "uuid": 482114763,
+            "instrument": "reactor",
+            "action": "set_stir_rate",
+            "args": {
+                "rpm": 500
+            },
+            "arg_types": {
+                "rpm": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 6,
+            "uuid": 139601245,
+            "instrument": "reactor",
+            "action": "set_temperature",
+            "args": {
+                "setpoint_c": "#temperature_c"
+            },
+            "arg_types": {
+                "setpoint_c": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 7,
+            "uuid": 427195192,
+            "instrument": "reactor",
+            "action": "hold",
+            "args": {
+                "minutes": "#reaction_time_min"
+            },
+            "arg_types": {
+                "minutes": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 8,
+            "uuid": 162710929,
+            "instrument": "reactor",
+            "action": "cool_down",
+            "args": {
+                "target_c": 25
+            },
+            "arg_types": {
+                "target_c": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 9,
+            "uuid": 742311664,
+            "instrument": "uv_vis",
+            "action": "measure_absorbance",
+            "args": {
+                "wavelength_nm": 312,
+                "dilution_factor": 1000
+            },
+            "arg_types": {
+                "wavelength_nm": "float",
+                "dilution_factor": "float"
+            },
+            "return": "absorbance_312",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 10,
+            "uuid": 281251021,
+            "instrument": "hplc",
+            "action": "inject",
+            "args": {
+                "sample_volume_ul": 5,
+                "method": "fast_gradient"
+            },
+            "arg_types": {
+                "sample_volume_ul": "float",
+                "method": "Literal"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 11,
+            "uuid": 473719098,
+            "instrument": "hplc",
+            "action": "measure_yield",
+            "args": {},
+            "arg_types": {},
+            "return": "yield_percent",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "cleanup": [
+        {
+            "id": 1,
+            "uuid": 633164172,
+            "instrument": "reactor",
+            "action": "set_stir_rate",
+            "args": {
+                "rpm": 0
+            },
+            "arg_types": {
+                "rpm": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ]
+}

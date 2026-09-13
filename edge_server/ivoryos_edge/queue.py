@@ -44,6 +44,39 @@ def interpolate_message(text: str, context: Dict[str, Any]) -> str:
     return re.sub(r"#(\w+)", replace, text)
 
 
+def coerce_input_value(value: Any, input_type: str) -> Any:
+    """Cast a human-supplied value to the type the User_Input step declared.
+
+    The UI already renders a matching control, but the value arrives over JSON (and can come
+    from a script or curl), so the cast happens here too. An uncastable value is kept as-is
+    rather than failing the run — the step that consumes it will report a clearer error.
+    """
+    if value is None:
+        return value
+    try:
+        if input_type == "int":
+            return int(float(value)) if not isinstance(value, bool) else int(value)
+        if input_type == "float":
+            return float(value)
+        if input_type == "bool":
+            if isinstance(value, str):
+                return value.strip().lower() in ("true", "1", "yes", "y", "on")
+            return bool(value)
+    except (TypeError, ValueError):
+        return value
+    return value
+
+
+def queue_position_of(run) -> float:
+    """The sort key for a pending run: its explicit queue_position if it has one, else its id."""
+    params = run.parameters or {}
+    pos = params.get("queue_position")
+    try:
+        return float(pos) if pos is not None else float(run.id)
+    except (TypeError, ValueError):
+        return float(run.id)
+
+
 class WorkflowQueueManager:
     def __init__(self, app):
         self.app = app
@@ -290,11 +323,15 @@ class WorkflowQueueManager:
                 await self.pause_event.wait()
                 
                 async with async_session() as session:
-                    # Find the oldest pending run
+                    # Pick the next pending run. Submission order (id) is the default, but a run
+                    # the operator moved up/down carries an explicit queue_position that wins —
+                    # sorted here in Python so reordering needs no schema change.
                     result = await session.execute(
-                        select(WorkflowRun).where(WorkflowRun.status == "pending").order_by(WorkflowRun.id).limit(1)
+                        select(WorkflowRun).where(WorkflowRun.status == "pending").order_by(WorkflowRun.id)
                     )
-                    run = result.scalar_one_or_none()
+                    pending = list(result.scalars())
+                    pending.sort(key=lambda r: (queue_position_of(r), r.id))
+                    run = pending[0] if pending else None
                     if not run:
                         self.active_run_id = None
                         break # Queue is empty
@@ -388,9 +425,14 @@ class WorkflowQueueManager:
                                     if not var_name:
                                         raise Exception("User Input step is missing a variable name")
                                     prompt = interpolate_message(str(args.get("prompt", "Input required")), workflow_context)
+                                    input_type = str(args.get("input_type") or "str").strip().lower()
+                                    if input_type not in ("str", "int", "float", "bool"):
+                                        input_type = "str"
 
                                     step.status = "waiting_input"
-                                    step.outputs = {"prompt": prompt}
+                                    # The type travels with the prompt so the UI can render the right
+                                    # control (number spinner / checkbox) instead of a bare text box.
+                                    step.outputs = {"prompt": prompt, "input_type": input_type}
                                     run.status = "waiting_input"
                                     event = asyncio.Event()
                                     self.pending_input_event[run_id] = event
@@ -408,9 +450,11 @@ class WorkflowQueueManager:
                                         await session.commit()
                                         break
 
+                                    value = coerce_input_value(value, input_type)
+
                                     workflow_context[var_name] = value
                                     step.status = "completed"
-                                    step.outputs = {"result": value}
+                                    step.outputs = {"result": value, "input_type": input_type}
                                     step.end_time = datetime.utcnow()
                                     run.status = "running"
                                     await session.commit()

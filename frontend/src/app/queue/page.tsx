@@ -2,8 +2,23 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { ListTodo, Play, Pause, XCircle, Settings2, Edit3, Check, X, Sun, Moon, Copy } from 'lucide-react';
+import { ListTodo, Play, Pause, XCircle, Settings2, Edit3, Check, X, Sun, Moon, Copy, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+
+// The edge server runs pending work in (queue_position, id) order — a run only has a
+// queue_position once someone has moved it — so the list has to sort the same way or the
+// "Up Next" order would disagree with what actually runs next.
+const orderPending = (runs: any[] | undefined, activeId?: number) =>
+  (runs || [])
+    .filter((r: any) => r.status === 'pending' && r.id !== activeId)
+    .slice()
+    .sort((a: any, b: any) => {
+      const pos = (r: any) => {
+        const p = r.parameters?.queue_position;
+        return typeof p === 'number' ? p : r.id;
+      };
+      return pos(a) - pos(b) || a.id - b.id;
+    });
 
 export default function QueuePage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -13,6 +28,8 @@ export default function QueuePage() {
   const [editParams, setEditParams] = useState<string>("");
   const [activeRun, setActiveRun] = useState<any>(null);
   const [pendingRuns, setPendingRuns] = useState<any[]>([]);
+  const [renamingRunId, setRenamingRunId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
   useEffect(() => {
     // Theme init
@@ -43,8 +60,7 @@ export default function QueuePage() {
         }
         
         // Populate Up Next list
-        const upNext = data.runs?.filter((r: any) => r.status === 'pending' && r.id !== active?.id).reverse() || [];
-        setPendingRuns(upNext);
+        setPendingRuns(orderPending(data.runs, active?.id));
       } catch (e) {
         console.error("Failed to fetch queue status:", e);
       }
@@ -80,8 +96,7 @@ export default function QueuePage() {
                 }
                 
                 // Populate Up Next list
-                const upNext = data.runs?.filter((r: any) => r.status === 'pending' && r.id !== active?.id).reverse() || [];
-                setPendingRuns(upNext);
+                setPendingRuns(orderPending(data.runs, active?.id));
             }
         } catch(e) {}
     };
@@ -120,6 +135,71 @@ export default function QueuePage() {
       fetchQueue();
     } catch (e) {
       alert(`Failed to ${action} run`);
+    }
+  };
+
+  // Queue housekeeping, ported from legacy IvoryOS: a long queue is only manageable if you can
+  // label runs, push an urgent one forward, and drop one you no longer want.
+  const renameRun = async (runId: number, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/queue/runs/${runId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(`Failed to rename run: ${data.error || res.statusText}`);
+        return;
+      }
+      setRenamingRunId(null);
+      fetchQueue();
+    } catch (e: any) {
+      alert(`Failed to rename run: ${e.message}`);
+    }
+  };
+
+  const moveRun = async (runId: number, direction: 'up' | 'down') => {
+    // Reorder locally first so the list doesn't visibly lag a click behind the round trip.
+    setPendingRuns(prev => {
+      const idx = prev.findIndex(r => r.id === runId);
+      const target = direction === 'up' ? idx - 1 : idx + 1;
+      if (idx === -1 || target < 0 || target >= prev.length) return prev;
+      const next = prev.slice();
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next;
+    });
+    try {
+      const res = await fetch(`${API_BASE}/api/queue/runs/${runId}/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(`Failed to reorder queue: ${data.error || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`Failed to reorder queue: ${e.message}`);
+    } finally {
+      fetchQueue();
+    }
+  };
+
+  const deleteRun = async (run: any) => {
+    if (!confirm(`Remove "${run.name}" from the queue? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(`Failed to delete run: ${data.error || res.statusText}`);
+        return;
+      }
+      fetchQueue();
+    } catch (e: any) {
+      alert(`Failed to delete run: ${e.message}`);
     }
   };
 
@@ -380,24 +460,76 @@ export default function QueuePage() {
                                <ListTodo className="w-4 h-4 text-gray-400" /> <span>Up Next</span>
                             </h2>
                             <div className="space-y-3">
-                                {pendingRuns.map((run: any) => (
+                                {pendingRuns.map((run: any, idx: number) => (
                                     <div key={run.id} className="bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl p-4 flex items-center justify-between shadow-sm">
-                                        <div>
-                                            <h4 className="font-bold text-gray-900 dark:text-white">{run.name}</h4>
-                                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center space-x-3">
-                                                <span>Run ID: {run.id}</span>
-                                                <span>•</span>
-                                                <span>Queued: {new Date(run.start_time || run.id).toLocaleTimeString()}</span>
-                                                <span>•</span>
-                                                <span>{run.steps?.length || 0} Steps</span>
+                                        <div className="flex items-center min-w-0 flex-1 gap-3">
+                                            <span className="shrink-0 w-7 h-7 rounded-full bg-gray-100 dark:bg-white/10 text-gray-500 dark:text-gray-400 text-xs font-bold flex items-center justify-center">
+                                                {idx + 1}
+                                            </span>
+                                            <div className="min-w-0">
+                                                {renamingRunId === run.id ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            autoFocus
+                                                            value={renameValue}
+                                                            onChange={e => setRenameValue(e.target.value)}
+                                                            onKeyDown={e => {
+                                                                if (e.key === 'Enter') renameRun(run.id, renameValue);
+                                                                if (e.key === 'Escape') setRenamingRunId(null);
+                                                            }}
+                                                            className="bg-gray-50 dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded px-2 py-1 text-sm font-bold focus:outline-none focus:border-indigo-500"
+                                                        />
+                                                        <button onClick={() => renameRun(run.id, renameValue)} title="Save name" className="p-1 rounded text-green-600 hover:bg-green-50 dark:hover:bg-green-900/30">
+                                                            <Check className="w-4 h-4" />
+                                                        </button>
+                                                        <button onClick={() => setRenamingRunId(null)} title="Cancel" className="p-1 rounded text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10">
+                                                            <X className="w-4 h-4" />
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <h4 className="font-bold text-gray-900 dark:text-white truncate">{run.name}</h4>
+                                                )}
+                                                <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center space-x-3">
+                                                    <span>Run ID: {run.id}</span>
+                                                    <span>•</span>
+                                                    <span>Queued: {new Date(run.start_time || run.id).toLocaleTimeString()}</span>
+                                                    <span>•</span>
+                                                    <span>{run.steps?.length || 0} Steps</span>
+                                                </div>
                                             </div>
                                         </div>
-                                        <button 
-                                            onClick={() => handleRunControl('cancel', run.id)}
-                                            className="px-3 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40 rounded text-xs font-bold uppercase tracking-wider transition-colors border border-red-200 dark:border-red-500/20 flex items-center space-x-1"
-                                        >
-                                            <XCircle className="w-3.5 h-3.5" /> <span>Cancel</span>
-                                        </button>
+                                        <div className="flex items-center gap-1 shrink-0 ml-3">
+                                            <button
+                                                onClick={() => { setRenamingRunId(run.id); setRenameValue(run.name); }}
+                                                title="Rename this run"
+                                                className="p-1.5 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors"
+                                            >
+                                                <Edit3 className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={() => moveRun(run.id, 'up')}
+                                                disabled={idx === 0}
+                                                title="Run this sooner"
+                                                className="p-1.5 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                            >
+                                                <ArrowUp className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={() => moveRun(run.id, 'down')}
+                                                disabled={idx === pendingRuns.length - 1}
+                                                title="Run this later"
+                                                className="p-1.5 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                            >
+                                                <ArrowDown className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={() => deleteRun(run)}
+                                                title="Remove from queue"
+                                                className="p-1.5 rounded text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:text-red-300 dark:hover:bg-red-900/30 transition-colors"
+                                            >
+                                                <Trash2 className="w-4 h-4" />
+                                            </button>
+                                        </div>
                                     </div>
                                 ))}
                             </div>

@@ -63,8 +63,8 @@ const CustomCloudNode = ({ data, id }: any) => {
         ) : (
           <>
             <div className="w-full mb-2">
-              <div className="text-xs font-bold text-blue-400 uppercase tracking-wider">{block.instrument}</div>
-              <div className="text-sm font-semibold">{block.method}</div>
+              <div className="text-xs font-bold text-blue-400 uppercase tracking-wider">{block.instrument === 'Library Workflows' ? 'Sequence' : block.instrument}</div>
+              <div className="text-sm font-semibold">{block.method.replace(/_/g, ' ')}</div>
             </div>
             <div className="w-full mt-1">
               {block.instrument === 'Flow Control' ? null : (

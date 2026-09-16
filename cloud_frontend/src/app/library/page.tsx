@@ -1,9 +1,15 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown } from 'lucide-react';
+import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cpu } from 'lucide-react';
 
-type WorkflowItem = {
+// Two distinct kinds of saved workflow live here side by side: a 'distributed' one is a
+// multi-device Orchestrator graph (nodes/edges), browser-local only (cloud_saved_workflows) since
+// it isn't tied to any one device. An 'edge' one is a single-device prep/sequence/cleanup
+// sequence — shared, database-backed (edge_sequences), written either by the edge device itself
+// (synced up automatically) or authored directly in the Cloud edge-sequence editor.
+type DistributedWorkflowItem = {
+  type: 'distributed';
   name: string;
   description: string;
   created_at: number;
@@ -11,6 +17,15 @@ type WorkflowItem = {
   nodes: any[];
   edges: any[];
 };
+type EdgeSequenceItem = {
+  type: 'edge';
+  name: string;
+  description: string;
+  created_at: number;
+  updated_at: number;
+  device_id: string;
+};
+type WorkflowItem = DistributedWorkflowItem | EdgeSequenceItem;
 
 export default function CloudLibraryPage() {
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
@@ -22,19 +37,41 @@ export default function CloudLibraryPage() {
     fetchWorkflows();
   }, []);
 
-  const fetchWorkflows = () => {
+  const fetchWorkflows = async () => {
+    const items: WorkflowItem[] = [];
+
     const saved = localStorage.getItem('cloud_saved_workflows');
     if (saved) {
       try {
-        setWorkflows(JSON.parse(saved));
+        const parsed = JSON.parse(saved);
+        for (const w of parsed) items.push({ ...w, type: 'distributed' });
       } catch (e) {
         console.error("Failed to parse saved workflows", e);
       }
     }
+
+    try {
+      const res = await fetch('/api/edge-sequences');
+      const sequences = await res.json();
+      for (const s of (Array.isArray(sequences) ? sequences : [])) {
+        items.push({
+          type: 'edge',
+          name: s.name,
+          description: s.description || '',
+          created_at: s.created_at ? new Date(s.created_at).getTime() : 0,
+          updated_at: s.updated_at ? new Date(s.updated_at).getTime() : 0,
+          device_id: s.device_id,
+        });
+      }
+    } catch (e) {
+      console.error("Failed to fetch edge sequences", e);
+    }
+
+    setWorkflows(items);
   };
 
-  const filteredWorkflows = workflows.filter(w => 
-    w.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+  const filteredWorkflows = workflows.filter(w =>
+    w.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     w.description.toLowerCase().includes(searchQuery.toLowerCase())
   ).sort((a, b) => {
      let valA = a[sortBy];
@@ -47,6 +84,10 @@ export default function CloudLibraryPage() {
   });
 
   const loadWorkflow = (workflow: WorkflowItem) => {
+    if (workflow.type === 'edge') {
+      window.location.href = `/edge-sequence?deviceId=${encodeURIComponent(workflow.device_id)}&sequence=${encodeURIComponent(workflow.name)}`;
+      return;
+    }
     try {
       localStorage.setItem('cloud_workflow', JSON.stringify({
         nodes: workflow.nodes,
@@ -116,9 +157,18 @@ export default function CloudLibraryPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredWorkflows.map(workflow => (
-              <div key={workflow.name} className="glass-panel border rounded-xl p-5 transition-all flex flex-col justify-between" style={{ borderColor: 'var(--panel-border)' }}>
+              <div key={`${workflow.type}:${workflow.type === 'edge' ? workflow.device_id : ''}:${workflow.name}`} className="glass-panel border rounded-xl p-5 transition-all flex flex-col justify-between" style={{ borderColor: 'var(--panel-border)' }}>
                   <div>
-                      <h3 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>{workflow.name}</h3>
+                      <h3 className="text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }} title={workflow.name}>{workflow.name}</h3>
+                      {workflow.type === 'edge' ? (
+                          <span className="inline-flex items-center gap-1 max-w-full text-[10px] uppercase font-bold tracking-wider px-2 py-1 mt-2 rounded-full" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80' }}>
+                              <Cpu className="w-3 h-3 shrink-0" /> <span className="truncate" title={workflow.device_id}>{workflow.device_id}</span>
+                          </span>
+                      ) : (
+                          <span className="inline-flex items-center gap-1 text-[10px] uppercase font-bold tracking-wider px-2 py-1 mt-2 rounded-full" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa' }}>
+                              <Cloud className="w-3 h-3 shrink-0" /> Distributed
+                          </span>
+                      )}
                       {workflow.description ? (
                           <p className="text-sm mt-2 line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{workflow.description}</p>
                       ) : (
@@ -142,7 +192,7 @@ export default function CloudLibraryPage() {
                           style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa' }}
                       >
                           <Download className="w-4 h-4" />
-                          <span>Load to Orchestrator</span>
+                          <span>{workflow.type === 'edge' ? 'Open in Edge Sequence Editor' : 'Load to Orchestrator'}</span>
                       </button>
                   </div>
               </div>

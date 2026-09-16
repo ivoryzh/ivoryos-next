@@ -107,8 +107,8 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-2 w-full overflow-y-auto">
-        {navItem('/', 'Orchestrator', <Cloud className="w-5 h-5 shrink-0" />)}
         {navItem('/library', 'Library', <Book className="w-5 h-5 shrink-0" />)}
+        {navItem('/', 'Orchestrator', <Cloud className="w-5 h-5 shrink-0" />)}
 
         {/* Edge Sequence Dropdown */}
         <div className="flex flex-col">

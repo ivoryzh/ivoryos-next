@@ -7,26 +7,46 @@ export default function SettingsPage() {
   const [clientId, setClientId] = useState('edge-device-01');
   const [generatedToken, setGeneratedToken] = useState('');
   const [copied, setCopied] = useState(false);
+  const [isProvisioning, setIsProvisioning] = useState(false);
+  const [provisionError, setProvisionError] = useState('');
 
-  const handleGenerateToken = () => {
-    const config = {
-      protocol: brokerType === 'local' ? 'mqtt' : 'aws_iot',
-      endpoint: endpoint,
-      port: brokerType === 'local' ? 1883 : 8883,
-      client_id: clientId,
-      topic_prefix: "ivoryos/edge",
-      ...(brokerType === 'aws' ? {
-        certs: {
-          root_ca: "-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----",
-          cert_pem: "-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----",
-          private_key: "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"
-        }
-      } : {})
-    };
-    
-    const tokenString = btoa(JSON.stringify(config));
-    setGeneratedToken(tokenString);
-    setCopied(false);
+  const handleGenerateToken = async () => {
+    setProvisionError('');
+    setGeneratedToken('');
+
+    if (brokerType === 'local') {
+      // No real credentials needed for local/dev MQTT — this can stay a pure client-side encode.
+      const config = {
+        protocol: 'mqtt',
+        endpoint,
+        port: 1883,
+        client_id: clientId,
+        topic_prefix: "ivoryos/edge",
+      };
+      setGeneratedToken(btoa(JSON.stringify(config)));
+      setCopied(false);
+      return;
+    }
+
+    // AWS IoT mode actually mints a real Thing + certificate via the server (see
+    // src/lib/aws-iot.ts) — there's no way to fabricate a working cert client-side, which is
+    // exactly what the old placeholder version of this button used to do.
+    setIsProvisioning(true);
+    try {
+      const res = await fetch('/api/devices/provision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: clientId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to provision device.');
+      setGeneratedToken(data.token);
+      setCopied(false);
+    } catch (err: any) {
+      setProvisionError(err.message || 'Failed to provision device.');
+    } finally {
+      setIsProvisioning(false);
+    }
   };
 
   const copyToClipboard = () => {
@@ -90,31 +110,47 @@ export default function SettingsPage() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Device ID (Client ID)</label>
-                      <input 
-                        type="text" 
+                      <label className="block text-sm font-medium mb-1">Device Name</label>
+                      <input
+                        type="text"
                         value={clientId}
                         onChange={(e) => setClientId(e.target.value)}
-                        className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500" 
+                        className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500"
                       />
+                      {brokerType === 'aws' && (
+                        <p className="text-xs text-gray-500 mt-1">A label — the real AWS IoT Thing name gets a random suffix appended for uniqueness.</p>
+                      )}
                     </div>
-                    <div className="col-span-2">
-                      <label className="block text-sm font-medium mb-1">Endpoint URL</label>
-                      <input 
-                        type="text" 
-                        value={endpoint}
-                        onChange={(e) => setEndpoint(e.target.value)}
-                        placeholder={brokerType === 'aws' ? "xxxxxx.iot.us-east-1.amazonaws.com" : "localhost"}
-                        className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500" 
-                      />
-                    </div>
+                    {brokerType === 'local' ? (
+                      <div className="col-span-2">
+                        <label className="block text-sm font-medium mb-1">Endpoint URL</label>
+                        <input
+                          type="text"
+                          value={endpoint}
+                          onChange={(e) => setEndpoint(e.target.value)}
+                          placeholder="localhost"
+                          className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                    ) : (
+                      <div className="col-span-2 flex items-center text-xs text-gray-500">
+                        Endpoint and certificate are provisioned automatically from this Cloud instance's own AWS IoT account — nothing to fill in.
+                      </div>
+                    )}
                   </div>
 
-                  <button 
+                  {provisionError && (
+                    <div className="text-sm text-red-400 bg-red-950/30 border border-red-500/30 rounded-md px-3 py-2">
+                      {provisionError}
+                    </div>
+                  )}
+
+                  <button
                     onClick={handleGenerateToken}
-                    className="self-start px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium transition-colors"
+                    disabled={isProvisioning}
+                    className="self-start px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-md text-sm font-medium transition-colors"
                   >
-                    Generate Token
+                    {isProvisioning ? 'Provisioning device in AWS IoT…' : 'Generate Token'}
                   </button>
 
                   {generatedToken && (

@@ -18,10 +18,13 @@ class MessageBroker:
     def disconnect(self):
         raise NotImplementedError
 
-    def publish(self, topic: str, payload: dict):
+    def publish(self, topic: str, payload: dict, retain: bool = False, qos: int = 0):
         raise NotImplementedError
 
     def subscribe(self, topic: str):
+        raise NotImplementedError
+
+    def set_will(self, topic: str, payload: dict, retain: bool = False):
         raise NotImplementedError
 
 
@@ -30,15 +33,16 @@ class LocalMQTTBroker(MessageBroker):
         super().__init__(client_id)
         self.host = host
         self.port = port
-        
+
         # Determine Paho API version (support v2 and v1)
         try:
             self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id)
         except AttributeError:
             self.client = mqtt.Client(client_id)
-            
+
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
+        self.client.on_disconnect = self._on_disconnect
         self.loop = None
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
@@ -46,6 +50,30 @@ class LocalMQTTBroker(MessageBroker):
             print(f"Connected to MQTT Broker at {self.host}:{self.port}")
         else:
             print(f"Failed to connect to MQTT broker, return code {rc}")
+
+    def _on_disconnect(self, client, userdata, *args):
+        # *args absorbs both paho v1 (rc) and v2 (DisconnectFlags, ReasonCode, properties) call
+        # shapes. Kept deliberately minimal — this exists for connection-stability visibility
+        # (e.g. spotting an unexpected disconnect loop), not routine noise on every reconnect.
+        # If this fires repeatedly in rapid succession (sub-2s intervals) without
+        # LocalMQTTBroker.disconnect() ever being called, it's not application code — see
+        # AGENTS.md's Cloud section for how this was root-caused to a local network issue
+        # (VPN/security software interfering with the long-lived TLS connection), not a bug here.
+        print(f"Disconnected from broker at {self.host}:{self.port}")
+
+    def set_will(self, topic: str, payload: dict, retain: bool = False):
+        """Registers a Last Will and Testament: the broker publishes this on our behalf if we
+        disconnect uncleanly (crash, network loss). retain defaults to False because AWS IoT Core
+        silently refuses the entire CONNECT (no CONNACK, ever — just hangs until the client times
+        out) if the Last Will has retain=True; confirmed by direct testing against a live AWS IoT
+        endpoint, request logs show no rejection reason. A plain local MQTT broker (Mosquitto etc.)
+        has no such restriction, which is why this only breaks against real AWS IoT. Practical
+        effect: the will only reaches subscribers who are already connected at the moment we drop
+        — anyone who (re)subscribes afterward won't see it. status_loop's periodic retained
+        'online' publish plus daemon.js's own staleness sweep (no update in 15s -> mark offline)
+        is what actually catches the "subscriber wasn't watching live" case. Must be called before
+        connect()."""
+        self.client.will_set(topic, json.dumps(payload, default=str), qos=1, retain=retain)
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -71,8 +99,8 @@ class LocalMQTTBroker(MessageBroker):
         self.client.loop_stop()
         self.client.disconnect()
 
-    def publish(self, topic: str, payload: dict):
-        self.client.publish(topic, json.dumps(payload, default=str))
+    def publish(self, topic: str, payload: dict, retain: bool = False, qos: int = 0):
+        self.client.publish(topic, json.dumps(payload, default=str), qos=qos, retain=retain)
 
     def subscribe(self, topic: str):
         self.client.subscribe(topic)

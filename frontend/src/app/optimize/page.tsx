@@ -1,7 +1,7 @@
 "use client";
 import { API_BASE } from '@/config';
 import { useState, useEffect } from 'react';
-import { Settings2, Info, Zap, Sun, ChevronDown } from 'lucide-react';
+import { Settings2, Info, Zap, Sun, ChevronDown, Plus, X } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import { buildRunName } from '@ivoryos/shared-ui';
 
@@ -10,6 +10,21 @@ const OPTIMIZER_LABELS: Record<string, string> = {
   ax: 'Ax (BoTorch)',
   nimo: 'NIMO'
 };
+
+// A run-on "(needs parameters: a, b, c; objectives: d, e)" sentence is hard to scan — pill tags
+// read at a glance instead, and reuse the same visual language wherever these column names
+// need explaining (the "no compatible runs" message and the CSV upload requirement).
+const RequiredColumns = ({ params, objectives }: { params: string[]; objectives: string[] }) => (
+  <div className="flex flex-wrap items-center gap-1.5">
+    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide shrink-0">Requires</span>
+    {params.map(p => (
+      <span key={p} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400">{p}</span>
+    ))}
+    {objectives.map(o => (
+      <span key={o} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-500/10 text-green-700 dark:text-green-400">{o}</span>
+    ))}
+  </div>
+);
 
 export default function OptimizePage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -46,13 +61,14 @@ export default function OptimizePage() {
     }
     return {
       optimizer: saved.optimizer || '',
-      budget: saved.budget ?? 10,
+      budget: saved.budget ?? 25,
       batch_size: saved.batch_size ?? 1,
       error_recovery: saved.error_recovery || 'stop',
       bounds: saved.bounds || {},
       objectives: saved.objectives || {},
       optimizer_config: saved.optimizer_config || {},
-      earlyStopMode: saved.earlyStopMode || 'any'
+      earlyStopMode: saved.earlyStopMode || 'any',
+      constraints: saved.constraints || []
     };
   });
 
@@ -66,7 +82,8 @@ export default function OptimizePage() {
       bounds: optConfig.bounds,
       objectives: optConfig.objectives,
       optimizer_config: optConfig.optimizer_config,
-      earlyStopMode: optConfig.earlyStopMode
+      earlyStopMode: optConfig.earlyStopMode,
+      constraints: optConfig.constraints
     }));
   }, [optConfig]);
 
@@ -378,6 +395,11 @@ export default function OptimizePage() {
             ...(earlyStop ? { early_stop: earlyStop } : {}),
             ...(perIterationVars.length > 0 ? { iteration_values: iterationValues } : {}),
             ...(existingData.length > 0 ? { existing_data: existingData } : {}),
+            // Only Ax's client actually applies parameter_constraints today (BayBE/NIMO accept
+            // and store it but never use it) — see AGENTS.md's Optimizer wiring section.
+            ...(optConfig.optimizer === 'ax' && (optConfig.constraints || []).some((c: string) => c.trim())
+                ? { parameter_constraints: optConfig.constraints.filter((c: string) => c.trim()) }
+                : {}),
             sequence_template: sequence.map(resolveFixedVarsInBlock)
         },
         prep: resolvedPrep,
@@ -417,8 +439,34 @@ export default function OptimizePage() {
     if (b?.mode === 'fixed' || b?.mode === 'optimize') return b.mode;
     return b?.excluded ? 'fixed' : 'optimize';
   };
-  const setVarMode = (v: string, mode: 'optimize' | 'fixed') => {
-    setOptConfig({ ...optConfig, bounds: { ...optConfig.bounds, [v]: { ...optConfig.bounds[v], mode } } });
+  // A single "Range / Choice / Fixed" dropdown, collapsing what used to be an Optimize/Fixed
+  // toggle plus a separate Range/Choice select into one control — mode and bounds.type both
+  // change from the same select, in one state update so they can't end up disagreeing mid-render.
+  const getVarModeType = (v: string): 'range' | 'choice' | 'fixed' => {
+    if (getVarMode(v) === 'fixed') return 'fixed';
+    return optConfig.bounds[v]?.type === 'choice' ? 'choice' : 'range';
+  };
+  const setVarModeType = (v: string, value: 'range' | 'choice' | 'fixed') => {
+    setOptConfig({
+      ...optConfig,
+      bounds: {
+        ...optConfig.bounds,
+        [v]: {
+          ...optConfig.bounds[v],
+          mode: value === 'fixed' ? 'fixed' : 'optimize',
+          ...(value !== 'fixed' ? { type: value } : {})
+        }
+      }
+    });
+  };
+  const addConstraint = () => setOptConfig({ ...optConfig, constraints: [...(optConfig.constraints || []), ''] });
+  const updateConstraint = (i: number, val: string) => {
+    const next = [...(optConfig.constraints || [])];
+    next[i] = val;
+    setOptConfig({ ...optConfig, constraints: next });
+  };
+  const removeConstraint = (i: number) => {
+    setOptConfig({ ...optConfig, constraints: (optConfig.constraints || []).filter((_: string, idx: number) => idx !== i) });
   };
   const isPerIteration = (v: string): boolean => !!optConfig.bounds[v]?.perIteration;
   const setPerIteration = (v: string, on: boolean) => {
@@ -570,7 +618,7 @@ export default function OptimizePage() {
               </div>
             </div>
           ) : (
-            <div className="max-w-4xl mx-auto space-y-4 pb-16">
+            <div className="max-w-5xl mx-auto space-y-4 pb-16">
               {globalVariables.length > 0 && (
                 <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/30 rounded-lg px-4 py-3 flex items-center gap-4 flex-wrap">
                   <span className="text-xs font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider whitespace-nowrap shrink-0">Fixed Values</span>
@@ -728,59 +776,56 @@ export default function OptimizePage() {
                       {perIter ? (
                           <p className="text-xs text-teal-600 dark:text-teal-400 italic">Configured in the table below.</p>
                       ) : (
-                      <>
-                      <div className="flex items-center gap-2">
-                            <button
-                               type="button"
-                               title={mode === 'fixed' ? "Use a fixed value instead of optimizing this parameter" : "Search over this parameter"}
-                               onClick={() => setVarMode(v, mode === 'fixed' ? 'optimize' : 'fixed')}
-                               className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border transition-colors ${mode === 'fixed' ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700/40 dark:text-amber-300' : 'bg-indigo-50 border-indigo-200 text-indigo-600 dark:bg-indigo-900/20 dark:border-indigo-700/40 dark:text-indigo-300'}`}
-                            >
-                              {mode === 'fixed' ? 'Fixed' : 'Optimize'}
-                            </button>
-                            {mode === 'optimize' && (
-                              <select
-                                 value={optConfig.bounds[v]?.type || 'range'}
-                                 onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], type: e.target.value}}})}
-                                 className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-2 py-1 text-sm outline-none"
-                              >
-                                 <option value="range">Range</option>
-                                 <option value="choice">Choice</option>
-                              </select>
-                            )}
-                      </div>
+                      <div className="flex gap-2 min-w-0">
+                          <select
+                             value={getVarModeType(v)}
+                             onChange={e => setVarModeType(v, e.target.value as 'range' | 'choice' | 'fixed')}
+                             className={`shrink-0 w-[90px] border rounded-lg px-2 py-2 text-xs font-bold outline-none ${mode === 'fixed' ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700/40 dark:text-amber-300' : 'bg-indigo-50 border-indigo-200 text-indigo-600 dark:bg-indigo-900/20 dark:border-indigo-700/40 dark:text-indigo-300'}`}
+                          >
+                             <option value="range">Range</option>
+                             <option value="choice">Choice</option>
+                             <option value="fixed">Fixed</option>
+                          </select>
 
-                      {mode === 'optimize' && (
-                      <div className="flex gap-3 min-w-0">
-                          <input
-                             type="text"
-                             placeholder={optConfig.bounds[v]?.type === 'choice' ? "e.g. 10, 20" : "Min"}
-                             value={optConfig.bounds[v]?.min || ''}
-                             onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], min: e.target.value}}})}
-                             className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
-                          />
-                          {optConfig.bounds[v]?.type !== 'choice' && (
+                          {mode === 'optimize' && optConfig.bounds[v]?.type !== 'choice' && (
+                            <>
+                              <input
+                                 type="text"
+                                 placeholder="Min"
+                                 value={optConfig.bounds[v]?.min || ''}
+                                 onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], min: e.target.value}}})}
+                                 className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                              />
+                              <input
+                                 type="text"
+                                 placeholder="Max"
+                                 value={optConfig.bounds[v]?.max || ''}
+                                 onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], max: e.target.value}}})}
+                                 className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                              />
+                            </>
+                          )}
+
+                          {mode === 'optimize' && optConfig.bounds[v]?.type === 'choice' && (
                             <input
                                type="text"
-                               placeholder="Max"
-                               value={optConfig.bounds[v]?.max || ''}
-                               onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], max: e.target.value}}})}
+                               placeholder="e.g. 10, 20"
+                               value={optConfig.bounds[v]?.min || ''}
+                               onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], min: e.target.value}}})}
                                className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
                             />
                           )}
-                      </div>
-                      )}
 
-                      {mode === 'fixed' && (
-                          <input
-                             type="text"
-                             placeholder="Value used every iteration"
-                             value={optConfig.bounds[v]?.fixedValue || ''}
-                             onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], fixedValue: e.target.value}}})}
-                             className="w-full bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-amber-500"
-                          />
-                      )}
-                      </>
+                          {mode === 'fixed' && (
+                            <input
+                               type="text"
+                               placeholder="Value used every iteration"
+                               value={optConfig.bounds[v]?.fixedValue || ''}
+                               onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], fixedValue: e.target.value}}})}
+                               className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-amber-500"
+                            />
+                          )}
+                      </div>
                       )}
                     </div>
                     );
@@ -893,6 +938,41 @@ export default function OptimizePage() {
                 )}
               </div>
 
+              {optConfig.optimizer === 'ax' && (
+                <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-white/10 rounded-xl shadow-sm p-4">
+                  <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-1">Constraints <span className="text-xs font-normal text-gray-400">(optional, Ax only)</span></h3>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">Linear relationships between optimized parameters, e.g. <code className="font-mono text-[11px] bg-gray-100 dark:bg-white/5 px-1 py-0.5 rounded">flow_rate + temperature &lt;= 100</code>.</p>
+                  <div className="space-y-2">
+                    {(optConfig.constraints || []).map((c: string, i: number) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <input
+                           type="text"
+                           value={c}
+                           onChange={e => updateConstraint(i, e.target.value)}
+                           placeholder="e.g. x + y <= 10"
+                           className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm font-mono outline-none focus:border-indigo-500"
+                        />
+                        <button
+                           type="button"
+                           onClick={() => removeConstraint(i)}
+                           title="Remove constraint"
+                           className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                       type="button"
+                       onClick={addConstraint}
+                       className="flex items-center gap-1.5 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add constraint
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-white/10 rounded-xl shadow-sm p-4">
                 <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-1">Existing Data <span className="text-xs font-normal text-gray-400">(optional)</span></h3>
                 <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">Warm-start the optimizer with prior results instead of starting from scratch.</p>
@@ -904,7 +984,10 @@ export default function OptimizePage() {
                     <div>
                       <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 block">From Data History</label>
                       {compatibleHistoryRuns.length === 0 ? (
-                        <div className="text-xs text-gray-400 dark:text-gray-500 italic">No compatible past optimization runs found (needs parameters: {requiredParamNames.join(', ')}; objectives: {returns.join(', ')}).</div>
+                        <div className="space-y-1.5">
+                          <p className="text-xs text-gray-400 dark:text-gray-500 italic">No compatible past optimization runs found.</p>
+                          <RequiredColumns params={requiredParamNames} objectives={returns} />
+                        </div>
                       ) : (
                         <div className="space-y-1.5 max-h-40 overflow-auto pr-1">
                           {compatibleHistoryRuns.map((run: any) => {
@@ -936,7 +1019,9 @@ export default function OptimizePage() {
                         onChange={e => e.target.files?.[0] && handleUploadCSV(e.target.files[0])}
                         className="text-xs text-gray-500 dark:text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-gray-100 dark:file:bg-white/10 file:text-gray-700 dark:file:text-gray-200 hover:file:bg-gray-200 dark:hover:file:bg-white/20"
                       />
-                      <p className="text-[11px] text-gray-400 mt-1">Needs a column per parameter ({requiredParamNames.join(', ')}) and per objective ({returns.join(', ')}).</p>
+                      <div className="mt-1.5">
+                        <RequiredColumns params={requiredParamNames} objectives={returns} />
+                      </div>
                       {uploadFileName && !uploadError && (
                         <p className="text-xs text-teal-600 dark:text-teal-400 mt-1">{uploadFileName}: {uploadedExistingRows.length} row(s) loaded.</p>
                       )}

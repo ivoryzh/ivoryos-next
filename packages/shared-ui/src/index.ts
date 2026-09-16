@@ -3,6 +3,7 @@ export type { SequenceBlock } from './WorkflowEditor';
 export { PythonCodeView } from './PythonCodeView';
 export { generatePythonCode } from './generatePythonCode';
 export { buildRunName } from './runNaming';
+export { workflowSignature } from './workflowSignature';
 export { WorkflowMap } from './WorkflowMap';
 export { WorkflowPeek } from './WorkflowPeek';
 export { WorkflowDiff } from './WorkflowDiff';

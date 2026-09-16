@@ -953,6 +953,72 @@ export default function WorkflowEditor({
     setSequenceList(listId, list);
   };
 
+  const newBlockId = () => `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+  // How many blocks a flow-control opener owns, including its own matching End_/Else blocks —
+  // duplicating or deleting an 'If' has to take the whole construct, or the canvas is left with
+  // an unmatched End_If that can never execute.
+  const blockGroupLength = (list: SequenceBlock[], index: number): number => {
+    const block = list[index];
+    const opener = block?.method === 'If' ? 'If' : block?.method === 'While' ? 'While' : null;
+    if (!opener) return 1;
+    const closer = opener === 'If' ? 'End_If' : 'End_While';
+    let depth = 1;
+    for (let i = index + 1; i < list.length; i++) {
+      if (list[i].method === opener) depth++;
+      else if (list[i].method === closer) {
+        depth--;
+        if (depth === 0) return i - index + 1;
+      }
+    }
+    return list.length - index;
+  };
+
+  // Legacy IvoryOS let you copy a configured step instead of dragging a fresh one in and
+  // retyping every parameter — by far the fastest way to build a repetitive protocol.
+  const duplicateBlock = (index: number, listId: string) => {
+    const list = Array.from(getSequenceList(listId));
+    const span = blockGroupLength(list, index);
+    const copies = list.slice(index, index + span).map(b => ({
+      ...b,
+      id: newBlockId(),
+      params: JSON.parse(JSON.stringify(b.params || {})),
+    }));
+    list.splice(index + span, 0, ...copies);
+    setSequenceList(listId, list);
+  };
+
+  // Variables a step can legally reference: only those produced *before* it runs. Legacy scoped
+  // its autocomplete the same way (`get_autocomplete_variables(before_id=...)`) so you can't wire
+  // a parameter to a value that doesn't exist yet at that point in the run.
+  const collectVarsUpTo = (blocks: SequenceBlock[], upTo: number): string[] => {
+    const out: string[] = [];
+    blocks.slice(0, upTo).forEach(b => {
+      const isUserInput = (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'User_Input';
+      if (isUserInput && b.params?.variable_name) out.push(String(b.params.variable_name).trim());
+      if (b.returnVar) {
+        String(b.returnVar).split(',').map(v => v.trim()).filter(Boolean).forEach(v => out.push(v));
+      }
+    });
+    return out;
+  };
+
+  const getVariablesBefore = (listId: string, index: number): string[] => {
+    const vars: string[] = [];
+    // Phases always run prep -> main -> cleanup, so earlier phases are fully in scope.
+    if (listId === 'prep') {
+      vars.push(...collectVarsUpTo(prepSequence, index));
+    } else if (listId === 'canvas') {
+      vars.push(...collectVarsUpTo(prepSequence, prepSequence.length));
+      vars.push(...collectVarsUpTo(sequence, index));
+    } else {
+      vars.push(...collectVarsUpTo(prepSequence, prepSequence.length));
+      vars.push(...collectVarsUpTo(sequence, sequence.length));
+      vars.push(...collectVarsUpTo(cleanupSequence, index));
+    }
+    return Array.from(new Set(vars.filter(Boolean)));
+  };
+
   const renderSequenceList = (listId: string, title: string, sequenceList: SequenceBlock[]) => (
     <div className={listId === 'canvas' ? '' : 'mb-6'}>
       {listId !== 'canvas' && (
@@ -1099,6 +1165,10 @@ export default function WorkflowEditor({
                   const nestColor = blockDepth > 0 ? nestColors[(blockDepth - 1) % nestColors.length] : '';
                   const nestBg = blockDepth > 0 ? nestBgs[(blockDepth - 1) % nestBgs.length] : '';
                   const isFlowBlock = block.instrument === 'Flow_Control' || block.instrument === 'Flow Control';
+                  // Duplicating a closing/branching half on its own would orphan it — only the
+                  // opener (If/While) can be copied, and it copies the whole construct.
+                  const isClosingFlowBlock = isFlowBlock && ['End_If', 'End_While', 'Else'].includes(block.method);
+                  const availableVars = getVariablesBefore(listId, index);
                   // On a Library Workflows block the "method" is a saved workflow's name, which the
                   // user typed — it must not be prettified the way a Python identifier is.
                   const isLibraryBlock = block.instrument === LIBRARY_INSTRUMENT;
@@ -1377,6 +1447,7 @@ export default function WorkflowEditor({
                                                 <div key={paramKey} className="relative flex items-center">
                                                   <input
                                                     type="text"
+                                                    list={(pData.options || availableVars.length > 0) ? `flow-vars-${block.id}-${paramKey}` : undefined}
                                                     value={actualVal}
                                                     placeholder={paramKey.replace(/_/g, ' ')}
                                                     title={hashInvalid ? "Add a variable name after '#'" : undefined}
@@ -1393,6 +1464,18 @@ export default function WorkflowEditor({
                                                     onClick={(e) => e.stopPropagation()}
                                                     className={`${(paramKey === 'prompt' || paramKey === 'message') ? 'w-56' : 'w-32'} border rounded px-2 py-1 text-xs focus:outline-none ${hashInvalid ? 'border-red-400 dark:border-red-500 focus:border-red-500' : flowInputClass}`}
                                                   />
+                                                  {(pData.options || availableVars.length > 0) && (
+                                                    <datalist id={`flow-vars-${block.id}-${paramKey}`}>
+                                                      {(pData.options || []).map((opt: any) => (
+                                                        <option key={`opt-${String(opt)}`} value={String(opt)} />
+                                                      ))}
+                                                      {/* Conditions are evaluated against the run's variables directly, so they take
+                                                          the bare name (e.g. `temperature > 40`), not the '#name' parameter form. */}
+                                                      {!pData.options && availableVars.map((v: string) => (
+                                                        <option key={`var-${v}`} value={v} />
+                                                      ))}
+                                                    </datalist>
+                                                  )}
                                                 </div>
                                               )
                                             })}
@@ -1476,9 +1559,18 @@ export default function WorkflowEditor({
                                             <span>{block.isBatchAction ? 'Batch' : 'Per-Sample'}</span>
                                           </button>
                                         )}
-                                        <button onClick={(e) => { e.stopPropagation(); toggleHideBlock(block.id, listId); }} className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
+                                        <button onClick={(e) => { e.stopPropagation(); toggleHideBlock(block.id, listId); }} title={block.isHidden ? 'Skip this step on the next run (click to re-enable)' : 'Disable this step without deleting it'} className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
                                           {block.isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                                         </button>
+                                        {!isClosingFlowBlock && (
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); duplicateBlock(index, listId); }}
+                                            title={isFlowBlock ? 'Duplicate this block and everything inside it' : 'Duplicate this step with its parameters'}
+                                            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors"
+                                          >
+                                            <Copy className="w-4 h-4" />
+                                          </button>
+                                        )}
                                         <button onClick={(e) => { e.stopPropagation(); removeBlock(index, listId); }} className="p-1.5 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:text-red-300 dark:hover:bg-red-900/30 transition-colors">
                                           <Trash2 className="w-4 h-4" />
                                         </button>
@@ -1529,7 +1621,7 @@ export default function WorkflowEditor({
                                                       </label>
                                                       <input
                                                         type="text"
-                                                        list={pData.options ? `datalist-${bId}-${paramKey}` : undefined}
+                                                        list={(pData.options || availableVars.length > 0) ? `datalist-${bId}-${paramKey}` : undefined}
                                                         value={actualVal}
                                                         placeholder={pData.default !== undefined ? `Default: ${pData.default}` : displayType}
                                                         onChange={(e) => {
@@ -1549,10 +1641,13 @@ export default function WorkflowEditor({
                                                           <AlertTriangle className="w-3 h-3 text-red-500" />
                                                         </span>
                                                       )}
-                                                      {pData.options && (
+                                                      {(pData.options || availableVars.length > 0) && (
                                                         <datalist id={`datalist-${bId}-${paramKey}`}>
-                                                          {pData.options.map((opt: any) => (
-                                                            <option key={String(opt)} value={String(opt)} />
+                                                          {(pData.options || []).map((opt: any) => (
+                                                            <option key={`opt-${String(opt)}`} value={String(opt)} />
+                                                          ))}
+                                                          {availableVars.map((v: string) => (
+                                                            <option key={`var-${v}`} value={`#${v}`} label={`variable from an earlier step`} />
                                                           ))}
                                                         </datalist>
                                                       )}

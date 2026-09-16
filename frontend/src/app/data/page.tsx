@@ -37,6 +37,59 @@ const PlotFrame = ({ html }: { html: string }) => {
   );
 };
 
+// A horizontal, time-scaled bar per logged step (Sequence steps, or every row's flattened
+// details for Spreadsheet/Optimization runs) so it's obvious at a glance which steps dominated
+// the run's wall-clock time and where errors landed, instead of only reading it out of a list.
+const STATUS_BAR_COLOR: Record<string, string> = {
+  completed: 'bg-green-500',
+  error: 'bg-red-500',
+  running: 'bg-indigo-500 animate-pulse',
+};
+
+const ExecutionTimeline = ({ steps }: { steps: any[] }) => {
+  const timed = steps.filter(s => s.start_time);
+  if (timed.length === 0) return null;
+
+  const starts = timed.map(s => new Date(s.start_time).getTime());
+  const ends = timed.map(s => new Date(s.end_time || s.start_time).getTime());
+  const minStart = Math.min(...starts);
+  const maxEnd = Math.max(...ends);
+  const totalMs = Math.max(maxEnd - minStart, 1);
+
+  return (
+    <div className="mb-6">
+      <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Timeline</h3>
+      <div className="relative h-8 rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden">
+        {timed.map((step, idx) => {
+          const start = new Date(step.start_time).getTime();
+          const end = new Date(step.end_time || step.start_time).getTime();
+          const leftPct = ((start - minStart) / totalMs) * 100;
+          // A near-instant step would otherwise round to an invisible sliver — floor its width
+          // so every logged action stays clickable/hoverable, not just the slow ones.
+          const widthPct = Math.max(((end - start) / totalMs) * 100, 0.6);
+          const label = (step.instrument === 'Flow_Control' || step.instrument === 'Flow Control')
+            ? step.method
+            : `${step.instrument}.${step.method}`;
+          const durationS = ((end - start) / 1000).toFixed(2);
+          return (
+            <div
+              key={idx}
+              title={`${label} — ${step.status}, ${durationS}s`}
+              className={`absolute top-0 h-full ${STATUS_BAR_COLOR[step.status] || 'bg-gray-400'} hover:opacity-80 transition-opacity cursor-help border-r border-white/60 dark:border-black/40`}
+              style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+            />
+          );
+        })}
+      </div>
+      <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+        <span>{new Date(minStart).toLocaleTimeString()}</span>
+        <span>{((maxEnd - minStart) / 1000).toFixed(1)}s total &middot; {timed.length} step{timed.length === 1 ? '' : 's'}</span>
+        <span>{new Date(maxEnd).toLocaleTimeString()}</span>
+      </div>
+    </div>
+  );
+};
+
 export default function DataPage() {
   const [history, setHistory] = useState<any[]>([]);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -46,6 +99,8 @@ export default function DataPage() {
   const [plotsError, setPlotsError] = useState<string | null>(null);
   const [plotsLoading, setPlotsLoading] = useState(false);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
+  const [pendingDeleteRun, setPendingDeleteRun] = useState<any>(null);
+  const [isDeletingRun, setIsDeletingRun] = useState(false);
 
   const formatRuns = (runs: any[]) => runs.map((r: any) => {
       let vars = r.parameters?.variables || [];
@@ -247,6 +302,22 @@ export default function DataPage() {
     else document.documentElement.classList.remove('dark');
   };
   
+  const deleteRun = async (run: any) => {
+     setIsDeletingRun(true);
+     try {
+        const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to delete run');
+        setHistory(prev => prev.filter(r => r.id !== run.id));
+        setSelectedRun((prev: any) => (prev?.id === run.id ? null : prev));
+        setPendingDeleteRun(null);
+     } catch (e: any) {
+        alert("Failed to delete run: " + e.message);
+     } finally {
+        setIsDeletingRun(false);
+     }
+  };
+
   const clearHistory = async () => {
      if(confirm("Are you sure you want to clear all history? (Not implemented in DB yet)")) {
          // Future: call DELETE /api/queue/runs
@@ -378,6 +449,36 @@ export default function DataPage() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
+      {pendingDeleteRun && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-red-200 dark:border-red-500/30 rounded-2xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-9 h-9 rounded-lg bg-red-50 dark:bg-red-500/10 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-red-600 dark:text-red-400" />
+              </div>
+              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Delete this run?</h2>
+            </div>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+              <span className="font-semibold text-gray-800 dark:text-gray-200">{pendingDeleteRun.name?.split(' - ')[0]}</span> and its recorded data will be permanently removed. This can&rsquo;t be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingDeleteRun(null)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteRun(pendingDeleteRun)}
+                disabled={isDeletingRun}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white transition-colors"
+              >
+                {isDeletingRun ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
@@ -395,14 +496,23 @@ export default function DataPage() {
                     <div className="text-gray-500 dark:text-gray-600 italic text-sm text-center mt-10">No history found.</div>
                 ) : (
                     history.map(run => (
-                        <div 
+                        <div
                            key={run.id}
                            onClick={() => setSelectedRun(run)}
-                           className={`p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
+                           className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
                         >
-                           <div className="flex justify-between items-center mb-1">
-                               <span className="text-xs font-bold text-gray-800 dark:text-gray-200">{run.name.split(' - ')[0]}</span>
-                               <span className="text-[10px] text-gray-500">{new Date(run.timestamp).toLocaleString()}</span>
+                           <div className="flex justify-between items-center mb-1 gap-2">
+                               <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate min-w-0">{run.name.split(' - ')[0]}</span>
+                               <div className="flex items-center gap-1.5 shrink-0">
+                                   <span className="text-[10px] text-gray-500">{new Date(run.timestamp).toLocaleString()}</span>
+                                   <button
+                                      onClick={(e) => { e.stopPropagation(); setPendingDeleteRun(run); }}
+                                      title="Delete run"
+                                      className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-opacity"
+                                   >
+                                       <Trash2 className="w-3.5 h-3.5" />
+                                   </button>
+                               </div>
                            </div>
                            <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
                                {run.variables.length} variables • {run.rows.length} rows
@@ -510,6 +620,11 @@ export default function DataPage() {
                               )}
                           </div>
                       )}
+                      <ExecutionTimeline
+                          steps={selectedRun.type === 'Sequence'
+                              ? (selectedRun.steps || [])
+                              : selectedRun.rows.flatMap((r: any) => r.details || [])}
+                      />
                       {selectedRun.type === 'Sequence' ? (
                           <div className="space-y-4 min-w-0">
                               <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Execution Steps</h3>

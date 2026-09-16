@@ -2,9 +2,9 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, Link2, History, X, Trash2, Tag } from 'lucide-react';
+import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { toSequenceBlocks, confirmDialog, notify, openDialog } from '@ivoryos/shared-ui';
+import { workflowSignature, toSequenceBlocks, confirmDialog, notify, openDialog } from '@ivoryos/shared-ui';
 
 type WorkflowItem = {
   name: string;
@@ -39,6 +39,9 @@ export default function LibraryPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'created_at' | 'updated_at'>('updated_at');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  // Loading a workflow overwrites whatever is on the designer canvas. If that canvas holds
+  // unsaved edits, legacy IvoryOS stopped and asked first instead of silently discarding them.
+  const [pendingLoad, setPendingLoad] = useState<{ name: string; draftName: string; version?: number } | null>(null);
   const [allTags, setAllTags] = useState<string[]>([]);
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [historyFor, setHistoryFor] = useState<string | null>(null);
@@ -148,6 +151,24 @@ export default function LibraryPage() {
      return 0;
   });
 
+  const requestLoad = (name: string, version?: number) => {
+    const unsaved = localStorage.getItem('ivoryos_is_unsaved') === 'true';
+    const hasBlocks = ['ivoryos_sequence', 'ivoryos_prep_sequence', 'ivoryos_cleanup_sequence'].some(key => {
+      try {
+        const raw = localStorage.getItem(key);
+        return !!raw && JSON.parse(raw).length > 0;
+      } catch {
+        return false;
+      }
+    });
+    const draftName = localStorage.getItem('ivoryos_editing_workflow') || '';
+    if (unsaved && hasBlocks && draftName !== name) {
+      setPendingLoad({ name, draftName, version });
+      return;
+    }
+    loadWorkflow(name, version);
+  };
+
   // Deleting is guarded server-side: the API returns 409 while another workflow still links to
   // this one, naming them. Forcing past that is offered explicitly rather than silently, because
   // it leaves those workflows unable to run until their steps are detached.
@@ -193,6 +214,7 @@ export default function LibraryPage() {
   // does not roll anything back on its own — saving from there is what creates the next version,
   // which keeps the history append-only and makes a "restore" just another ordinary edit.
   const loadWorkflow = async (name: string, version?: number) => {
+    setPendingLoad(null);
     try {
       const url = version
         ? `${API_BASE}/api/workflows/${name}?version=${version}`
@@ -207,11 +229,22 @@ export default function LibraryPage() {
 
       // Shared with the Designer's import path and the Cloud editor, so a saved block means the
       // same thing everywhere (AGENTS.md section 3).
-      localStorage.setItem('ivoryos_sequence', JSON.stringify(toSequenceBlocks(legacyData.script, instruments)));
-      localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(toSequenceBlocks(legacyData.prep, instruments)));
-      localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(toSequenceBlocks(legacyData.cleanup, instruments)));
+      const newSequence = toSequenceBlocks(legacyData.script, instruments);
+      const prepSequence = toSequenceBlocks(legacyData.prep, instruments);
+      const cleanupSequence = toSequenceBlocks(legacyData.cleanup, instruments);
+      localStorage.setItem('ivoryos_sequence', JSON.stringify(newSequence));
+      localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
+      localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
       localStorage.setItem('ivoryos_editing_workflow', name);
       localStorage.setItem('ivoryos_editing_workflow_desc', legacyData.description || '');
+      // A freshly loaded head version matches what's on disk, so it starts clean — otherwise the
+      // designer would show "Unsaved" (and this page would warn) before a single edit. Loading an
+      // older version is deliberately marked unsaved instead: saving from there creates the next
+      // version rather than silently rolling back, so it should read the same as any other edit.
+      localStorage.setItem(
+        'ivoryos_saved_signature',
+        workflowSignature(prepSequence, newSequence, cleanupSequence, name, legacyData.description || '')
+      );
       localStorage.setItem('ivoryos_is_unsaved', version ? 'true' : 'false');
       window.location.href = '/designer';
     } catch (e: any) {
@@ -221,6 +254,42 @@ export default function LibraryPage() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
+      {pendingLoad && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-amber-200 dark:border-amber-500/30 rounded-2xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-9 h-9 rounded-lg bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+              </div>
+              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">You have unsaved changes</h2>
+            </div>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+              The designer canvas {pendingLoad.draftName ? <>still holds unsaved edits to <span className="font-semibold text-gray-800 dark:text-gray-200">{pendingLoad.draftName}</span></> : 'still holds an unsaved draft'}.
+              Loading <span className="font-semibold text-gray-800 dark:text-gray-200">{pendingLoad.name}</span> will replace it.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingLoad(null)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 transition-colors"
+              >
+                Keep editing
+              </button>
+              <a
+                href="/designer"
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:hover:bg-indigo-800/40 text-indigo-600 dark:text-indigo-300 transition-colors"
+              >
+                Go save it first
+              </a>
+              <button
+                onClick={() => loadWorkflow(pendingLoad.name, pendingLoad.version)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition-colors"
+              >
+                Discard &amp; load
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
@@ -401,7 +470,7 @@ export default function LibraryPage() {
                         {/* flex-1 + min-w-0 so the primary action absorbs the remaining width and
                             truncates instead of overflowing the card at three-column widths. */}
                         <button
-                            onClick={() => loadWorkflow(workflow.name)}
+                            onClick={() => requestLoad(workflow.name)}
                             className="flex-1 min-w-0 flex items-center justify-center gap-2 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:hover:bg-indigo-800/40 text-indigo-600 dark:text-indigo-300 rounded-lg transition-colors text-sm font-medium"
                         >
                             <Download className="w-4 h-4 shrink-0" />
@@ -448,7 +517,7 @@ export default function LibraryPage() {
                     </p>
                   </div>
                   <button
-                    onClick={() => loadWorkflow(historyFor, v.version)}
+                    onClick={() => requestLoad(historyFor, v.version)}
                     className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                   >
                     Open

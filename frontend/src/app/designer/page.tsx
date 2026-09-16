@@ -10,6 +10,7 @@ import {
   PythonCodeView,
   generatePythonCode,
   buildRunName,
+  workflowSignature,
   WorkflowMap,
   buildSavedBody,
   scanDynamicParams,
@@ -27,6 +28,10 @@ export default function DesignerPage() {
   const [cleanupSequence, setCleanupSequence] = useState<SequenceBlock[]>([]);
   const [currentWorkflowName, setCurrentWorkflowName] = useState<string>('');
   const [isUnsaved, setIsUnsaved] = useState(false);
+  // Fingerprint of the workflow as it was last saved (or last loaded from the Library). "Unsaved"
+  // means the canvas no longer matches it — not merely "an effect has run", which was true on
+  // every page load and made the badge (and anything relying on it) meaningless.
+  const savedSignature = useRef<string | null>(null);
   // True once the mount effect has read localStorage into state. The persistence effect below
   // must not run before this, or it writes the empty initial state over a workflow that was just
   // loaded. It is state rather than a ref so that it becomes true in the same render as the
@@ -173,6 +178,9 @@ export default function DesignerPage() {
     if (editingWfDesc) {
       setCurrentWorkflowDescription(editingWfDesc);
     }
+    // With no stored baseline (a fresh canvas, or one built by importing JSON), the baseline is
+    // "empty" — so anything on the canvas correctly counts as not yet saved anywhere.
+    savedSignature.current = localStorage.getItem('ivoryos_saved_signature') ?? workflowSignature([], [], [], '', '');
     const unsaved = localStorage.getItem('ivoryos_is_unsaved');
     if (unsaved === 'true') {
       setIsUnsaved(true);
@@ -195,7 +203,7 @@ export default function DesignerPage() {
             If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
             While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
             Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" },
-            User_Input: { description: "Pause and ask a person to type in a value (human-in-the-loop)", parameters: { prompt: { type: "str", required: true }, variable_name: { type: "str", required: true } }, return_type: "None" },
+            User_Input: { description: "Pause and ask a person to type in a value (human-in-the-loop)", parameters: { prompt: { type: "str", required: true }, variable_name: { type: "str", required: true }, input_type: { type: "str", required: false, default: "str", options: ["str", "int", "float", "bool"] } }, return_type: "None" },
             Comment: { description: "Add a note to the run log — like Python's print()", parameters: { message: { type: "str", required: true } }, return_type: "None" }
           };
 
@@ -281,11 +289,15 @@ export default function DesignerPage() {
       ivoryos_prep_sequence: JSON.stringify(prepSequence),
       ivoryos_cleanup_sequence: JSON.stringify(cleanupSequence),
     };
-    if (Object.entries(next).every(([key, value]) => localStorage.getItem(key) === value)) return;
+    if (!Object.entries(next).every(([key, value]) => localStorage.getItem(key) === value)) {
+      Object.entries(next).forEach(([key, value]) => localStorage.setItem(key, value));
+    }
 
-    Object.entries(next).forEach(([key, value]) => localStorage.setItem(key, value));
-    setIsUnsaved(true);
-    localStorage.setItem('ivoryos_is_unsaved', 'true');
+    const signature = workflowSignature(prepSequence, sequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription);
+    const dirty = savedSignature.current !== null && signature !== savedSignature.current;
+    setIsUnsaved(dirty);
+    // The Library reads this before replacing the canvas, so it has to stay in sync here.
+    localStorage.setItem('ivoryos_is_unsaved', String(dirty));
   }, [hasLoaded, sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
   const toggleTheme = () => {
@@ -314,7 +326,9 @@ export default function DesignerPage() {
       localStorage.setItem('ivoryos_cleanup_sequence', '[]');
       localStorage.removeItem('ivoryos_editing_workflow');
       localStorage.removeItem('ivoryos_editing_workflow_desc');
-      localStorage.setItem('ivoryos_is_unsaved', 'false');
+      localStorage.removeItem('ivoryos_is_unsaved');
+      localStorage.removeItem('ivoryos_saved_signature');
+      savedSignature.current = null;
       setIsUnsaved(false);
     }
   };
@@ -387,6 +401,9 @@ export default function DesignerPage() {
         setCurrentWorkflowName(name);
         localStorage.setItem('ivoryos_editing_workflow', name);
         localStorage.setItem('ivoryos_editing_workflow_desc', currentWorkflowDescription);
+        const signature = workflowSignature(prepSequence, sequence, cleanupSequence, name, currentWorkflowDescription);
+        savedSignature.current = signature;
+        localStorage.setItem('ivoryos_saved_signature', signature);
         localStorage.setItem('ivoryos_is_unsaved', 'false');
         setIsUnsaved(false);
         setWorkflowVersions(prev => ({ ...prev, [name]: data.version }));

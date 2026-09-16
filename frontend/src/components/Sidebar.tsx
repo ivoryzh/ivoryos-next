@@ -26,7 +26,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
     if (saved !== null) setIsExpanded(saved === 'true');
   }, []);
 
-  const [waitingRun, setWaitingRun] = useState<{ id: number; prompt: string } | null>(null);
+  const [waitingRun, setWaitingRun] = useState<{ id: number; prompt: string; inputType: string } | null>(null);
   const [inputValue, setInputValue] = useState('');
   const [submittingInput, setSubmittingInput] = useState(false);
   const lastWaitingRunId = useRef<number | null>(null);
@@ -65,11 +65,14 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         if (active) {
           const step = (active.steps || []).find((s: any) => s.status === 'waiting_input');
           const prompt = step?.outputs?.prompt || 'Input required';
+          // The step declares what kind of value it wants, so the prompt can show the matching
+          // control rather than making the operator hand-type 'true' or a number into a text box.
+          const inputType = step?.outputs?.input_type || 'str';
           if (lastWaitingRunId.current !== active.id) {
             lastWaitingRunId.current = active.id;
-            setInputValue('');
+            setInputValue(inputType === 'bool' ? 'false' : '');
           }
-          setWaitingRun({ id: active.id, prompt });
+          setWaitingRun({ id: active.id, prompt, inputType });
         } else {
           lastWaitingRunId.current = null;
           setWaitingRun(null);
@@ -81,12 +84,22 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
 
   const submitWaitingInput = async () => {
     if (!waitingRun) return;
+    let value: any = inputValue;
+    if (waitingRun.inputType === 'int' || waitingRun.inputType === 'float') {
+      if (inputValue.trim() === '' || isNaN(Number(inputValue))) {
+        alert(`This step expects a ${waitingRun.inputType === 'int' ? 'whole number' : 'number'}.`);
+        return;
+      }
+      value = waitingRun.inputType === 'int' ? parseInt(inputValue, 10) : parseFloat(inputValue);
+    } else if (waitingRun.inputType === 'bool') {
+      value = inputValue === 'true';
+    }
     setSubmittingInput(true);
     try {
       await fetch(`${API_BASE}/api/queue/runs/${waitingRun.id}/input`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value: inputValue })
+        body: JSON.stringify({ value })
       });
       setWaitingRun(null);
       lastWaitingRunId.current = null;
@@ -132,15 +145,29 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
             </div>
           </div>
           <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">{waitingRun.prompt}</p>
-          <input
-            type="text"
-            autoFocus
-            value={inputValue}
-            onChange={e => setInputValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') submitWaitingInput(); }}
-            placeholder="Type your answer..."
-            className="w-full bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-pink-400 dark:focus:border-pink-500 mb-4"
-          />
+          {waitingRun.inputType === 'bool' ? (
+            <label className="flex items-center gap-2 mb-4 text-sm text-gray-700 dark:text-gray-300 select-none cursor-pointer">
+              <input
+                type="checkbox"
+                autoFocus
+                checked={inputValue === 'true'}
+                onChange={e => setInputValue(e.target.checked ? 'true' : 'false')}
+                className="w-4 h-4 accent-pink-600"
+              />
+              <span>{inputValue === 'true' ? 'Yes / True' : 'No / False'}</span>
+            </label>
+          ) : (
+            <input
+              type={waitingRun.inputType === 'int' || waitingRun.inputType === 'float' ? 'number' : 'text'}
+              step={waitingRun.inputType === 'float' ? 'any' : waitingRun.inputType === 'int' ? '1' : undefined}
+              autoFocus
+              value={inputValue}
+              onChange={e => setInputValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') submitWaitingInput(); }}
+              placeholder={waitingRun.inputType === 'int' ? 'Enter a whole number...' : waitingRun.inputType === 'float' ? 'Enter a number...' : 'Type your answer...'}
+              className="w-full bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-pink-400 dark:focus:border-pink-500 mb-4"
+            />
+          )}
           <button
             onClick={submitWaitingInput}
             disabled={submittingInput}

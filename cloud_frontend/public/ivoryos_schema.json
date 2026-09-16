@@ -1,412 +1,464 @@
 {
   "instruments": {
-    "my_pump": {
-      "complex_initialization_sequence": {
-        "description": "A complex method with many parameters to stress test the UI.\nRequires temperature, solvent name, and optionally safety checks and timeout settings.",
+    "pump_1": {
+      "dispense": {
+        "description": "Deliver a volume of this pump's stock solution into the reaction vial.",
         "parameters": {
-          "target_temperature": {
-            "type": "<class 'float'>",
+          "volume_ml": {
+            "type": "float",
             "required": true
           },
-          "solvent_name": {
-            "type": "<class 'str'>",
-            "required": true
-          },
-          "enable_safety_checks": {
-            "type": "<class 'bool'>",
+          "flow_rate_ml_min": {
+            "type": "float",
             "required": false,
-            "options": [
-              "True",
-              "False"
-            ],
-            "default": true
-          },
-          "retries": {
-            "type": "<class 'int'>",
-            "required": false,
-            "default": 3
-          },
-          "timeout_seconds": {
-            "type": "<class 'float'>",
-            "required": false,
-            "default": 60.0
+            "default": 2.0
           }
         },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "long_running_task": {
-        "description": "A blocking task to test execution cancellation.",
-        "parameters": {
-          "duration": {
-            "type": "<class 'int'>",
-            "required": true
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "set_flow_rate": {
-        "description": "Sets the flow rate of the pump.",
-        "parameters": {
-          "rate": {
-            "type": "<class 'float'>",
-            "required": true
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "start_pump": {
-        "description": "Starts the pump at the current flow rate.",
-        "parameters": {},
-        "return_type": "None",
+        "return_type": "dict",
         "return_info": {
-          "type": "None",
+          "type": "dict",
           "required": true
         },
         "is_coroutine": false
       },
-      "stop_pump": {
-        "description": "Stops the pump.",
-        "parameters": {},
-        "return_type": "Any",
-        "return_info": null,
+      "dispense_moles": {
+        "description": "Deliver a target amount of reagent, converting to volume via the stock concentration.",
+        "parameters": {
+          "micromoles": {
+            "type": "float",
+            "required": true
+          },
+          "flow_rate_ml_min": {
+            "type": "float",
+            "required": false,
+            "default": 2.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
         "is_coroutine": false
       },
-      "test_enum_and_literal": {
-        "description": "Test method for Enum and Literal parsing.",
+      "prime": {
+        "description": "Flush air out of the line before the first dispense of a campaign.",
         "parameters": {
-          "direction": {
-            "type": "PumpDirection",
-            "required": true,
-            "options": [
-              "forward",
-              "backward",
-              "oscillating"
-            ]
+          "cycles": {
+            "type": "int",
+            "required": false,
+            "default": 3
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "read_volume_remaining": {
+        "description": "Stock left in the syringe, in mL.",
+        "parameters": {},
+        "return_type": "float",
+        "return_info": {
+          "type": "float",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "refill": {
+        "description": "Draw the syringe back up to full from the reservoir.",
+        "parameters": {},
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "pump_2": {
+      "dispense": {
+        "description": "Deliver a volume of this pump's stock solution into the reaction vial.",
+        "parameters": {
+          "volume_ml": {
+            "type": "float",
+            "required": true
           },
-          "mode": {
+          "flow_rate_ml_min": {
+            "type": "float",
+            "required": false,
+            "default": 2.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "dispense_moles": {
+        "description": "Deliver a target amount of reagent, converting to volume via the stock concentration.",
+        "parameters": {
+          "micromoles": {
+            "type": "float",
+            "required": true
+          },
+          "flow_rate_ml_min": {
+            "type": "float",
+            "required": false,
+            "default": 2.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "prime": {
+        "description": "Flush air out of the line before the first dispense of a campaign.",
+        "parameters": {
+          "cycles": {
+            "type": "int",
+            "required": false,
+            "default": 3
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "read_volume_remaining": {
+        "description": "Stock left in the syringe, in mL.",
+        "parameters": {},
+        "return_type": "float",
+        "return_info": {
+          "type": "float",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "refill": {
+        "description": "Draw the syringe back up to full from the reservoir.",
+        "parameters": {},
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "pump_3": {
+      "dispense": {
+        "description": "Deliver a volume of this pump's stock solution into the reaction vial.",
+        "parameters": {
+          "volume_ml": {
+            "type": "float",
+            "required": true
+          },
+          "flow_rate_ml_min": {
+            "type": "float",
+            "required": false,
+            "default": 2.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "dispense_moles": {
+        "description": "Deliver a target amount of reagent, converting to volume via the stock concentration.",
+        "parameters": {
+          "micromoles": {
+            "type": "float",
+            "required": true
+          },
+          "flow_rate_ml_min": {
+            "type": "float",
+            "required": false,
+            "default": 2.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "prime": {
+        "description": "Flush air out of the line before the first dispense of a campaign.",
+        "parameters": {
+          "cycles": {
+            "type": "int",
+            "required": false,
+            "default": 3
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "read_volume_remaining": {
+        "description": "Stock left in the syringe, in mL.",
+        "parameters": {},
+        "return_type": "float",
+        "return_info": {
+          "type": "float",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "refill": {
+        "description": "Draw the syringe back up to full from the reservoir.",
+        "parameters": {},
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "reactor": {
+      "cool_down": {
+        "description": "Quench the heat and let the vial cool before sampling.",
+        "parameters": {
+          "target_c": {
+            "type": "float",
+            "required": false,
+            "default": 25.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "hold": {
+        "description": "Hold at the current setpoint for the reaction time. This is what advances the chemistry.",
+        "parameters": {
+          "minutes": {
+            "type": "float",
+            "required": true
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "load_vial": {
+        "description": "Seat a fresh, empty vial in the block.\n\nThis starts a new experiment: whatever was charged and converted before is gone,\nso call it first in every run or a second run will build on the first one's\ncontents.",
+        "parameters": {
+          "vial_id": {
+            "type": "str",
+            "required": false,
+            "default": "A1"
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "read_temperature": {
+        "description": "Internal vial temperature in C, as read by the probe.",
+        "parameters": {},
+        "return_type": "float",
+        "return_info": {
+          "type": "float",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "set_stir_rate": {
+        "description": "Set the stir rate. Biphasic couplings need vigorous mixing to reach full conversion.",
+        "parameters": {
+          "rpm": {
+            "type": "int",
+            "required": false,
+            "default": 400
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "set_temperature": {
+        "description": "Set the block setpoint. The vial ramps toward it at roughly 5 C/min.",
+        "parameters": {
+          "setpoint_c": {
+            "type": "float",
+            "required": true
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "balance": {
+      "tare": {
+        "description": "Zero the balance with the current load on the pan.",
+        "parameters": {},
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "weigh": {
+        "description": "Read the stable mass in grams once the reading settles.",
+        "parameters": {
+          "settle_seconds": {
+            "type": "float",
+            "required": false,
+            "default": 3.0
+          }
+        },
+        "return_type": "float",
+        "return_info": {
+          "type": "float",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "uv_vis": {
+      "blank": {
+        "description": "Record a solvent blank. Absorbance readings are referenced to this.",
+        "parameters": {},
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "collect_spectrum": {
+        "description": "Sweep a wavelength range and return the full absorbance trace.",
+        "parameters": {
+          "start_nm": {
+            "type": "float",
+            "required": false,
+            "default": 260.0
+          },
+          "end_nm": {
+            "type": "float",
+            "required": false,
+            "default": 450.0
+          },
+          "step_nm": {
+            "type": "float",
+            "required": false,
+            "default": 2.0
+          },
+          "dilution_factor": {
+            "type": "float",
+            "required": false,
+            "default": 1000.0
+          }
+        },
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "measure_absorbance": {
+        "description": "Absorbance of a diluted aliquot at one wavelength.\n\nThe biaryl product absorbs near 312 nm. Neat reaction mixture is far off-scale, so\nthe aliquot is diluted (1:1000 by default) to land inside the linear range.",
+        "parameters": {
+          "wavelength_nm": {
+            "type": "float",
+            "required": false,
+            "default": 312.0
+          },
+          "dilution_factor": {
+            "type": "float",
+            "required": false,
+            "default": 1000.0
+          }
+        },
+        "return_type": "float",
+        "return_info": {
+          "type": "float",
+          "required": true
+        },
+        "is_coroutine": false
+      }
+    },
+    "hplc": {
+      "analyze": {
+        "description": "Full peak table: product yield, unreacted substrate and the impurity balance.",
+        "parameters": {},
+        "return_type": "dict",
+        "return_info": {
+          "type": "dict",
+          "required": true
+        },
+        "is_coroutine": false
+      },
+      "inject": {
+        "description": "Draw an aliquot from the vial and run a separation.",
+        "parameters": {
+          "sample_volume_ul": {
+            "type": "float",
+            "required": false,
+            "default": 5.0
+          },
+          "method": {
             "type": "Literal",
             "required": false,
             "options": [
-              "fast",
-              "slow",
-              "eco"
+              "fast_gradient",
+              "standard_gradient",
+              "isocratic"
             ],
-            "default": "eco"
+            "default": "fast_gradient"
           }
         },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "test_error_handling": {
-        "description": "Throws an exception if should_fail is True.",
-        "parameters": {
-          "should_fail": {
-            "type": "<class 'bool'>",
-            "required": false,
-            "options": [
-              "True",
-              "False"
-            ],
-            "default": true
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "test_nested_dataclass": {
-        "description": "Test method for nested dataclass introspection.",
-        "parameters": {
-          "config": {
-            "type": "PumpConfig",
-            "required": true,
-            "is_object": true,
-            "fields": {
-              "target_speed": {
-                "type": "<class 'float'>",
-                "required": true
-              },
-              "direction": {
-                "type": "PumpDirection",
-                "required": true,
-                "options": [
-                  "forward",
-                  "backward",
-                  "oscillating"
-                ]
-              },
-              "enable_safety_valves": {
-                "type": "<class 'bool'>",
-                "required": false,
-                "options": [
-                  "True",
-                  "False"
-                ],
-                "default": true
-              }
-            }
-          },
-          "duration": {
-            "type": "<class 'int'>",
-            "required": false,
-            "default": 5
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "very_long_module_method_name_to_test_truncation_issues_on_frontend": {
-        "description": "Testing long names on the frontend display.",
-        "parameters": {
-          "super_long_parameter_name_that_should_wrap": {
-            "type": "<class 'str'>",
-            "required": false,
-            "default": "default_val"
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      }
-    },
-    "another_pump": {
-      "complex_initialization_sequence": {
-        "description": "A complex method with many parameters to stress test the UI.\nRequires temperature, solvent name, and optionally safety checks and timeout settings.",
-        "parameters": {
-          "target_temperature": {
-            "type": "<class 'float'>",
-            "required": true
-          },
-          "solvent_name": {
-            "type": "<class 'str'>",
-            "required": true
-          },
-          "enable_safety_checks": {
-            "type": "<class 'bool'>",
-            "required": false,
-            "options": [
-              "True",
-              "False"
-            ],
-            "default": true
-          },
-          "retries": {
-            "type": "<class 'int'>",
-            "required": false,
-            "default": 3
-          },
-          "timeout_seconds": {
-            "type": "<class 'float'>",
-            "required": false,
-            "default": 60.0
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "long_running_task": {
-        "description": "A blocking task to test execution cancellation.",
-        "parameters": {
-          "duration": {
-            "type": "<class 'int'>",
-            "required": true
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "set_flow_rate": {
-        "description": "Sets the flow rate of the pump.",
-        "parameters": {
-          "rate": {
-            "type": "<class 'float'>",
-            "required": true
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "start_pump": {
-        "description": "Starts the pump at the current flow rate.",
-        "parameters": {},
-        "return_type": "None",
+        "return_type": "dict",
         "return_info": {
-          "type": "None",
+          "type": "dict",
           "required": true
         },
         "is_coroutine": false
       },
-      "stop_pump": {
-        "description": "Stops the pump.",
+      "measure_yield": {
+        "description": "Assay yield of the coupled product as a percentage of the limiting substrate.\n\nThis is the objective an optimizer should maximise.",
         "parameters": {},
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "test_enum_and_literal": {
-        "description": "Test method for Enum and Literal parsing.",
-        "parameters": {
-          "direction": {
-            "type": "PumpDirection",
-            "required": true,
-            "options": [
-              "forward",
-              "backward",
-              "oscillating"
-            ]
-          },
-          "mode": {
-            "type": "Literal",
-            "required": false,
-            "options": [
-              "fast",
-              "slow",
-              "eco"
-            ],
-            "default": "eco"
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "test_error_handling": {
-        "description": "Throws an exception if should_fail is True.",
-        "parameters": {
-          "should_fail": {
-            "type": "<class 'bool'>",
-            "required": false,
-            "options": [
-              "True",
-              "False"
-            ],
-            "default": true
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "test_nested_dataclass": {
-        "description": "Test method for nested dataclass introspection.",
-        "parameters": {
-          "config": {
-            "type": "PumpConfig",
-            "required": true,
-            "is_object": true,
-            "fields": {
-              "target_speed": {
-                "type": "<class 'float'>",
-                "required": true
-              },
-              "direction": {
-                "type": "PumpDirection",
-                "required": true,
-                "options": [
-                  "forward",
-                  "backward",
-                  "oscillating"
-                ]
-              },
-              "enable_safety_valves": {
-                "type": "<class 'bool'>",
-                "required": false,
-                "options": [
-                  "True",
-                  "False"
-                ],
-                "default": true
-              }
-            }
-          },
-          "duration": {
-            "type": "<class 'int'>",
-            "required": false,
-            "default": 5
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      },
-      "very_long_module_method_name_to_test_truncation_issues_on_frontend": {
-        "description": "Testing long names on the frontend display.",
-        "parameters": {
-          "super_long_parameter_name_that_should_wrap": {
-            "type": "<class 'str'>",
-            "required": false,
-            "default": "default_val"
-          }
-        },
-        "return_type": "Any",
-        "return_info": null,
-        "is_coroutine": false
-      }
-    },
-    "async_pump": {
-      "async_long_task": {
-        "description": "An async long running task.",
-        "parameters": {
-          "duration": {
-            "type": "<class 'int'>",
-            "required": true
-          }
-        },
-        "return_type": "<class 'dict'>",
+        "return_type": "float",
         "return_info": {
-          "type": "<class 'dict'>",
-          "required": true
-        },
-        "is_coroutine": true
-      },
-      "async_start_pump": {
-        "description": "Starts the pump asynchronously.",
-        "parameters": {},
-        "return_type": "<class 'dict'>",
-        "return_info": {
-          "type": "<class 'dict'>",
-          "required": true
-        },
-        "is_coroutine": true
-      },
-      "sync_to_async_thread_test": {
-        "description": "A regular synchronous method that runs an async function inside a new thread.",
-        "parameters": {},
-        "return_type": "<class 'dict'>",
-        "return_info": {
-          "type": "<class 'dict'>",
-          "required": true
-        },
-        "is_coroutine": false
-      }
-    },
-    "math_driver": {
-      "evaluate_function": {
-        "description": "Evaluates a simulated objective function: -(x-3)^2 - (y-2)^2 + 10\nOptimal parameters are x=3, y=2, yielding max=10.",
-        "parameters": {
-          "x": {
-            "type": "<class 'float'>",
-            "required": true
-          },
-          "y": {
-            "type": "<class 'float'>",
-            "required": true
-          }
-        },
-        "return_type": "<class 'float'>",
-        "return_info": {
-          "type": "<class 'float'>",
+          "type": "float",
           "required": true
         },
         "is_coroutine": false
@@ -414,21 +466,33 @@
     }
   },
   "instrument_meta": {
-    "my_pump": {
-      "module": "dummy_driver",
-      "class": "PumpDriver"
+    "pump_1": {
+      "module": "lab_drivers",
+      "class": "SyringePump"
     },
-    "another_pump": {
-      "module": "dummy_driver",
-      "class": "PumpDriver"
+    "pump_2": {
+      "module": "lab_drivers",
+      "class": "SyringePump"
     },
-    "async_pump": {
-      "module": "dummy_driver",
-      "class": "AsyncPumpDriver"
+    "pump_3": {
+      "module": "lab_drivers",
+      "class": "SyringePump"
     },
-    "math_driver": {
-      "module": "dummy_driver",
-      "class": "DummyMathDriver"
+    "reactor": {
+      "module": "lab_drivers",
+      "class": "HeaterStirrer"
+    },
+    "balance": {
+      "module": "lab_drivers",
+      "class": "AnalyticalBalance"
+    },
+    "uv_vis": {
+      "module": "lab_drivers",
+      "class": "UVVisSpectrometer"
+    },
+    "hplc": {
+      "module": "lab_drivers",
+      "class": "HPLC"
     }
   }
 }

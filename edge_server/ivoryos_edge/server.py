@@ -444,6 +444,88 @@ async def submit_run_input(run_id: int, req: Request):
     queue_manager.submit_input(run_id, value)
     return {"status": "success"}
 
+@app.patch("/api/queue/runs/{run_id}")
+async def rename_run(run_id: int, req: Request):
+    """Rename a queued run. Legacy IvoryOS let operators label queued tasks so a queue of five
+    'Untitled Run' entries could be told apart at a glance."""
+    data = await req.json()
+    name = (data.get("name") or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "Name cannot be empty"})
+
+    from ivoryos_edge.models import async_session, WorkflowRun
+    async with async_session() as session:
+        run = await session.get(WorkflowRun, run_id)
+        if not run:
+            return JSONResponse(status_code=404, content={"error": "Run not found"})
+        run.name = name[:128]
+        await session.commit()
+    await queue_manager.broadcast_global_queue()
+    return {"status": "success", "name": name[:128]}
+
+
+@app.delete("/api/queue/runs/{run_id}")
+async def delete_run(run_id: int):
+    """Remove a run from the queue entirely. Only runs that haven't started can be deleted —
+    cancel a running one instead, so its partial results stay on record."""
+    from ivoryos_edge.models import async_session, WorkflowRun
+    async with async_session() as session:
+        run = await session.get(WorkflowRun, run_id)
+        if not run:
+            return JSONResponse(status_code=404, content={"error": "Run not found"})
+        if run.status not in ("pending", "cancelled", "completed", "error"):
+            return JSONResponse(status_code=400, content={"error": f"Cannot delete a run that is {run.status}"})
+        if queue_manager.active_run_id == run_id:
+            return JSONResponse(status_code=400, content={"error": "Cannot delete the active run"})
+        await session.delete(run)
+        await session.commit()
+    await queue_manager.broadcast_global_queue()
+    return {"status": "deleted", "run_id": run_id}
+
+
+@app.post("/api/queue/runs/{run_id}/move")
+async def move_run(run_id: int, req: Request):
+    """Move a pending run one slot up or down the queue by swapping its queue position with its
+    neighbour's, so an urgent experiment can jump ahead without re-submitting it."""
+    data = await req.json()
+    direction = data.get("direction")
+    if direction not in ("up", "down"):
+        return JSONResponse(status_code=400, content={"error": "direction must be 'up' or 'down'"})
+
+    from ivoryos_edge.models import async_session, WorkflowRun
+    from ivoryos_edge.queue import queue_position_of
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(WorkflowRun).where(WorkflowRun.status == "pending").order_by(WorkflowRun.id)
+        )
+        pending = list(result.scalars())
+        # The run at the head of the queue is the one about to start; it isn't reorderable.
+        pending.sort(key=lambda r: (queue_position_of(r), r.id))
+
+        index = next((i for i, r in enumerate(pending) if r.id == run_id), None)
+        if index is None:
+            return JSONResponse(status_code=400, content={"error": "Run is not pending"})
+
+        target = index - 1 if direction == "up" else index + 1
+        if target < 0 or target >= len(pending):
+            edge = "front" if direction == "up" else "back"
+            return JSONResponse(status_code=400, content={"error": f"Run is already at the {edge} of the queue"})
+
+        # Rewrite every position from the reordered list so the ordering stays total and stable,
+        # even for runs that were never moved before and have no stored position.
+        pending[index], pending[target] = pending[target], pending[index]
+        for position, run in enumerate(pending):
+            params = dict(run.parameters or {})
+            params["queue_position"] = position
+            run.parameters = params
+        await session.commit()
+
+    await queue_manager.broadcast_global_queue()
+    return {"status": "success"}
+
+
 @app.websocket("/api/ws/runs/{run_id}")
 async def ws_run_status(websocket: WebSocket, run_id: int):
     await websocket.accept()

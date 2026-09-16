@@ -40,6 +40,10 @@ export function generatePythonCode(
   const formatValue = (v: any): string => {
     if (typeof v === 'string' && v.startsWith('#')) return v.substring(1).trim(); // bare reference to a variable set earlier in the script
     if (typeof v === 'string') return `"${v}"`;
+    // Python's literals, not JavaScript's — a bool param was rendering as `true`/`false`, which
+    // is a NameError when the generated script is actually run.
+    if (typeof v === 'boolean') return v ? 'True' : 'False';
+    if (v === null || v === undefined) return 'None';
     if (typeof v === 'object' && v !== null) {
       const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
       return `{${dictEntries.join(', ')}}`;

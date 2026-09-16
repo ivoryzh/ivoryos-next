@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from .introspection import inspect_device_module
 from .models import init_db
 from .queue import WorkflowQueueManager
+from . import workflows as wf
+from .workflows import WorkflowError, expand_workflow_blocks
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(ENV_PATH)
@@ -99,11 +101,26 @@ async def handle_broker_message(topic: str, payload: dict):
     runId = payload.get("runId")
     nodeId = payload.get("nodeId")
     if block and runId and nodeId:
-        expanded_blocks = expand_workflow_blocks([block], WORKFLOWS_DIR, "main")
+        resolved_links = []
+        try:
+            expanded_blocks = expand_workflow_blocks(
+                [block], WORKFLOWS_DIR, "main", resolved=resolved_links
+            )
+        except WorkflowError as e:
+            # A cloud-dispatched node can reference a workflow this device doesn't have (or has
+            # since renamed). Refusing loudly here beats queueing a malformed step: the old
+            # expander's silent fallback would have sent "Library Workflows" to the executor as if
+            # it were an instrument.
+            print(f"Refusing cloud task {nodeId} for run {runId}: {e}")
+            return
         await queue_manager.submit_sequence(
-            f"Cloud Node {nodeId} ({runId})", 
-            expanded_blocks, 
-            {"cloud_run_id": runId, "cloud_node_id": nodeId}
+            f"Cloud Node {nodeId} ({runId})",
+            expanded_blocks,
+            {
+                "cloud_run_id": runId,
+                "cloud_node_id": nodeId,
+                **({"resolved_links": resolved_links} if resolved_links else {}),
+            }
         )
 
 def publish_schema(broker, topic_prefix, client_id):
@@ -131,13 +148,12 @@ def publish_sequences(broker, topic_prefix, client_id):
     (re)subscribes, with no polling or explicit sync request needed on either side. See
     publish_schema's docstring for the IoT policy permission retained publishing needs."""
     try:
-        for f in os.listdir(WORKFLOWS_DIR):
-            if not f.endswith(".json"):
-                continue
-            name = f[:-5]
+        # list_workflow_names, not a raw listdir: the directory also holds dot-prefixed bookkeeping
+        # (.versions/, .meta.json), and a raw "*.json" sweep would publish `.meta` as if it were a
+        # saved workflow.
+        for name in wf.list_workflow_names(WORKFLOWS_DIR):
             try:
-                with open(os.path.join(WORKFLOWS_DIR, f), 'r') as fp:
-                    data = json.load(fp)
+                data = wf.read_head(WORKFLOWS_DIR, name)
                 broker.publish(f"{topic_prefix}/{client_id}/sequences/{name}", data, retain=True, qos=1)
             except Exception as e:
                 print(f"Failed to publish sequence '{name}': {e}")
@@ -345,72 +361,6 @@ async def list_runs():
     runs = await queue_manager.get_all_runs()
     return {"runs": runs}
 
-import json
-
-def expand_workflow_blocks(sequence_list, workflows_dir, default_phase="main"):
-    expanded = []
-    for block in sequence_list:
-        if block.get("instrument") == "Library Workflows":
-            wf_name = block.get("method")
-            try:
-                with open(os.path.join(workflows_dir, f"{wf_name}.json"), "r") as wf_file:
-                    wf_data = json.load(wf_file)
-                
-                # Replace dynamic params (#var) with the values provided in the block
-                params = block.get("params", {})
-                
-                def instantiate_blocks(blocks, phase, parent=None):
-                    inst_blocks = []
-                    for b in blocks:
-                        # Copy the block
-                        new_b = dict(b)
-                        new_b["instrument"] = new_b.get("instrument", new_b.get("module"))
-                        new_b["method"] = new_b.get("method", new_b.get("action"))
-                        if "args" in new_b:
-                            new_b["params"] = new_b.pop("args")
-                        
-                        # Replace # variables and inject metadata
-                        new_args = {}
-                        for k, v in new_b.get("params", {}).items():
-                            if isinstance(v, str) and v.startswith("#"):
-                                var_name = v[1:]
-                                new_args[k] = params.get(var_name, v)
-                            else:
-                                new_args[k] = v
-                        
-                        new_args["_phase"] = phase
-                        if parent:
-                            new_args["_parent_workflow"] = parent
-                            
-                        ret_val = b.get("returnVar") or b.get("return")
-                        if ret_val:
-                            new_args["_return_var"] = ret_val
-                            
-                        new_b["params"] = new_args
-                        inst_blocks.append(new_b)
-                    return inst_blocks
-                
-                expanded.extend(instantiate_blocks(wf_data.get("prep", []), default_phase, wf_name))
-                expanded.extend(instantiate_blocks(wf_data.get("script", []), default_phase, wf_name))
-                expanded.extend(instantiate_blocks(wf_data.get("cleanup", []), default_phase, wf_name))
-            except Exception as e:
-                print(f"Failed to expand workflow {wf_name}: {e}")
-                # Fallback: add original block
-                expanded.append(block)
-        else:
-            new_b = dict(block)
-            params = dict(new_b.get("params", {}))
-            if "_phase" not in params:
-                params["_phase"] = default_phase
-                
-            ret_val = block.get("returnVar") or block.get("return")
-            if ret_val:
-                params["_return_var"] = ret_val
-                
-            new_b["params"] = params
-            expanded.append(new_b)
-    return expanded
-
 @app.post("/api/queue/runs")
 async def create_run(req: Request):
     data = await req.json()
@@ -421,26 +371,43 @@ async def create_run(req: Request):
     sequence = data.get("sequence", [])
     cleanup = data.get("cleanup", [])
     
+    # Every link followed while flattening is recorded and persisted onto the run, so a finished
+    # run can state exactly which body of each subworkflow it executed. Without this, editing a
+    # linked workflow silently made past runs unreproducible with nothing in the record to show it.
+    resolved_links = []
+
     try:
-        prep = expand_workflow_blocks(prep, WORKFLOWS_DIR, "prep")
-        sequence = expand_workflow_blocks(sequence, WORKFLOWS_DIR, "main")
-        cleanup = expand_workflow_blocks(cleanup, WORKFLOWS_DIR, "cleanup")
-        
+        prep = expand_workflow_blocks(prep, WORKFLOWS_DIR, "prep", resolved=resolved_links)
+        sequence = expand_workflow_blocks(sequence, WORKFLOWS_DIR, "main", resolved=resolved_links)
+        cleanup = expand_workflow_blocks(cleanup, WORKFLOWS_DIR, "cleanup", resolved=resolved_links)
+
         if parameters.get("type") == "Optimization":
             parameters["prep_template"] = prep
             parameters["cleanup_template"] = cleanup
             # The sequence_template is already inside parameters, but it's not expanded!
             if "sequence_template" in parameters:
-                parameters["sequence_template"] = expand_workflow_blocks(parameters["sequence_template"], WORKFLOWS_DIR)
-            
+                parameters["sequence_template"] = expand_workflow_blocks(
+                    parameters["sequence_template"], WORKFLOWS_DIR, resolved=resolved_links
+                )
+
+            if resolved_links:
+                parameters["resolved_links"] = resolved_links
+
             # Send empty sequence because loop handles the sequence_template
             run_id = await queue_manager.submit_sequence(name, [], parameters)
         else:
+            if resolved_links:
+                parameters["resolved_links"] = resolved_links
+
             # Flatten everything into a single sequence
             combined_sequence = prep + sequence + cleanup
             run_id = await queue_manager.submit_sequence(name, combined_sequence, parameters)
-            
+
         return {"status": "started", "run_id": run_id}
+    except WorkflowError as e:
+        # A missing, cyclic or over-nested link aborts the run rather than dispatching a malformed
+        # step. The message names the offending workflow so the Designer can show it verbatim.
+        return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -696,88 +663,267 @@ async def kill_execution(task_id: str):
 WORKFLOWS_DIR = os.path.join(os.path.dirname(__file__), "workflows")
 os.makedirs(WORKFLOWS_DIR, exist_ok=True)
 
+def _workflow_error(e, status=400):
+    return JSONResponse(status_code=status, content={"error": str(e)})
+
+
+def _workflow_summary(name):
+    """List-row metadata. `links`/`linked_by` are what the Library page needs to warn a user that
+    editing this workflow will change other ones."""
+    filepath = wf.workflow_path(WORKFLOWS_DIR, name)
+    body = {}
+    try:
+        # ensure_versioned rather than read_head: a workflow written before versioning existed (or
+        # synced down from Cloud) is adopted as v1 here, so the listing never reports a null
+        # version that the version badges and "vN available" checks would then have to special-case.
+        body = wf.ensure_versioned(WORKFLOWS_DIR, name)
+    except WorkflowError:
+        pass
+    return {
+        "name": name,
+        "description": body.get("description", ""),
+        "created_at": os.path.getctime(filepath) * 1000,  # JS timestamp
+        "updated_at": os.path.getmtime(filepath) * 1000,
+        "version": body.get("version"),
+        "body_hash": body.get("body_hash"),
+        "note": body.get("note", ""),
+        "author": body.get("author", ""),
+        "links": wf.link_targets(body),
+        "tags": wf.get_tags(WORKFLOWS_DIR, name),
+    }
+
+
 @app.get("/api/workflows")
 def list_workflows():
     try:
-        import json
-        workflows = []
-        for f in os.listdir(WORKFLOWS_DIR):
-            if f.endswith(".json"):
-                filepath = os.path.join(WORKFLOWS_DIR, f)
-                name = f.replace(".json", "")
-                desc = ""
-                created_at = os.path.getctime(filepath)
-                updated_at = os.path.getmtime(filepath)
-                try:
-                    with open(filepath, 'r') as fp:
-                        data = json.load(fp)
-                        desc = data.get("description", "")
-                except:
-                    pass
-                workflows.append({
-                    "name": name,
-                    "description": desc,
-                    "created_at": created_at * 1000, # Return JS timestamp
-                    "updated_at": updated_at * 1000
-                })
-        return {"workflows": workflows}
+        names = wf.list_workflow_names(WORKFLOWS_DIR)
+        bodies = {}
+        for name in names:
+            try:
+                bodies[name] = wf.ensure_versioned(WORKFLOWS_DIR, name)
+            except WorkflowError:
+                bodies[name] = {}
+
+        summaries = []
+        for name in names:
+            summary = _workflow_summary(name)
+            # Computed from the already-loaded bodies rather than re-reading every file per
+            # workflow — this is O(n^2) over a lab's workflow library either way, but n is small
+            # and one pass of disk reads keeps it cheap.
+            summary["linked_by"] = [
+                other for other in names
+                if other != name and name in wf.link_targets(bodies.get(other) or {})
+            ]
+            summaries.append(summary)
+        return {"workflows": summaries, "tags": wf.all_tags(WORKFLOWS_DIR)}
     except Exception as e:
-        return {"error": str(e)}, 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @app.get("/api/plugins")
 def list_plugins():
     return {"plugins": getattr(app.state, "plugins", [])}
 
-@app.get("/api/workflows/{name}")
-def get_workflow(name: str):
-    filepath = os.path.join(WORKFLOWS_DIR, f"{name}.json")
-    if not os.path.exists(filepath):
-        return JSONResponse(status_code=404, content={"error": "Workflow not found"})
-    import json
+
+@app.post("/api/workflows/expand")
+async def expand_workflow_preview(req: Request):
+    """Dry run: flatten a sequence exactly the way `create_run` will, without queueing anything.
+
+    This is what the Designer's preview panel renders. It deliberately shares `expand_workflow_blocks`
+    with the dispatch path — a preview generated by a second, parallel implementation could drift
+    out of sync with what the hardware actually does, which is the one failure mode a safety
+    preview must not have.
+
+    Declared before `/api/workflows/{name}` so "expand" isn't swallowed as a workflow name.
+    """
     try:
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        return data
+        data = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    resolved = []
+    try:
+        prep = expand_workflow_blocks(data.get("prep", []), WORKFLOWS_DIR, "prep", resolved=resolved)
+        main = expand_workflow_blocks(data.get("sequence", []), WORKFLOWS_DIR, "main", resolved=resolved)
+        cleanup = expand_workflow_blocks(data.get("cleanup", []), WORKFLOWS_DIR, "cleanup", resolved=resolved)
+    except WorkflowError as e:
+        return _workflow_error(e)
     except Exception as e:
-        return {"error": str(e)}, 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    return {
+        "prep": prep,
+        "sequence": main,
+        "cleanup": cleanup,
+        "resolved_links": resolved,
+        "counts": {
+            "prep": len(prep),
+            "sequence": len(main),
+            "cleanup": len(cleanup),
+            "total": len(prep) + len(main) + len(cleanup),
+        },
+    }
+
+
+@app.put("/api/workflows/{name}/tags")
+async def set_workflow_tags(name: str, req: Request):
+    """Re-file a workflow. Tags are stored beside the workflow rather than inside it, so changing
+    one is not an edit to the protocol: no new version, no change to any pinned reference."""
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    try:
+        wf.validate_name(name)
+        if not os.path.exists(wf.workflow_path(WORKFLOWS_DIR, name)):
+            raise wf.WorkflowNotFound(f"Workflow '{name}' not found")
+        tags = wf.set_tags(WORKFLOWS_DIR, name, data.get("tags"))
+    except wf.WorkflowNotFound as e:
+        return _workflow_error(e, 404)
+    except WorkflowError as e:
+        return _workflow_error(e)
+
+    return {"status": "success", "name": name, "tags": tags, "all_tags": wf.all_tags(WORKFLOWS_DIR)}
+
+
+@app.get("/api/workflows/{name}")
+def get_workflow(name: str, version: int = None):
+    try:
+        return wf.read_version(WORKFLOWS_DIR, name, version)
+    except wf.WorkflowNotFound as e:
+        return _workflow_error(e, 404)
+    except WorkflowError as e:
+        return _workflow_error(e)
+
+
+@app.get("/api/workflows/{name}/versions")
+def get_workflow_versions(name: str):
+    """Newest first — the history panel and the diff view both read this."""
+    try:
+        wf.ensure_versioned(WORKFLOWS_DIR, name)
+    except wf.WorkflowNotFound as e:
+        return _workflow_error(e, 404)
+    except WorkflowError as e:
+        return _workflow_error(e)
+
+    entries = []
+    for version in reversed(wf.list_versions(WORKFLOWS_DIR, name)):
+        try:
+            body = wf.read_version(WORKFLOWS_DIR, name, version)
+        except WorkflowError:
+            continue
+        entries.append({
+            "version": version,
+            "body_hash": body.get("body_hash"),
+            "updated_at": (body.get("updated_at") or 0) * 1000,
+            "note": body.get("note", ""),
+            "author": body.get("author", ""),
+            "steps": sum(len(body.get(k) or []) for k in ("prep", "script", "cleanup")),
+        })
+    return {"name": name, "versions": entries}
+
+
+@app.get("/api/workflows/{name}/dependents")
+def get_workflow_dependents(name: str):
+    """Which saved workflows *link* to this one, and would therefore change if it is edited.
+
+    Copies never appear here — an inlined copy holds no reference, which is exactly why copy is the
+    safe default for reuse.
+    """
+    try:
+        wf.validate_name(name)
+        return {"name": name, "dependents": wf.dependents(WORKFLOWS_DIR, name)}
+    except WorkflowError as e:
+        return _workflow_error(e)
+
 
 @app.post("/api/workflows/{name}")
 async def save_workflow(name: str, req: Request):
     try:
         data = await req.json()
-    except Exception as e:
+    except Exception:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-        
-    filepath = os.path.join(WORKFLOWS_DIR, f"{name}.json")
-    import json
-    try:
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=4)
-        # Push the change up immediately rather than waiting for the next reconnect — a saved
-        # workflow should show up in Cloud right away, not just after a restart.
-        if global_broker and global_topic_prefix and global_client_id:
-            try:
-                global_broker.publish(f"{global_topic_prefix}/{global_client_id}/sequences/{name}", data, retain=True, qos=1)
-            except Exception as e:
-                print(f"Failed to publish saved workflow '{name}': {e}")
-        return {"status": "success", "name": name}
-    except Exception as e:
-        return {"error": str(e)}, 500
 
-@app.delete("/api/workflows/{name}")
-def delete_workflow(name: str):
-    filepath = os.path.join(WORKFLOWS_DIR, f"{name}.json")
-    # A destructive endpoint, unlike the read/write ones above, so it's worth the extra check
-    # that `name` didn't escape WORKFLOWS_DIR via path traversal (e.g. "../../etc/passwd").
-    if os.path.commonpath([os.path.abspath(filepath), os.path.abspath(WORKFLOWS_DIR)]) != os.path.abspath(WORKFLOWS_DIR):
-        return JSONResponse(status_code=400, content={"error": "Invalid workflow name"})
-    if not os.path.exists(filepath):
-        return JSONResponse(status_code=404, content={"error": "Workflow not found"})
     try:
-        os.remove(filepath)
-        return {"status": "deleted", "name": name}
+        wf.validate_name(name)
+
+        # Validate the link graph *before* writing. Server-side because both the Edge Designer and
+        # the Cloud sequence editor POST here, and client-only validation in this project has
+        # already drifted out of sync twice (see AGENTS.md section 3).
+        missing = wf.missing_links(WORKFLOWS_DIR, data)
+        if missing:
+            return _workflow_error(
+                WorkflowError(
+                    "This workflow links to a workflow that no longer exists: "
+                    + ", ".join(sorted(missing))
+                )
+            )
+
+        cycle = wf.find_cycle(WORKFLOWS_DIR, name, data)
+        if cycle:
+            return _workflow_error(
+                WorkflowError(
+                    "Linked workflows would form a cycle: " + " -> ".join(cycle)
+                    + ". A workflow cannot use itself, directly or indirectly."
+                )
+            )
+
+        body, version, created = wf.save_version(
+            WORKFLOWS_DIR,
+            name,
+            data,
+            note=data.get("note"),
+            author=data.get("author"),
+        )
+    except WorkflowError as e:
+        return _workflow_error(e)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+    # Push the change up immediately rather than waiting for the next reconnect — a saved
+    # workflow should show up in Cloud right away, not just after a restart.
+    if global_broker and global_topic_prefix and global_client_id:
+        try:
+            global_broker.publish(
+                f"{global_topic_prefix}/{global_client_id}/sequences/{name}", body, retain=True, qos=1
+            )
+        except Exception as e:
+            print(f"Failed to publish saved workflow '{name}': {e}")
+
+    return {
+        "status": "success",
+        "name": name,
+        "version": version,
+        "created_version": created,
+        "body_hash": body.get("body_hash"),
+        "dependents": wf.dependents(WORKFLOWS_DIR, name),
+    }
+
+
+@app.delete("/api/workflows/{name}")
+def remove_workflow(name: str, force: bool = False):
+    """Deleting a workflow other workflows still link to would break them at their next run, so it
+    is refused unless explicitly forced. Version snapshots are kept either way — a completed run
+    may still point at one."""
+    try:
+        wf.validate_name(name)
+        linked_by = wf.dependents(WORKFLOWS_DIR, name)
+        if linked_by and not force:
+            return _workflow_error(
+                WorkflowError(
+                    f"'{name}' is linked by: {', '.join(linked_by)}. "
+                    "Detach those steps first, or delete with force=true."
+                ),
+                409,
+            )
+        wf.delete_workflow(WORKFLOWS_DIR, name)
+        return {"status": "deleted", "name": name, "was_linked_by": linked_by}
+    except wf.WorkflowNotFound as e:
+        return _workflow_error(e, 404)
+    except WorkflowError as e:
+        return _workflow_error(e)
+
 
 # Frontend mounting is deferred to run() to ensure plugins are mounted first
 

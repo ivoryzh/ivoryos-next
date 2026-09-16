@@ -4,7 +4,21 @@
 import { useState, useEffect, useRef } from 'react';
 import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { WorkflowEditor, SequenceBlock, PythonCodeView, generatePythonCode } from '@ivoryos/shared-ui';
+import {
+  WorkflowEditor,
+  SequenceBlock,
+  PythonCodeView,
+  generatePythonCode,
+  buildSavedBody,
+  flattenSavedBody,
+  scanDynamicParams,
+  toSequenceBlocks,
+  LIBRARY_INSTRUMENT,
+  chooseDialog,
+  confirmDialog,
+  notify,
+  promptDialog,
+} from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -31,24 +45,18 @@ export default function DesignerPage() {
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
   const [isOffline, setIsOffline] = useState(false);
+  // Latest saved version per workflow name — drives the "vN available" badge on copies and links.
+  const [workflowVersions, setWorkflowVersions] = useState<Record<string, number>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Shared by file-upload, and by loading a sequence saved to the Cloud database — both hand this
   // the same legacy {prep, script, cleanup} (or {script_dict: {...}}) shape.
   const loadLegacyJson = (json: any) => {
-    const migrateBlocks = (blocks: any[]): SequenceBlock[] => {
-      return blocks.map(b => ({
-        id: String(b.uuid || b.id || Math.random()),
-        instrument: b.instrument ? b.instrument.replace('deck.', '') : 'unknown',
-        method: b.action || b.method || 'unknown',
-        params: b.args || b.params || {},
-        returnVar: b.return || b.returnVar || '',
-        schema: {},
-        isExpanded: false,
-        isBatchAction: !!b.batch_action
-      }));
-    };
+    // Shared with the Edge Designer and the Library page, so a saved block means the same thing
+    // in all three apps (AGENTS.md section 3).
+    const migrateBlocks = (blocks: any[]): SequenceBlock[] =>
+      toSequenceBlocks(blocks, statusData?.instruments || {});
 
     let newPrep, newSeq, newClean, name = '';
 
@@ -89,7 +97,7 @@ export default function DesignerPage() {
         loadLegacyJson(JSON.parse(event.target?.result as string));
       } catch (error) {
         console.error("Failed to parse JSON file", error);
-        alert("Failed to parse JSON file.");
+        notify("That file isn't a workflow this app can read.", { title: 'Import failed', tone: 'error' });
       }
 
       // Reset input
@@ -170,35 +178,27 @@ export default function DesignerPage() {
 
             data.instruments["Library Workflows"] = {};
             
+            const versions: Record<string, number> = {};
             for (const [wfName, wfJson] of Object.entries<any>(offlineWfs)) {
-                const dynamicParams: any = {};
-                const scanBlocks = (blocks: any[]) => {
-                    blocks.forEach((b: any) => {
-                        if (b.args) {
-                            Object.entries(b.args).forEach(([k, val]) => {
-                                if (typeof val === 'string' && val.startsWith('#')) {
-                                    const paramName = val.substring(1);
-                                    const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
-                                    dynamicParams[paramName] = { type: paramType, required: true };
-                                }
-                            });
-                        }
-                    });
-                };
-                scanBlocks(wfJson.prep || []);
-                scanBlocks(wfJson.script || []);
-                scanBlocks(wfJson.cleanup || []);
-                
-                if (wfName === editingWf) {
-                    continue; // Prevent recursion by hiding current workflow
-                }
-                
+                // Tracked for every workflow, the one being edited included — the "vN available"
+                // badge on an already-placed copy or link must work regardless of what the toolbox
+                // currently offers.
+                if (wfJson.version) versions[wfName] = wfJson.version;
+
+                // Self-reference is filtered reactively by WorkflowEditor
+                // (currentWorkflowName), because this page can switch which workflow
+                // it is editing without rebuilding the toolbox.
+
                 data.instruments["Library Workflows"][wfName] = {
-                    description: "Saved Workflow from Library",
-                    parameters: dynamicParams,
-                    return_type: "None"
+                    description: wfJson.description || "Saved Workflow from Library",
+                    parameters: scanDynamicParams(wfJson),
+                    return_type: "None",
+                    // The full saved body, so a Copy-mode drag can inline the real steps and
+                    // Detach can turn a link back into an editable copy without a round trip.
+                    body: wfJson,
                 };
             }
+            setWorkflowVersions(versions);
         } catch (e) {
             console.error("Failed to load workflows for toolbox", e);
         }
@@ -293,8 +293,12 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
   };
 
-  const clearCanvas = () => {
-    if (confirm("Are you sure you want to clear the canvas? All blocks will be removed.")) {
+  const clearCanvas = async () => {
+    if (await confirmDialog("Every block on the canvas will be removed. This cannot be undone.", {
+      title: 'Clear the canvas?',
+      confirmLabel: 'Clear',
+      tone: 'danger',
+    })) {
         setSequence([]);
         setPrepSequence([]);
         setCleanupSequence([]);
@@ -314,40 +318,61 @@ export default function DesignerPage() {
   const saveWorkflow = async () => {
     let name = currentWorkflowName;
     if (!name) {
-        const inputName = prompt("Enter a name for this workflow:");
+        const inputName = await promptDialog("Give this workflow a name so it can be saved to the library.", {
+          title: 'Name this workflow',
+          placeholder: 'e.g. wash_protocol',
+          confirmLabel: 'Save',
+        });
         if (!inputName) return;
         name = inputName;
     }
 
-    const formatBlocks = (blocks: SequenceBlock[]) => blocks.map((block, idx) => {
-        const argTypes: Record<string, string> = {};
-        if (block.schema && block.schema.parameters) {
-            for (const [key, paramObj] of Object.entries(block.schema.parameters)) {
-                argTypes[key] = (paramObj as any).type || "str";
-            }
-        }
-        
-        return {
-          id: idx + 1,
-          uuid: Math.floor(Math.random() * 1000000000), // Random int UUID
-          instrument: block.instrument,
-          action: block.method,
-          args: block.params,
-          arg_types: argTypes,
-          return: block.returnVar || "",
-          batch_action: !!block.isBatchAction,
-          consolidate_batch_args: false
-        };
-    });
+    // Impact check before writing, mirroring the Edge Designer. Locally-known workflows are the
+    // only ones this app can see, so this is a best-effort warning rather than the authoritative
+    // one — the Edge server still validates the link graph on its own save. It is worth showing
+    // anyway: the person editing a shared protocol is usually the one who has forgotten what else
+    // depends on it, and this is the last moment they still have the context to decide.
+    try {
+      const knownStr = localStorage.getItem('ivoryos_offline_workflows');
+      const known = knownStr ? JSON.parse(knownStr) : {};
+      const dependents = Object.entries<any>(known)
+        .filter(([otherName, body]) => otherName !== name
+          && flattenSavedBody(body).some((b: any) => (b.instrument || b.module) === LIBRARY_INSTRUMENT
+            && (b.action || b.method) === name))
+        .map(([otherName]) => otherName);
 
-    // Convert sequence to Legacy IvoryOS JSON
-    const legacyFormat = {
-      name: name,
-      description: currentWorkflowDescription,
-      prep: formatBlocks(prepSequence),
-      script: formatBlocks(sequence),
-      cleanup: formatBlocks(cleanupSequence)
-    };
+      if (dependents.length > 0) {
+        const choice = await chooseDialog({
+          title: `${dependents.length} other workflow${dependents.length === 1 ? '' : 's'} use${dependents.length === 1 ? 's' : ''} "${name}"`,
+          message:
+            `Saving will change ${dependents.length === 1 ? 'it' : 'them'} too:\n\n`
+            + dependents.map(d => `  \u2022 ${d}`).join('\n'),
+          tone: 'danger',
+          actions: [
+            { id: 'cancel', label: 'Cancel', kind: 'cancel' },
+            { id: 'fork', label: 'Save as new workflow' },
+            { id: 'overwrite', label: 'Save anyway', kind: 'danger' },
+          ],
+        });
+        if (choice === null || choice === 'cancel') return;
+        if (choice === 'fork') {
+          const forkName = await promptDialog("Save as a new workflow named:", {
+            title: 'Save a copy',
+            defaultValue: `${name} copy`,
+            confirmLabel: 'Save copy',
+          });
+          if (!forkName) return;
+          name = forkName;
+        }
+      }
+    } catch {
+      // Never let the warning itself block a save.
+    }
+
+    // Shared with the Edge Designer so both apps write byte-identical bodies — including the
+    // `ref` / `copied_from` reuse provenance, which a hand-rolled serialiser here would drop and
+    // silently turn every pinned link into a floating one.
+    const legacyFormat = buildSavedBody(name, currentWorkflowDescription, prepSequence, sequence, cleanupSequence);
 
     try {
       const offlineWfsStr = localStorage.getItem('ivoryos_offline_workflows');
@@ -376,12 +401,14 @@ export default function DesignerPage() {
           }),
         });
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Cloud save failed');
-        alert("Workflow saved to the Cloud Library!");
+        await notify("Saved to the Cloud Library.", { title: name });
       } else {
-        alert("Workflow saved locally — assign a target device to also save it to the Cloud Library.");
+        await notify("Saved on this device only. Assign a target device to also save it to the Cloud Library.",
+                     { title: name });
       }
     } catch (e: any) {
-      alert("Saved locally, but failed to save to the Cloud database: " + e.message);
+      await notify("Saved on this device, but the Cloud save failed: " + e.message,
+                   { title: 'Partly saved', tone: 'error' });
     }
   };
 
@@ -407,12 +434,15 @@ export default function DesignerPage() {
     return null;
   };
 
-  const validateSequence = () => {
+  // Async because every rejection now surfaces as a modal the user has to acknowledge —
+  // previously these were alert() calls, which the desktop webview silently swallows.
+  const validateSequence = async () => {
     const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
 
     const emptyHashLocation = findEmptyHashName(allBlocks);
     if (emptyHashLocation) {
-      alert(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`);
+      await notify(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`,
+                   { title: 'Unnamed variable', tone: 'error' });
       return false;
     }
 
@@ -424,7 +454,8 @@ export default function DesignerPage() {
           if (typeof val === 'string' && val.startsWith('#')) continue;
 
           if (val === undefined || val === '') {
-            alert(`Missing parameter '${key}' in ${block.instrument}.${block.method}`);
+            await notify(`Missing parameter '${key}' in ${block.instrument}.${block.method}`,
+                         { title: 'Incomplete step', tone: 'error' });
             return false;
           }
 
@@ -432,7 +463,8 @@ export default function DesignerPage() {
           // only fail once the run tries to cast it, so catch it here instead.
           const typeStr = ((param as any)?.type || '').toLowerCase();
           if ((typeStr.includes('int') || typeStr.includes('float')) && isNaN(Number(val))) {
-            alert(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`);
+            await notify(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`,
+                         { title: 'Wrong parameter type', tone: 'error' });
             return false;
           }
         }
@@ -442,20 +474,21 @@ export default function DesignerPage() {
   };
 
   const runSequence = async () => {
-    if (!validateSequence()) return;
+    if (!await validateSequence()) return;
     if (sequence.length === 0) return;
 
 
 
     try {
-        alert("This is an offline Sequence Editor. Export your workflow or execute it on a connected Edge instance.");
+        await notify("This is an offline Sequence Editor. Export your workflow, or run it on a connected Edge instance.",
+                     { title: 'Nothing to run against' });
     } catch (e: any) {
       setExecutionState({
         isRunning: false,
         currentIndex: -1,
         results: {}
       });
-      alert(`Error starting execution: ${e.message}`);
+      await notify(e.message, { title: 'Could not start the run', tone: 'error' });
     }
   };
 
@@ -574,12 +607,14 @@ export default function DesignerPage() {
                   return (
                     <>
                     <button 
-                      onClick={() => {
-                        if (!validateSequence()) return;
+                      onClick={async () => {
+                        if (!await validateSequence()) return;
                         if (hasPendingRuns) {
-                            if (!confirm("A task is already running. Add this sequence to the execution queue?")) {
-                                return;
-                            }
+                            const ok = await confirmDialog("A task is already running. Add this sequence to the execution queue?", {
+                              title: 'Queue this run?',
+                              confirmLabel: 'Add to queue',
+                            });
+                            if (!ok) return;
                         }
                         if (hasDynamicParams) window.location.href = '/execution';
                         else runSequence();
@@ -620,6 +655,19 @@ export default function DesignerPage() {
                 />
             ) : null
           }
+          workflowVersions={workflowVersions}
+          currentWorkflowName={currentWorkflowName}
+          fetchWorkflowVersion={async (name, version) => {
+            // Cloud keeps only the head body per workflow in its offline cache, so an older
+            // version simply isn't available here. Reporting that lets Detach refuse rather than
+            // silently inline the wrong steps.
+            const known = JSON.parse(localStorage.getItem('ivoryos_offline_workflows') || '{}');
+            const body = known[name];
+            if (!body || body.version !== version) {
+              throw new Error(`v${version} is not cached on this device`);
+            }
+            return body;
+          }}
         />
       </div>
     </div>

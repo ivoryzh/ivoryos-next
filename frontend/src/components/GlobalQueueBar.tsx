@@ -1,13 +1,15 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
-import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy } from 'lucide-react';
+import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo } from 'lucide-react';
 
 export default function GlobalQueueBar() {
   const [activeRun, setActiveRun] = useState<any>(null);
   const [expanded, setExpanded] = useState(false);
   const [status, setStatus] = useState<any>(null);
   const [queue, setQueue] = useState<any[]>([]);
+  // Counted from the whole run list, not the 3-item preview, so the idle chip reports the real depth.
+  const [pendingCount, setPendingCount] = useState(0);
 
   useEffect(() => {
     const fetchInitial = async () => {
@@ -21,6 +23,7 @@ export default function GlobalQueueBar() {
             
             setStatus(statusData);
             setQueue(queueData.runs.slice(0, 3));
+            setPendingCount(queueData.runs.filter((r: any) => r.status === 'pending').length);
             if (statusData.active_workflow_id) {
                 const runDetails = await fetch(`${API_BASE}/api/queue/runs/${statusData.active_workflow_id}`);
                 if (runDetails.ok) {
@@ -42,6 +45,7 @@ export default function GlobalQueueBar() {
             if (data.status) setStatus(data.status);
             if (data.runs) {
                 setQueue(data.runs.slice(0, 3));
+                setPendingCount(data.runs.filter((r: any) => r.status === 'pending').length);
             }
             if (data.active_run) {
                 setActiveRun(data.active_run);
@@ -86,7 +90,31 @@ export default function GlobalQueueBar() {
     }
   };
 
-  if (!activeRun) return null; // Only show if there's an active run
+  // Legacy IvoryOS kept a status chip on screen at all times — the operator could glance at any
+  // page and know whether the platform was idle, running, paused or stuck. Hiding the bar when
+  // nothing is running loses that: "no bar" and "page still loading" look identical. So when
+  // there's no active run, fall back to a compact idle chip that still reports the queue depth.
+  if (!activeRun) {
+    return (
+      <a
+        href="/queue"
+        title={pendingCount > 0 ? `Platform is idle — ${pendingCount} run${pendingCount === 1 ? '' : 's'} waiting in the queue` : 'Platform is idle'}
+        className="fixed bottom-4 right-4 z-[9999] flex items-center gap-2 px-3 py-2 rounded-full border border-gray-200 dark:border-white/10 bg-white/90 dark:bg-gray-900/90 backdrop-blur shadow-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+      >
+        {pendingCount > 0 ? (
+          <>
+            <ListTodo className="w-3.5 h-3.5 text-indigo-500" />
+            <span>{pendingCount} queued</span>
+          </>
+        ) : (
+          <>
+            <CircleDot className="w-3.5 h-3.5 text-gray-400" />
+            <span>Idle</span>
+          </>
+        )}
+      </a>
+    );
+  }
 
   // Calculate Progress
   let totalSteps = activeRun.steps?.length || 0;
@@ -121,13 +149,13 @@ export default function GlobalQueueBar() {
            onClick={() => setExpanded(!expanded)}
         >
             <div className="flex items-center space-x-3 truncate">
-                <div className={`p-1.5 rounded-full ${['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 animate-pulse'}`}>
+                <div className={`p-1.5 rounded-full ${activeRun.status === 'waiting_input' ? 'bg-pink-100 text-pink-600 dark:bg-pink-900/30 dark:text-pink-400 animate-pulse' : ['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 animate-pulse'}`}>
                    <Activity className="w-4 h-4" />
                 </div>
                 <div className="flex flex-col truncate">
                     <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeRun.name}</span>
                     <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">
-                       {activeRun.status === 'cancelling' ? 'Cancelling...' : activeRun.status === 'pausing' ? 'Pausing...' : activeRun.status} • {startedSteps}/{totalSteps} Tasks
+                       {activeRun.status === 'cancelling' ? 'Cancelling...' : activeRun.status === 'pausing' ? 'Pausing...' : activeRun.status === 'waiting_input' ? 'Waiting for input' : activeRun.status} • {startedSteps}/{totalSteps} Tasks
                     </span>
                 </div>
             </div>

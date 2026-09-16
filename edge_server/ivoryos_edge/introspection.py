@@ -118,7 +118,12 @@ def inspect_device_module(device_instance):
             return_type = "Any"
             return_info = None
             if sig.return_annotation != inspect.Signature.empty:
-                return_type = str(sig.return_annotation).replace("typing.", "")
+                # Same repr problem as extract_type_info above, and here it has a visible
+                # consequence: a `-> None` method reported as "<class 'NoneType'>" fails the
+                # frontend's isNone check, so the designer offers a return-variable box for a
+                # method that returns nothing.
+                ret = sig.return_annotation
+                return_type = ret.__name__ if isinstance(ret, type) else str(ret).replace("typing.", "")
                 return_info = extract_type_info(sig.return_annotation)
                 
             schema[name] = {

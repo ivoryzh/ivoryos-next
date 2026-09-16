@@ -2,8 +2,9 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Sun, Moon, Info } from 'lucide-react';
+import { Sun, Moon, Info, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import { WS_BASE } from '@/config';
 
 type LogEntry = {
   time: string;
@@ -19,6 +20,11 @@ export default function InstrumentsPage() {
   const [logs, setLogs] = useState<any[]>([]);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [activeTab, setActiveTab] = useState<string>('');
+  const [methodSearch, setMethodSearch] = useState('');
+  // Manual instrument actions bypass the queue and drive hardware directly. If a workflow is
+  // mid-run, firing one can collide with whatever the run is doing — legacy IvoryOS made you
+  // confirm the override first, so this page watches the queue for the same reason.
+  const [busyState, setBusyState] = useState<{ running: boolean; paused: boolean }>({ running: false, paused: false });
 
   useEffect(() => {
     // Theme init
@@ -31,11 +37,24 @@ export default function InstrumentsPage() {
       .then(res => res.json())
       .then(data => {
         setStatusData(data);
+        setBusyState({ running: !!data.active_workflow_id, paused: !!data.queue_paused });
         if (data.instruments && Object.keys(data.instruments).length > 0) {
           setActiveTab(Object.keys(data.instruments)[0]);
         }
       })
       .catch(err => console.error(err));
+
+    const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const run = data.active_run;
+        const busy = !!(run && ['running', 'pausing', 'waiting_input', 'cancelling'].includes(run.status));
+        const paused = !!(run && run.status === 'paused') || !!data.status?.queue_paused;
+        setBusyState({ running: busy, paused });
+      } catch (e) { }
+    };
+    return () => ws.close();
   }, []);
 
   const toggleTheme = () => {
@@ -85,6 +104,13 @@ export default function InstrumentsPage() {
            }
        }
        argsToSubmit[paramName] = val;
+    }
+
+    if (busyState.running || busyState.paused) {
+      const state = busyState.running ? 'running a workflow' : 'paused mid-workflow';
+      if (!confirm(`The platform is currently ${state}. Running "${key}" by hand now could conflict with it.\n\nOverride and run it anyway?`)) {
+        return;
+      }
     }
 
     setExecuting(prev => ({ ...prev, [key]: true }));
@@ -165,6 +191,23 @@ export default function InstrumentsPage() {
       <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-100 dark:bg-transparent">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Connected Instruments</h2>
+          <div className="ml-auto flex items-center gap-3">
+            {(busyState.running || busyState.paused) && (
+              <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-500/30">
+                {busyState.running ? 'Workflow running' : 'Workflow paused'}
+              </span>
+            )}
+            <div className="relative w-56">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+              <input
+                type="text"
+                value={methodSearch}
+                onChange={e => setMethodSearch(e.target.value)}
+                placeholder="Search methods..."
+                className="w-full pl-9 pr-3 py-2 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+          </div>
         </header>
 
         <div className="p-8 space-y-6 overflow-y-auto pb-48">
@@ -190,9 +233,23 @@ export default function InstrumentsPage() {
               </div>
 
               {/* Active Tab Content */}
-              {activeTab && instruments[activeTab] && (
+              {activeTab && instruments[activeTab] && (() => {
+                const query = methodSearch.trim().toLowerCase();
+                const visibleMethods = Object.entries(instruments[activeTab]).filter(([methodName, methodData]: [string, any]) =>
+                  !query ||
+                  methodName.toLowerCase().replace(/_/g, ' ').includes(query) ||
+                  (methodData.description || '').toLowerCase().includes(query)
+                );
+                if (visibleMethods.length === 0) {
+                  return (
+                    <div className="text-sm text-gray-500 dark:text-gray-400">
+                      No methods on <span className="font-semibold">{activeTab.replace(/_/g, ' ')}</span> match &ldquo;{methodSearch}&rdquo;.
+                    </div>
+                  );
+                }
+                return (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {Object.entries(instruments[activeTab]).map(([methodName, methodData]: [string, any]) => {
+                  {visibleMethods.map(([methodName, methodData]: [string, any]) => {
                     const instName = activeTab;
                     const key = `${instName}.${methodName}`;
                     return (
@@ -246,20 +303,32 @@ export default function InstrumentsPage() {
                                       <option value="false">False</option>
                                     </select>
                                   ) : (
-                                    <input
-                                      type={displayType.includes('int') || displayType.includes('float') ? 'number' : 'text'}
-                                      step={displayType.includes('float') ? 'any' : '1'}
-                                      value={currentValue !== undefined ? currentValue : (pData.default !== undefined ? pData.default : '')}
-                                      className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors text-gray-900 dark:text-white"
-                                      placeholder={displayType}
-                                      onChange={(e) => {
-                                        let val: any = e.target.value;
-                                        if (displayType.includes('int') || displayType.includes('float')) {
-                                          if (val !== '' && !isNaN(Number(val))) val = Number(val);
-                                        }
-                                        handleInputChange(instName, methodName, paramPath, val);
-                                      }}
-                                    />
+                                    <>
+                                      <input
+                                        type={displayType.includes('int') || displayType.includes('float') ? 'number' : 'text'}
+                                        step={displayType.includes('float') ? 'any' : '1'}
+                                        // Enum / Literal parameters know their accepted values, so offer them as
+                                        // suggestions instead of leaving the operator to guess the spelling.
+                                        list={pData.options ? `inst-opts-${key}-${paramPath}` : undefined}
+                                        value={currentValue !== undefined ? currentValue : (pData.default !== undefined ? pData.default : '')}
+                                        className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors text-gray-900 dark:text-white"
+                                        placeholder={displayType}
+                                        onChange={(e) => {
+                                          let val: any = e.target.value;
+                                          if (displayType.includes('int') || displayType.includes('float')) {
+                                            if (val !== '' && !isNaN(Number(val))) val = Number(val);
+                                          }
+                                          handleInputChange(instName, methodName, paramPath, val);
+                                        }}
+                                      />
+                                      {pData.options && (
+                                        <datalist id={`inst-opts-${key}-${paramPath}`}>
+                                          {pData.options.map((opt: any) => (
+                                            <option key={String(opt)} value={String(opt)} />
+                                          ))}
+                                        </datalist>
+                                      )}
+                                    </>
                                   )}
                                 </div>
                               );
@@ -286,7 +355,8 @@ export default function InstrumentsPage() {
                     );
                   })}
                 </div>
-              )}
+                );
+              })()}
             </>
           )}
         </div>

@@ -4,13 +4,28 @@
     {
       "name": "edge-server-demo",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "--project", "edge_server", "python", "example/demo.py"],
-      "port": 8080
+      "runtimeArgs": [
+        "run",
+        "--project",
+        "edge_server",
+        "python",
+        "example/demo.py"
+      ],
+      "port": 8080,
+      "autoPort": false
     },
     {
       "name": "core-frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "-p", "3001"],
+      "runtimeArgs": [
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3001"
+      ],
       "port": 3001
     },
     {

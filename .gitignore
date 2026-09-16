@@ -45,6 +45,12 @@ out/
 build/
 .DS_Store
 *.pem
+# AWS IoT / MQTT certs (per-device and daemon private keys + CA chain) — *.pem above didn't
+# actually cover these: private keys are .key, and the downloaded root CA is .crt.
+*.key
+*.crt
+cloud_frontend/certs/
+edge_server/ivoryos_edge/.certs/
 
 # IDE
 .idea/
@@ -55,6 +61,13 @@ build/
 # Local SQLite
 *.db
 *.sqlite3
+
+# Auto-dumped on every edge server startup (server.py's startup_event) for local inspection —
+# pure regenerated output, not source; was previously tracked and just churned as diff noise.
+# NOT cloud_frontend/public/ivoryos_schema.json — that one IS real, fetched at runtime by
+# cloud_frontend/src/app/edge-sequence/page.tsx as a static demo fixture, so it stays tracked.
+/ivoryos_schema.json
+/example/ivoryos_schema.json
 
 # Environment variables
 .env

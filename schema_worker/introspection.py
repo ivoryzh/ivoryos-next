@@ -33,6 +33,23 @@ def extract_type_info(annotation, default=inspect.Parameter.empty):
         except Exception:
             pass
             
+        # Optional[X] / Union[X, None] is still just X as far as a form is concerned — without
+        # unwrapping it, an optional enum loses its choices and renders as a free-text box.
+        if options is None and not is_object:
+            try:
+                args = [a for a in get_args(annotation) if a is not type(None)]
+                if get_origin(annotation) is not None and len(args) == 1:
+                    inner = extract_type_info(args[0])
+                    if inner.get("options") is not None:
+                        options = inner["options"]
+                        param_type = inner["type"]
+                    elif inner.get("is_object"):
+                        is_object = True
+                        fields = inner.get("fields", {})
+                        param_type = inner["type"]
+            except Exception:
+                pass
+
         # Check for bool
         if annotation is bool:
             options = ["True", "False"]
@@ -106,18 +123,30 @@ def inspect_class(cls):
         try:
             sig = inspect.signature(method)
             docstring = inspect.getdoc(method)
-            
+
+            # Under PEP 563 (`from __future__ import annotations`, increasingly common) every
+            # annotation arrives as a *string*, so the Enum, bool and dataclass checks below all
+            # silently fail and a dropdown degrades into a free-text box. Resolve the real objects
+            # first where we can; if a forward reference cannot be resolved, fall back to the raw
+            # annotations rather than losing the method.
+            try:
+                hints = typing.get_type_hints(method)
+            except Exception:
+                hints = {}
+
             params = {}
             for param_name, param in sig.parameters.items():
                 if param_name == "self":
                     continue
-                params[param_name] = extract_type_info(param.annotation, param.default)
+                annotation = hints.get(param_name, param.annotation)
+                params[param_name] = extract_type_info(annotation, param.default)
                 
             return_type = "Any"
             return_info = None
             if sig.return_annotation != inspect.Signature.empty:
-                return_type = str(sig.return_annotation).replace("typing.", "")
-                return_info = extract_type_info(sig.return_annotation)
+                ret = hints.get("return", sig.return_annotation)
+                return_type = ret.__name__ if isinstance(ret, type) else str(ret).replace("typing.", "")
+                return_info = extract_type_info(ret)
                 
             schema[name] = {
                 "description": docstring or "",

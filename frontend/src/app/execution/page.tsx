@@ -1,11 +1,82 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 
-import { useState, useEffect } from 'react';
-import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical, AlertTriangle, Layers } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical, AlertTriangle, Layers, ListTree } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import Sidebar from '@/components/Sidebar';
-import { buildRunName } from '@ivoryos/shared-ui';
+import { buildRunName, LIBRARY_INSTRUMENT, WorkflowMap, confirmDialog, notify } from '@ivoryos/shared-ui';
+
+/**
+ * Resolve any `Library Workflows` blocks into the steps they stand for, via the server's own
+ * expander, and re-attach each resulting step's parameter schema from the live instrument schema.
+ *
+ * Returns null when there is nothing to expand, or when the call fails — the Configure page has to
+ * keep working offline against a cached sequence, and an un-expanded link is still runnable (the
+ * edge server expands it again at dispatch); it just can't show the inner steps' batch flags.
+ */
+async function expandLinkedBlocks(seqs: { prep: any[]; sequence: any[]; cleanup: any[] }) {
+  const all = [...seqs.prep, ...seqs.sequence, ...seqs.cleanup];
+  if (!all.some(b => b?.instrument === LIBRARY_INSTRUMENT)) return null;
+
+  try {
+    const [expandRes, statusRes] = await Promise.all([
+      fetch(`${API_BASE}/api/workflows/expand`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prep: seqs.prep.map(toWireBlock),
+          sequence: seqs.sequence.map(toWireBlock),
+          cleanup: seqs.cleanup.map(toWireBlock),
+        }),
+      }),
+      fetch(`${API_BASE}/api/status`),
+    ]);
+    if (!expandRes.ok) return null;
+
+    const expanded = await expandRes.json();
+    const instruments = (await statusRes.json().catch(() => ({})))?.instruments || {};
+
+    // The expander returns raw steps; this page needs `schema` for its type hints and `#var`
+    // validation, so look each one back up in the live schema.
+    const hydrate = (steps: any[]) => (steps || []).map((step: any) => ({
+      id: `expanded-${Math.random().toString(36).slice(2, 11)}`,
+      instrument: step.instrument,
+      method: step.method,
+      schema: instruments?.[step.instrument]?.[step.method] || { parameters: {} },
+      params: Object.fromEntries(
+        Object.entries(step.params || {}).filter(([k]) => !k.startsWith('_'))
+      ),
+      returnVar: step.params?._return_var || step.returnVar || '',
+      isBatchAction: !!(step.batch_action ?? step.isBatchAction),
+      // Steps expanded out of the same linked workflow are grouped, so the spreadsheet table can
+      // still show which saved workflow a step came from.
+      group: step.params?._parent_workflow
+        ? { id: `expanded-${step.params._parent_workflow}`, name: step.params._parent_workflow }
+        : undefined,
+    }));
+
+    return {
+      prep: hydrate(expanded.prep),
+      sequence: hydrate(expanded.sequence),
+      cleanup: hydrate(expanded.cleanup),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Editor block -> the shape `/api/workflows/expand` and `/api/queue/runs` both accept. */
+function toWireBlock(b: any) {
+  return {
+    instrument: b.instrument,
+    method: b.method,
+    params: b.params,
+    returnVar: b.returnVar,
+    batch_action: !!b.isBatchAction,
+    ...(b.ref ? { ref: b.ref } : {}),
+  };
+}
 
 export default function ExecutionPage() {
   const [experimentName, setExperimentName] = useState('');
@@ -35,6 +106,26 @@ export default function ExecutionPage() {
   const [varOptions, setVarOptions] = useState<Record<string, any[]>>({});
   const [hasEmptyHashVar, setHasEmptyHashVar] = useState(false);
   const [liveInputVars, setLiveInputVars] = useState<Set<string>>(new Set());
+  const [isMapOpen, setIsMapOpen] = useState(false);
+
+  // Feeds the preview panel. The sequence here is already link-resolved (see expandLinkedBlocks),
+  // so this round trip mostly just re-derives the same flat list through the server — which is the
+  // point: the number the user is shown comes from the expander that dispatch uses, not from a
+  // second count computed here.
+  const fetchExpansion = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/api/workflows/expand`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prep: prepSequence.map(toWireBlock),
+        sequence: sequence.map(toWireBlock),
+        cleanup: cleanupSequence.map(toWireBlock),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not expand this sequence.');
+    return data;
+  }, [prepSequence, sequence, cleanupSequence]);
 
   useEffect(() => {
     // Theme init
@@ -74,9 +165,9 @@ export default function ExecutionPage() {
     // Load sequence and extract variables
     const savedSequence = localStorage.getItem('ivoryos_sequence');
     if (savedSequence) {
+      (async () => {
       try {
-        const parsedSeq = JSON.parse(savedSequence);
-        setSequence(parsedSeq);
+        let parsedSeq = JSON.parse(savedSequence);
 
         const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
         const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
@@ -84,6 +175,23 @@ export default function ExecutionPage() {
         let cSeq = [];
         if (savedPrep) pSeq = JSON.parse(savedPrep);
         if (savedCleanup) cSeq = JSON.parse(savedCleanup);
+
+        // Resolve linked workflows into their real steps *before* this page reads anything from
+        // the sequence. Everything below — the #var scan, the per-sample/batch walk in
+        // executeSpreadsheet, the submitted payload — works block by block, and a link left
+        // collapsed reads as exactly one block. That is what made a linked subworkflow behave
+        // differently from the same steps copied inline: its inner per-sample/batch flags were
+        // invisible here and silently ignored, so the whole subworkflow ran as a single
+        // per-sample or batch unit. Expanding through the server's own expander makes the two
+        // identical, and keeps this page agreeing with the Designer's preview.
+        const expanded = await expandLinkedBlocks({ prep: pSeq, sequence: parsedSeq, cleanup: cSeq });
+        if (expanded) {
+          parsedSeq = expanded.sequence;
+          pSeq = expanded.prep;
+          cSeq = expanded.cleanup;
+        }
+
+        setSequence(parsedSeq);
         setPrepSequence(pSeq);
         setCleanupSequence(cSeq);
 
@@ -178,6 +286,7 @@ export default function ExecutionPage() {
       } catch (e) {
         console.error("Failed to load sequence", e);
       }
+      })();
     }
   }, []);
 
@@ -402,7 +511,7 @@ export default function ExecutionPage() {
         const isRowActive = (row: Record<string, any>) => Object.values(row).some(v => v !== undefined && v !== null && v !== '');
         if (!rows.some(isRowActive)) {
             setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-            alert("No active rows to execute.");
+            await notify("Fill in at least one row before running.", { title: 'Nothing to run', tone: 'error' });
             return;
         }
         const groupSize = Math.max(1, parseInt(batchSize) || rows.length);
@@ -445,7 +554,7 @@ export default function ExecutionPage() {
             }
           }
         } catch (err: any) {
-            alert(err.message);
+            await notify(err.message, { title: 'Missing a value', tone: 'error' });
             setExecutionState({ isRunning: false, currentRow: -1, results: [] });
             return;
         }
@@ -469,7 +578,7 @@ export default function ExecutionPage() {
           resolvedPrep = prepSequence.map(resolveGlobalBlock);
           resolvedCleanup = cleanupSequence.map(resolveGlobalBlock);
       } catch (err: any) {
-          alert(err.message);
+          await notify(err.message, { title: 'Missing a value', tone: 'error' });
           setExecutionState({ isRunning: false, currentRow: -1, results: [] });
           return;
       }
@@ -514,7 +623,7 @@ export default function ExecutionPage() {
         currentRow: -1,
         results: []
       });
-      alert(`Error starting execution: ${e.message}`);
+      await notify(e.message, { title: 'Could not start the run', tone: 'error' });
     }
   };
 
@@ -757,11 +866,25 @@ export default function ExecutionPage() {
                   title="Shown in Data History instead of the default run label"
                   className="w-56 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-green-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-500"
                 />
+                {/* "24 rows x batch 4" is otherwise impossible to turn into a real call count
+                    without simulating the whole per-sample/batch walk in your head. */}
+                <button
+                  onClick={() => setIsMapOpen(true)}
+                  title="Preview every step and every call this run will make"
+                  className="flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/10"
+                >
+                  <ListTree className="w-4 h-4 text-emerald-500" />
+                  <span>Preview</span>
+                </button>
               </div>
               <button
-                  onClick={() => {
+                  onClick={async () => {
                       if (hasPendingRuns) {
-                          if (!confirm("A task is already running. Add this sequence to the execution queue?")) return;
+                          const ok = await confirmDialog("A task is already running. Add this sequence to the execution queue?", {
+                            title: 'Queue this run?',
+                            confirmLabel: 'Add to queue',
+                          });
+                          if (!ok) return;
                       }
                       executeSpreadsheet();
                   }}
@@ -774,6 +897,19 @@ export default function ExecutionPage() {
           )}
         </div>
       </div>
+
+      <WorkflowMap
+        isOpen={isMapOpen}
+        onClose={() => setIsMapOpen(false)}
+        fetchExpansion={fetchExpansion}
+        spreadsheet={{
+          rows: rows.length,
+          batchSize: parseInt(batchSize) || rows.length,
+          // Bound to the page's real setting rather than a private what-if, so the grouping the
+          // preview shows is always the grouping that will run.
+          onBatchSizeChange: (size: number) => setBatchSize(String(size)),
+        }}
+      />
     </div>
   );
 }

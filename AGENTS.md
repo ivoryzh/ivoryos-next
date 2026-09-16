@@ -128,7 +128,7 @@ If you add a new shared-ui-only Tailwind class and it doesn't render in one app 
 
 ## 3. Known drift risk: logic not yet extracted into shared-ui
 
-Only `WorkflowEditor`, `PythonCodeView`, `generatePythonCode`, and `buildRunName` are shared. Everything else Designer-adjacent is still **duplicated per app** and has already drifted out of sync at least twice this project (validation logic, codegen). Before adding a new Designer-related feature to only one app, check whether the same logic exists in the other:
+Shared: `WorkflowEditor`, `PythonCodeView`, `generatePythonCode`, `buildRunName`, `WorkflowMap`, and `workflowBody.ts` (saved-JSON <-> `SequenceBlock` conversion, `#var` scanning, and the copy/link reuse helpers — this replaced the `formatBlocks`/`migrateBlocks`/`mapScriptToBlocks` triplication across the Designer, the Cloud sequence editor, and the Library page). Everything else Designer-adjacent is still **duplicated per app** and has already drifted out of sync at least twice this project (validation logic, codegen). Before adding a new Designer-related feature to only one app, check whether the same logic exists in the other:
 
 - `validateSequence()` — the actual Run/Configure-blocking gate — exists separately in `frontend/src/app/designer/page.tsx` and `cloud_frontend/src/app/edge-sequence/page.tsx`.
 - `findEmptyHashName()` (bare-`#`-name check) — same, duplicated.
@@ -136,6 +136,12 @@ Only `WorkflowEditor`, `PythonCodeView`, `generatePythonCode`, and `buildRunName
 - Theme/localStorage boilerplate in each host page.
 
 If a fix or feature belongs in one of these, grep for the same function name in the other app before considering the change done.
+
+**Do not re-implement workflow expansion client-side.** The flattening of `Library Workflows` blocks
+lives only in `expand_workflow_blocks` (Python). Both the live dispatch path and the preview panel
+call it, the latter through `POST /api/workflows/expand`. A TypeScript mirror would be the same drift
+trap as above, except a drifted copy would mean the safety preview lies about what the hardware is
+about to do. See section 13.
 
 ---
 
@@ -238,3 +244,141 @@ Python backend changes: run the automated suite from `edge_server/`:
 ```bash
 cd edge_server && uv run --extra test pytest ../tests/automated/ -q
 ```
+
+---
+
+## 13. Workflow reuse: copy vs link, versions, and the preview
+
+Full design and rationale: `docs/workflow_reuse_and_versioning.md`. The parts you need before
+touching any of this:
+
+- **Copy is the default, link is opt-in.** Dragging a saved workflow out of the toolbox's
+  "Library Workflows" section *inlines its blocks* (`reuseWorkflow(..., 'copy')` in
+  `packages/shared-ui/src/workflowBody.ts`), with a `copiedFrom: {name, version}` breadcrumb on each
+  block and no live dependency. Link mode instead leaves one `{instrument: "Library Workflows",
+  method: <name>, ref: {...}}` block that resolves at run time. The toolbox has a Copy/Link toggle;
+  the choice is persisted in `localStorage.ivoryos_reuse_mode`. This ordering is deliberate and came
+  out of UX observation — people overwhelmingly mean "take a copy and edit it", and getting link
+  semantics when you expected copy semantics is what made edits surprise other people.
+
+- **Groups are organisation; links are version tracking. They are not two flavours of the same
+  thing.** A *group* is consecutive blocks sharing a `group.id`: it exists so a run of steps reads
+  as one thing, collapses, and moves and deletes together. It creates **no relationship** with
+  anything — a group made by copying a saved workflow keeps `group.from` as a label, but carries no
+  version badge and no update action, because it tracks nothing. A *link* (`ref`) is the opposite:
+  one block, read-only steps, pinned to a version, with staleness and updates. Giving groups an
+  update badge is what previously made copy and link look like the same feature.
+
+  Groups are a general primitive, not a copy artefact: steps are selected with the checkbox on each
+  card and grouped together (`groupSelection`), and membership then follows position — `groupAt` puts a dropped block in a group only when *both*
+  neighbours are in it, so dragging a step out leaves it a plain step (not a one-step group of its
+  own) and dropping one between two members takes it in. A group is a *consecutive* run, so
+  grouping a scattered selection has to move the steps together — that changes execution order, so
+  it is always behind an explicit confirm rather than done silently. A selection sitting flush
+  against one group also offers "Add to <name>", which extends it without moving anything. Group members render indented behind a
+  left rail with an "end of <name>" cap; collapsed, the group is a single draggable (see
+  `buildDragRows`).
+
+- **A link opens in a right-hand drawer (`WorkflowPeek`), not inline.** A copy's steps belong to
+  this workflow, so they expand in place; a link's belong to a *different* workflow, so they are
+  shown read-only beside the canvas, with the caller's `#var` values substituted so the numbers are
+  the real ones. The drawer resolves the block's **pinned** version, not the cached head — the
+  toolbox entry is only ever the head, so previewing that would show steps other than the ones the
+  step will actually run.
+
+- **Links are pinned by default.** `ref.mode` is `"pinned"` (resolves to exactly `ref.version`
+  forever) or `"latest"` (resolves to head, rendered distinctly). A pinned ref to a version that no
+  longer exists is a hard rejection at enqueue, never a silent fall back to head — the whole point of
+  pinning is that the run is reproducible. Anything that turns a link into steps must honour the pin:
+  Detach loads the pinned version via the `fetchWorkflowVersion` prop and refuses if it can't, rather
+  than inlining the head.
+
+- **Saving is append-only.** `workflows/{name}.json` stays the head (every old reader still works);
+  each save also writes an immutable `workflows/.versions/{name}/{n}.json` (gitignored — local
+  runtime state). Bodies are content-hashed with `id`/`uuid` stripped, because `toSavedBlock`
+  regenerates a random `uuid` on every save and a byte comparison would call every save an edit.
+  A workflow written before versioning existed is adopted as v1 lazily on first read
+  (`ensure_versioned`), not by a migration step, so a file synced down from Cloud is handled the same
+  way.
+
+- **The link graph is validated server-side, on save.** `save_workflow` refuses a cycle (graph-wide:
+  `A -> B -> C -> A`, not just self-reference) and refuses a dangling link, naming the path. Both
+  frontends POST to the same endpoint, and client-only validation in this project has drifted twice
+  (section 3). The Designer's "hide the currently-edited workflow from the toolbox" is a UX
+  affordance only — the server check is the real gate. `DELETE /api/workflows/{name}` is likewise
+  refused while anything links to it, unless forced.
+
+- **Editing notifies at save time, not run time.** Before writing, the Designer calls
+  `/api/workflows/{name}/dependents` and, if anything links to this workflow, offers
+  *Save anyway* / *save under a different name*. Run time is too late: the user is already committed
+  and will click through. Copies never appear in `dependents` — an inlined copy holds no reference.
+
+- **Inner `batch_action` flags survive expansion**, so a copy and a link of the same protocol
+  describe the same execution. The Configure page resolves links through `/api/workflows/expand`
+  *before* its per-sample/batch walk (`expandLinkedBlocks` in `execution/page.tsx`), because that
+  walk is block-by-block and an unexpanded link reads as exactly one block — which is how a linked
+  subworkflow used to run as a single batch unit with its inner flags silently ignored. If you change
+  either the walk or the expansion, keep them agreeing; see section 8 for the batch model itself.
+
+- **The preview panel (`WorkflowMap`) must never compute the step list itself.** It renders whatever
+  `POST /api/workflows/expand` returns. That endpoint runs the same `expand_workflow_blocks` as
+  dispatch, which is the only reason the preview can be trusted as a pre-run safety check. Note that
+  the Designer posts the **saved** block shape (`action`/`args`) to that endpoint while a live run
+  posts `method`/`params` — `expand_workflow_blocks` normalises both, including for plain
+  non-library blocks. It did not at first, and the preview silently rendered every plain step with
+  no method name and no arguments at all.
+
+- **The preview's batch section is where per-sample vs batch becomes legible.** It chunks the main
+  phase into groups exactly as `executeSpreadsheet` does and shows, per group, which steps fire once
+  per row (`x N`) and which fire once for the whole batch. On the Configure page its batch-size
+  input is bound to the page's real setting via `spreadsheet.onBatchSizeChange`, so the preview can
+  never depict a different run than the configured one; in the Designer, where no spreadsheet
+  exists, it falls back to clearly-labelled example numbers.
+
+### Tags, not folders
+
+Workflows are grouped with free-form tags (`PUT /api/workflows/{name}/tags`, filter chips on the
+Library page), not a folder tree. Two reasons, both structural rather than cosmetic:
+
+- A protocol genuinely belongs to several groupings at once ("screening" *and* "calibration"), and
+  filtering is a query, not a location.
+- The workflow's **name is its identity** — it is the path on disk, the `unique (device_id, name)`
+  key on Cloud, the MQTT topic segment, and what every pinned `ref` points at. A folder would be a
+  second identity for the same thing, and moving between folders would be a rename in disguise,
+  breaking every reference. (Rename is still an open problem; see the design doc.)
+
+Tags live in `workflows/.meta.json`, deliberately **outside** the versioned body: the body is
+content-hashed to decide whether a save is a real edit, so folding tags in would make re-filing a
+workflow burn a version, and a reference pinned to v3 would carry v3's tags forever. Tags are
+deduped case-insensitively server-side, so compare them case-insensitively in the UI too — the
+filter bar shows one chip for "screening"/"Screening", and an exact-match filter silently misses the
+other spelling. Deleting a workflow drops its tag entry, so a later workflow reusing the name does
+not inherit them.
+
+Anything sweeping `workflows/*.json` must skip dot-prefixed entries (`wf.list_workflow_names` does)
+— a raw listdir publishes `.meta` as if it were a saved workflow.
+
+### Native dialogs do not exist here — use `dialogs.tsx`
+
+`window.alert` / `confirm` / `prompt` are **unavailable in the desktop app's embedded webview**:
+`confirm()` returns `false` immediately without showing anything, `prompt()` throws
+"prompt() is not supported", and `alert()` is a silent no-op. Every confirm-gated action therefore
+did nothing when clicked, every error message was invisible, and saving an unnamed workflow died on
+an unhandled exception from `prompt()`. It looks exactly like a broken button.
+
+Use `notify` / `confirmDialog` / `promptDialog` / `chooseDialog` from
+`packages/shared-ui/src/dialogs.tsx` instead. They render a real modal, mount their own React root
+on first use (nothing to wire into a page), and return Promises — so a handler that asks anything
+becomes `async`, and so do its callers (`validateSequence` and its `onClick`s, for instance). Do not
+reintroduce a native dialog anywhere in the app.
+
+### Designer load/persist ordering (a trap worth knowing about)
+
+`frontend/src/app/designer/page.tsx` persists its sequences to localStorage from an effect keyed on
+them. That effect is gated on a `hasLoaded` **state** flag set by the mount effect, plus a content
+comparison against what is already stored. Both guards are load-bearing and a mount-counter ref is
+not sufficient: under React StrictMode (on by default in `next dev`) mount effects run twice, and a
+ref-guarded version wrote the empty initial state over a sequence that "Load to Designer" had just
+placed in localStorage, after which the second pass re-read the emptied value — so opening a saved
+workflow landed on an empty canvas. The content comparison additionally stops an identical re-run
+from marking an untouched workflow "Unsaved".

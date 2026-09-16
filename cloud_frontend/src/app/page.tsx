@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Play, Trash2, Cloud, AlertTriangle, RefreshCw, Download, Save } from 'lucide-react';
 import { useNodesState, useEdgesState, addEdge, Connection, Edge, Node } from '@xyflow/react';
 import CloudWorkflowEditor from '@/components/CloudWorkflowEditor';
+import { LIBRARY_INSTRUMENT, scanDynamicParams } from '@ivoryos/shared-ui';
 
 export default function CloudDesignerPage() {
   const [statusData, setStatusData] = useState<any>({ instruments: {} });
@@ -85,38 +86,30 @@ export default function CloudDesignerPage() {
       // make "drag a saved sequence onto the distributed canvas" actually work end-to-end.
       // A sequence can expose its own params for the caller to fill in — any block arg written
       // as "#varName" in the saved body is a placeholder, same convention the local edge Designer
-      // uses (see edge-sequence/page.tsx's identical scan). Surfacing these as the synthetic
-      // instrument's `parameters` is what makes CustomCloudNode render them as editable fields —
-      // it already does that generically for any block.schema.parameters, sequences included.
-      const scanDynamicParams = (body: any): Record<string, any> => {
-        const params: Record<string, any> = {};
-        const scanBlocks = (blocks: any[]) => {
-          (blocks || []).forEach((b: any) => {
-            Object.entries(b.args || b.params || {}).forEach(([k, val]) => {
-              if (typeof val === 'string' && val.startsWith('#')) {
-                const paramName = val.substring(1);
-                const paramType = (b.arg_types && b.arg_types[k]) || 'str';
-                params[paramName] = { type: paramType, required: true };
-              }
-            });
-          });
-        };
-        scanBlocks(body?.prep);
-        scanBlocks(body?.script || body?.sequence);
-        scanBlocks(body?.cleanup);
-        return params;
-      };
-
+      // uses. Surfacing these as the synthetic instrument's `parameters` is what makes
+      // CustomCloudNode render them as editable fields — it already does that generically for any
+      // block.schema.parameters, sequences included. `scanDynamicParams` is the shared
+      // implementation, so this and the Designer can't drift apart about what counts as a
+      // placeholder (AGENTS.md section 3).
       const sequencesByDevice: Record<string, any> = {};
       for (const s of (Array.isArray(sequences) ? sequences : [])) {
         if (!sequencesByDevice[s.device_id]) sequencesByDevice[s.device_id] = {};
-        sequencesByDevice[s.device_id][s.name] = { description: s.description || '', parameters: scanDynamicParams(s.body), return_type: 'None' };
+        sequencesByDevice[s.device_id][s.name] = {
+          description: s.description || '',
+          parameters: scanDynamicParams(s.body),
+          return_type: 'None',
+          // Carried onto the node's `ref` when one is dragged out, so a distributed run pins the
+          // body it was built against instead of resolving the bare name against whatever the
+          // target device's library happens to hold when the task finally lands there.
+          version: s.body?.version,
+          body_hash: s.body?.body_hash,
+        };
       }
       for (const device of devices) {
         if (sequencesByDevice[device.id]) {
           if (!device.schema) device.schema = { instruments: {} };
           if (!device.schema.instruments) device.schema.instruments = {};
-          device.schema.instruments['Library Workflows'] = sequencesByDevice[device.id];
+          device.schema.instruments[LIBRARY_INSTRUMENT] = sequencesByDevice[device.id];
         }
       }
       setCloudDevices(devices);

@@ -62,3 +62,10 @@ build/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Append-only workflow version snapshots. Local runtime state, like the SQLite DB above — the
+# committed workflows/*.json files are the heads; every past save lives here and is regenerated
+# lazily (see ensure_versioned in edge_server/ivoryos_edge/workflows.py).
+edge_server/ivoryos_edge/workflows/.versions/
+# Workflow tags — local bookkeeping alongside the versions above, not protocol content.
+edge_server/ivoryos_edge/workflows/.meta.json

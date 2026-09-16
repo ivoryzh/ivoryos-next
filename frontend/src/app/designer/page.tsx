@@ -1,10 +1,24 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 
-import { useState, useEffect, useRef } from 'react';
-import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { WorkflowEditor, SequenceBlock, PythonCodeView, generatePythonCode, buildRunName } from '@ivoryos/shared-ui';
+import {
+  WorkflowEditor,
+  SequenceBlock,
+  PythonCodeView,
+  generatePythonCode,
+  buildRunName,
+  WorkflowMap,
+  buildSavedBody,
+  scanDynamicParams,
+  toSequenceBlocks,
+  chooseDialog,
+  confirmDialog,
+  notify,
+  promptDialog,
+} from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
@@ -13,7 +27,11 @@ export default function DesignerPage() {
   const [cleanupSequence, setCleanupSequence] = useState<SequenceBlock[]>([]);
   const [currentWorkflowName, setCurrentWorkflowName] = useState<string>('');
   const [isUnsaved, setIsUnsaved] = useState(false);
-  const isInitialMount = useRef(true);
+  // True once the mount effect has read localStorage into state. The persistence effect below
+  // must not run before this, or it writes the empty initial state over a workflow that was just
+  // loaded. It is state rather than a ref so that it becomes true in the same render as the
+  // sequences it guards.
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [currentWorkflowDescription, setCurrentWorkflowDescription] = useState<string>('');
   const [executionState, setExecutionState] = useState<{
     isRunning: boolean;
@@ -30,6 +48,9 @@ export default function DesignerPage() {
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
   const [isOffline, setIsOffline] = useState(false);
+  // Latest saved version per workflow name — drives the "vN available" badge on copies and links.
+  const [workflowVersions, setWorkflowVersions] = useState<Record<string, number>>({});
+  const [isMapOpen, setIsMapOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -42,19 +63,10 @@ export default function DesignerPage() {
       try {
         const json = JSON.parse(event.target?.result as string);
 
-        // Auto-migrate legacy sequence format
-        const migrateBlocks = (blocks: any[]): SequenceBlock[] => {
-          return blocks.map(b => ({
-            id: String(b.uuid || b.id || Math.random()),
-            instrument: b.instrument ? b.instrument.replace('deck.', '') : 'unknown',
-            method: b.action || b.method || 'unknown',
-            params: b.args || b.params || {},
-            returnVar: b.return || b.returnVar || '',
-            schema: {},
-            isExpanded: false,
-            isBatchAction: !!b.batch_action
-          }));
-        };
+        // Auto-migrate legacy sequence format. Shared with the Cloud sequence editor and the
+        // Library page so an imported workflow means the same thing in all three (AGENTS.md #3).
+        const migrateBlocks = (blocks: any[]): SequenceBlock[] =>
+          toSequenceBlocks(blocks, statusData?.instruments || {});
 
         let newPrep, newSeq, newClean, name = '';
 
@@ -80,7 +92,7 @@ export default function DesignerPage() {
 
       } catch (error) {
         console.error("Failed to parse JSON file", error);
-        alert("Failed to parse JSON file.");
+        notify("That file isn't a workflow this app can read.", { title: 'Import failed', tone: 'error' });
       }
 
       // Reset input
@@ -165,6 +177,9 @@ export default function DesignerPage() {
     if (unsaved === 'true') {
       setIsUnsaved(true);
     }
+    // Batched with the setSequence calls above, so the persistence effect first sees hasLoaded
+    // true in a render where the sequences are already populated.
+    setHasLoaded(true);
 
     const processStatusData = async (data: any) => {
       // Fetch workflows
@@ -185,40 +200,32 @@ export default function DesignerPage() {
           };
 
           data.instruments["Library Workflows"] = {};
+          const versions: Record<string, number> = {};
 
           for (const wfObj of wfData.workflows) {
             const wfName = wfObj.name;
             const wfJsonRes = await fetch(`${API_BASE}/api/workflows/${wfName}`);
             const wfJson = await wfJsonRes.json();
 
-            const dynamicParams: any = {};
-            const scanBlocks = (blocks: any[]) => {
-              blocks.forEach((b: any) => {
-                if (b.args) {
-                  Object.entries(b.args).forEach(([k, val]) => {
-                    if (typeof val === 'string' && val.startsWith('#')) {
-                      const paramName = val.substring(1);
-                      const paramType = (b.arg_types && b.arg_types[k]) ? b.arg_types[k] : 'string';
-                      dynamicParams[paramName] = { type: paramType, required: true };
-                    }
-                  });
-                }
-              });
-            };
-            scanBlocks(wfJson.prep || []);
-            scanBlocks(wfJson.script || []);
-            scanBlocks(wfJson.cleanup || []);
+            // Tracked for every workflow, including the one being edited — the "vN available"
+            // badge on an already-placed copy or link has to work regardless of what the toolbox
+            // is currently offering.
+            if (wfJson.version) versions[wfName] = wfJson.version;
 
-            if (wfName === editingWf) {
-              continue; // Prevent recursion by hiding current workflow
-            }
+                // Self-reference is filtered reactively by WorkflowEditor
+                // (currentWorkflowName), because this page can switch which workflow
+                // it is editing without rebuilding the toolbox.
 
             data.instruments["Library Workflows"][wfName] = {
-              description: "Saved Workflow from Library",
-              parameters: dynamicParams,
-              return_type: "None"
+              description: wfJson.description || "Saved Workflow from Library",
+              parameters: scanDynamicParams(wfJson),
+              return_type: "None",
+              // The full saved body, so a Copy-mode drag can inline the real steps without a
+              // second round trip — and so Detach can turn a link back into an editable copy.
+              body: wfJson,
             };
           }
+          setWorkflowVersions(versions);
         }
       } catch (e) {
         console.error("Failed to load workflows for toolbox (might be offline)", e);
@@ -254,19 +261,32 @@ export default function DesignerPage() {
       });
   }, []);
 
-  // Save sequences on change
+  // Save sequences on change.
+  //
+  // Gated on `hasLoaded` — a piece of *state*, not a ref — and on a content comparison. Both are
+  // load-bearing, and a mount-counter ref was not enough:
+  //
+  //  - `hasLoaded` is set by the load effect below in the same batch as its setSequence calls, so
+  //    this effect can never observe the empty initial state while localStorage already holds a
+  //    workflow. A ref flipped on the first pass still let the second pass (React StrictMode
+  //    re-runs mount effects in dev) write the stale empty arrays over what had just been loaded,
+  //    which is how "Load to Designer" ended up on an empty canvas.
+  //  - The content check keeps a re-run that produces fresh arrays with identical contents from
+  //    counting as an edit, which was marking a freshly-opened workflow "Unsaved" untouched.
   useEffect(() => {
-    localStorage.setItem('ivoryos_sequence', JSON.stringify(sequence));
-    localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
-    localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
+    if (!hasLoaded) return;
 
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-    } else {
-      setIsUnsaved(true);
-      localStorage.setItem('ivoryos_is_unsaved', 'true');
-    }
-  }, [sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
+    const next = {
+      ivoryos_sequence: JSON.stringify(sequence),
+      ivoryos_prep_sequence: JSON.stringify(prepSequence),
+      ivoryos_cleanup_sequence: JSON.stringify(cleanupSequence),
+    };
+    if (Object.entries(next).every(([key, value]) => localStorage.getItem(key) === value)) return;
+
+    Object.entries(next).forEach(([key, value]) => localStorage.setItem(key, value));
+    setIsUnsaved(true);
+    localStorage.setItem('ivoryos_is_unsaved', 'true');
+  }, [hasLoaded, sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -276,61 +296,85 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
   };
 
-  const clearCanvas = () => {
-    if (confirm("Are you sure you want to clear the canvas? All blocks will be removed.")) {
+  const clearCanvas = async () => {
+    if (await confirmDialog("Every block on the canvas will be removed. This cannot be undone.", {
+      title: 'Clear the canvas?',
+      confirmLabel: 'Clear',
+      tone: 'danger',
+    })) {
       setSequence([]);
       setPrepSequence([]);
       setCleanupSequence([]);
       setCurrentWorkflowName("");
       setCurrentWorkflowDescription("");
-      localStorage.removeItem('ivoryos_sequence');
-      localStorage.removeItem('ivoryos_prep_sequence');
-      localStorage.removeItem('ivoryos_cleanup_sequence');
+      // Written as empty arrays rather than removed, so the persistence effect's content check
+      // sees the cleared canvas as already-persisted and doesn't immediately flag it "Unsaved".
+      localStorage.setItem('ivoryos_sequence', '[]');
+      localStorage.setItem('ivoryos_prep_sequence', '[]');
+      localStorage.setItem('ivoryos_cleanup_sequence', '[]');
       localStorage.removeItem('ivoryos_editing_workflow');
       localStorage.removeItem('ivoryos_editing_workflow_desc');
-      localStorage.removeItem('ivoryos_is_unsaved');
+      localStorage.setItem('ivoryos_is_unsaved', 'false');
       setIsUnsaved(false);
-      isInitialMount.current = true;
     }
   };
 
-  const saveWorkflow = async () => {
+  /** Returns true only when the workflow is actually on disk afterwards. */
+  const saveWorkflow = async (): Promise<boolean> => {
     let name = currentWorkflowName;
     if (!name) {
-      const inputName = prompt("Enter a name for this workflow:");
-      if (!inputName) return;
+      const inputName = await promptDialog("Give this workflow a name so it can be saved to the library.", {
+        title: 'Name this workflow',
+        placeholder: 'e.g. wash_protocol',
+        confirmLabel: 'Save',
+      });
+      if (!inputName) return false;
       name = inputName;
     }
 
-    const formatBlocks = (blocks: SequenceBlock[]) => blocks.map((block, idx) => {
-      const argTypes: Record<string, string> = {};
-      if (block.schema && block.schema.parameters) {
-        for (const [key, paramObj] of Object.entries(block.schema.parameters)) {
-          argTypes[key] = (paramObj as any).type || "str";
+    // Impact check *before* writing, not after. This is the moment the person still has the
+    // context to decide: they came here to edit this protocol and may not know — or may have
+    // forgotten — that other workflows link to it and will change with it. Warning them at run
+    // time instead would be too late; by then they are committed and will click through.
+    // Copies are deliberately absent from this list: an inlined copy holds no reference, so it
+    // cannot be affected.
+    try {
+      const depRes = await fetch(`${API_BASE}/api/workflows/${name}/dependents`);
+      if (depRes.ok) {
+        const dependents: string[] = (await depRes.json()).dependents || [];
+        if (dependents.length > 0) {
+          // Three real options rather than a yes/no, because "save it somewhere else instead" is
+          // the one most people actually want once they learn what else this would change.
+          const choice = await chooseDialog({
+            title: `${dependents.length} other workflow${dependents.length === 1 ? '' : 's'} use${dependents.length === 1 ? 's' : ''} "${name}"`,
+            message:
+              `Saving will change ${dependents.length === 1 ? 'it' : 'them'} too:\n\n`
+              + dependents.map(d => `  • ${d}`).join('\n'),
+            tone: 'danger',
+            actions: [
+              { id: 'cancel', label: 'Cancel', kind: 'cancel' },
+              { id: 'fork', label: 'Save as new workflow' },
+              { id: 'overwrite', label: 'Save anyway', kind: 'danger' },
+            ],
+          });
+          if (choice === null || choice === 'cancel') return false;
+          if (choice === 'fork') {
+            const forkName = await promptDialog("Save as a new workflow named:", {
+              title: 'Save a copy',
+              defaultValue: `${name} copy`,
+              confirmLabel: 'Save copy',
+            });
+            if (!forkName) return false;
+            name = forkName;
+          }
         }
       }
+    } catch {
+      // A dependents check that can't reach the server must not block saving — the server
+      // validates the link graph itself on write regardless.
+    }
 
-      return {
-        id: idx + 1,
-        uuid: Math.floor(Math.random() * 1000000000), // Random int UUID
-        instrument: block.instrument,
-        action: block.method,
-        args: block.params,
-        arg_types: argTypes,
-        return: block.returnVar || "",
-        batch_action: !!block.isBatchAction,
-        consolidate_batch_args: false
-      };
-    });
-
-    // Convert sequence to Legacy IvoryOS JSON
-    const legacyFormat = {
-      name: name,
-      description: currentWorkflowDescription,
-      prep: formatBlocks(prepSequence),
-      script: formatBlocks(sequence),
-      cleanup: formatBlocks(cleanupSequence)
-    };
+    const legacyFormat = buildSavedBody(name, currentWorkflowDescription, prepSequence, sequence, cleanupSequence);
 
     try {
       const res = await fetch(`${API_BASE}/api/workflows/${name}`, {
@@ -345,14 +389,99 @@ export default function DesignerPage() {
         localStorage.setItem('ivoryos_editing_workflow_desc', currentWorkflowDescription);
         localStorage.setItem('ivoryos_is_unsaved', 'false');
         setIsUnsaved(false);
-        alert("Workflow saved to Library!");
+        setWorkflowVersions(prev => ({ ...prev, [name]: data.version }));
+        await notify(
+          data.created_version
+            ? `Saved as v${data.version}.`
+            : `No changes to save — still v${data.version}.`,
+          { title: name },
+        );
+        return true;
       } else {
-        alert("Failed to save workflow: " + data.error);
+        // Cycle and dangling-link rejections arrive here with the offending path named.
+        await notify(data.error, { title: 'Could not save', tone: 'error' });
       }
     } catch (e: any) {
-      alert("Network error: " + e.message);
+      await notify(e.message, { title: 'Could not reach the edge server', tone: 'error' });
+    }
+    return false;
+  };
+
+  /**
+   * Open a saved workflow on this canvas — used by the linked-workflow drawer's "Edit in the
+   * Designer". Whatever is currently here would be replaced, so unsaved work is dealt with first
+   * rather than silently dropped.
+   */
+  const openWorkflowInDesigner = async (name: string, version?: number) => {
+    if (isUnsaved) {
+      const choice = await chooseDialog({
+        title: 'You have unsaved changes',
+        message: `Opening "${name}" replaces what is on this canvas.`,
+        tone: 'danger',
+        actions: [
+          { id: 'cancel', label: 'Cancel', kind: 'cancel' },
+          { id: 'discard', label: 'Discard and open', kind: 'danger' },
+          { id: 'save', label: 'Save first', kind: 'primary' },
+        ],
+      });
+      if (choice === null || choice === 'cancel') return;
+      if (choice === 'save' && !(await saveWorkflow())) return;
+    }
+
+    try {
+      const url = version
+        ? `${API_BASE}/api/workflows/${encodeURIComponent(name)}?version=${version}`
+        : `${API_BASE}/api/workflows/${encodeURIComponent(name)}`;
+      const res = await fetch(url);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Workflow could not be read');
+
+      const instruments = statusData?.instruments || {};
+      const loaded = {
+        prep: toSequenceBlocks(body.prep, instruments),
+        script: toSequenceBlocks(body.script, instruments),
+        cleanup: toSequenceBlocks(body.cleanup, instruments),
+      };
+
+      // Written to localStorage *before* the state updates, so the persistence effect's content
+      // check sees the canvas as already-persisted and does not flag a freshly-opened workflow as
+      // unsaved the moment it lands.
+      localStorage.setItem('ivoryos_sequence', JSON.stringify(loaded.script));
+      localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(loaded.prep));
+      localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(loaded.cleanup));
+      localStorage.setItem('ivoryos_editing_workflow', name);
+      localStorage.setItem('ivoryos_editing_workflow_desc', body.description || '');
+
+      // Opening an *older* version leaves the canvas deliberately dirty: it does not match what is
+      // saved under this name, and saving from here is what would create the next version. Opening
+      // the current one is clean.
+      const isOlderVersion = !!version && version !== workflowVersions[name];
+      localStorage.setItem('ivoryos_is_unsaved', isOlderVersion ? 'true' : 'false');
+
+      setPrepSequence(loaded.prep);
+      setSequence(loaded.script);
+      setCleanupSequence(loaded.cleanup);
+      setCurrentWorkflowName(name);
+      setCurrentWorkflowDescription(body.description || '');
+      setIsUnsaved(isOlderVersion);
+    } catch (e: any) {
+      await notify(e.message, { title: `Could not open ${name}`, tone: 'error' });
     }
   };
+
+  // Flattens the current sequence through the *same* server-side expander that dispatch uses, so
+  // the preview can never disagree with what actually gets queued.
+  const fetchExpansion = useCallback(async () => {
+    const body = buildSavedBody(currentWorkflowName, currentWorkflowDescription, prepSequence, sequence, cleanupSequence);
+    const res = await fetch(`${API_BASE}/api/workflows/expand`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prep: body.prep, sequence: body.script, cleanup: body.cleanup })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not expand this sequence.');
+    return data;
+  }, [currentWorkflowName, currentWorkflowDescription, prepSequence, sequence, cleanupSequence]);
 
 
   // Variable names produced by a 'User_Input' step — these are resolved live on the edge server
@@ -389,12 +518,15 @@ export default function DesignerPage() {
     return null;
   };
 
-  const validateSequence = () => {
+  // Async because every rejection now surfaces as a modal the user has to acknowledge —
+  // previously these were alert() calls, which this webview silently swallows.
+  const validateSequence = async () => {
     const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
 
     const emptyHashLocation = findEmptyHashName(allBlocks);
     if (emptyHashLocation) {
-      alert(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`);
+      await notify(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`,
+                   { title: 'Unnamed variable', tone: 'error' });
       return false;
     }
 
@@ -406,7 +538,8 @@ export default function DesignerPage() {
           if (typeof val === 'string' && val.startsWith('#')) continue;
 
           if (val === undefined || val === '') {
-            alert(`Missing parameter '${key}' in ${block.instrument}.${block.method}`);
+            await notify(`Missing parameter '${key}' in ${block.instrument}.${block.method}`,
+                         { title: 'Incomplete step', tone: 'error' });
             return false;
           }
 
@@ -414,7 +547,8 @@ export default function DesignerPage() {
           // only fail once the run tries to cast it, so catch it here instead.
           const typeStr = ((param as any)?.type || '').toLowerCase();
           if ((typeStr.includes('int') || typeStr.includes('float')) && isNaN(Number(val))) {
-            alert(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`);
+            await notify(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`,
+                         { title: 'Wrong parameter type', tone: 'error' });
             return false;
           }
         }
@@ -424,7 +558,7 @@ export default function DesignerPage() {
   };
 
   const runSequence = async () => {
-    if (!validateSequence()) return;
+    if (!await validateSequence()) return;
     if (prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0) return;
 
 
@@ -435,7 +569,10 @@ export default function DesignerPage() {
       const blockToPayload = (s: SequenceBlock) => ({
         instrument: s.instrument,
         method: s.method,
-        params: s.params
+        params: s.params,
+        // A linked step's pinned version has to reach the server, or the run would silently
+        // resolve against the newest saved body instead of the one this step was built with.
+        ...(s.ref ? { ref: s.ref } : {})
       });
 
       // 1. Submit Sequence to Edge Queue
@@ -465,7 +602,7 @@ export default function DesignerPage() {
         currentIndex: -1,
         results: {}
       });
-      alert(`Error starting execution: ${e.message}`);
+      await notify(e.message, { title: 'Could not start the run', tone: 'error' });
     }
   };
 
@@ -571,6 +708,18 @@ export default function DesignerPage() {
                   onChange={handleFileUpload}
                 />
 
+                {/* The steps a linked workflow stands in for are otherwise invisible until the run
+                    is already underway. This shows them before anything is committed to hardware. */}
+                <button
+                  onClick={() => setIsMapOpen(true)}
+                  disabled={prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0}
+                  title="Preview every step this sequence will run, with linked workflows expanded"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <ListTree className="w-4 h-4 text-emerald-500" />
+                  <span className="hidden sm:inline">Preview</span>
+                </button>
+
                 <button
                   onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
@@ -590,15 +739,21 @@ export default function DesignerPage() {
                   return (
                     <>
                       <button
-                        onClick={() => {
-                          if (!validateSequence()) return;
+                        onClick={async () => {
+                          if (!await validateSequence()) return;
                           if (sequence.length === 0 && (prepSequence.length > 0 || cleanupSequence.length > 0)) {
-                            if (!confirm("There are no steps in the Main Workflow — only Prep and Cleanup will run. Continue?")) {
+                            if (!await confirmDialog("There are no steps in the Main Workflow — only Prep and Cleanup will run.", {
+                              title: 'Run anyway?',
+                              confirmLabel: 'Run',
+                            })) {
                               return;
                             }
                           }
                           if (hasPendingRuns) {
-                            if (!confirm("A task is already running. Add this sequence to the execution queue?")) {
+                            if (!await confirmDialog("A task is already running. Add this sequence to the execution queue?", {
+                              title: 'Queue this run?',
+                              confirmLabel: 'Add to queue',
+                            })) {
                               return;
                             }
                           }
@@ -640,6 +795,20 @@ export default function DesignerPage() {
               />
             ) : null
           }
+          workflowVersions={workflowVersions}
+          onEditWorkflow={openWorkflowInDesigner}
+          currentWorkflowName={currentWorkflowName}
+          fetchWorkflowVersion={async (name, version) => {
+            const res = await fetch(`${API_BASE}/api/workflows/${name}?version=${version}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `v${version} not found`);
+            return data;
+          }}
+        />
+        <WorkflowMap
+          isOpen={isMapOpen}
+          onClose={() => setIsMapOpen(false)}
+          fetchExpansion={fetchExpansion}
         />
       </div>
     </div>

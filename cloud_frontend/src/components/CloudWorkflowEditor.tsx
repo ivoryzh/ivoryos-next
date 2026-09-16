@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { ReactFlow, MiniMap, Controls, Background, Connection, Edge, NodeTypes, Node, BackgroundVariant, Handle, Position, getOutgoers } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Settings2, ChevronDown, ChevronUp, Cloud } from 'lucide-react';
+import { LIBRARY_INSTRUMENT } from '@ivoryos/shared-ui';
 
 interface CloudWorkflowEditorProps {
   cloudDevices: any[];
@@ -295,7 +296,20 @@ export default function CloudWorkflowEditor({
             method,
             schema: m_schema,
             params: defaultParams,
-            returnVar: ""
+            returnVar: "",
+            // A node on this canvas is dispatched to a device as a single unit, so reuse here is
+            // always a link — there is no "inline it here" for something that executes on another
+            // machine. Pinning the version it was built against is what keeps a distributed run
+            // reproducible: without it the edge would resolve the name against whatever its local
+            // library happens to hold at dispatch time.
+            ...(instrument === LIBRARY_INSTRUMENT ? {
+              ref: {
+                name: method,
+                version: (m_schema as any)?.version,
+                body_hash: (m_schema as any)?.body_hash,
+                mode: 'pinned' as const,
+              }
+            } : {})
           },
           updateNodeData,
           statusData,

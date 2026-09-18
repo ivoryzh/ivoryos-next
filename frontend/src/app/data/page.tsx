@@ -4,6 +4,7 @@ import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import { readNamedOutput } from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned. When that value is a plain scalar — the overwhelmingly common case, since that's the
@@ -46,46 +47,151 @@ const STATUS_BAR_COLOR: Record<string, string> = {
   running: 'bg-indigo-500 animate-pulse',
 };
 
-const ExecutionTimeline = ({ steps }: { steps: any[] }) => {
+type TimelineStep = {
+  instrument?: string;
+  method?: string;
+  status?: string;
+  start_time?: string;
+  end_time?: string;
+  /** Which trial/row this step belonged to, for runs that repeat the same sequence. */
+  iteration?: number;
+};
+
+const stepLabel = (step: TimelineStep) =>
+  (step.instrument === 'Flow_Control' || step.instrument === 'Flow Control')
+    ? String(step.method)
+    : `${step.instrument}.${step.method}`;
+
+const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; iterationLabel?: string }) => {
+  const [hovered, setHovered] = useState<number | null>(null);
+
   const timed = steps.filter(s => s.start_time);
   if (timed.length === 0) return null;
 
-  const starts = timed.map(s => new Date(s.start_time).getTime());
-  const ends = timed.map(s => new Date(s.end_time || s.start_time).getTime());
+  const starts = timed.map(s => new Date(s.start_time!).getTime());
+  const ends = timed.map(s => new Date(s.end_time || s.start_time!).getTime());
   const minStart = Math.min(...starts);
   const maxEnd = Math.max(...ends);
   const totalMs = Math.max(maxEnd - minStart, 1);
 
+  // Where the time actually went, which is the question the chart is meant to answer and could
+  // not: a run of thirty slivers shows that something was slow without saying what.
+  const byLabel = new Map<string, number>();
+  timed.forEach((step, i) => {
+    byLabel.set(stepLabel(step), (byLabel.get(stepLabel(step)) || 0) + (ends[i] - starts[i]));
+  });
+  const slowest = [...byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+  // Iteration boundaries, drawn only while they are still distinguishable. A hundred-row
+  // spreadsheet would otherwise be a wall of tick marks; the count still reaches the reader
+  // through the hover readout and the caption.
+  const iterations = [...new Set(timed.map(s => s.iteration).filter(v => v !== undefined))] as number[];
+  const showBoundaries = iterations.length > 1 && iterations.length <= 40;
+  const unit = iterationLabel || 'Iteration';
+
+  const active = hovered !== null ? timed[hovered] : null;
+
   return (
     <div className="mb-6">
-      <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Timeline</h3>
-      <div className="relative h-8 rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden">
+      <div className="flex items-baseline justify-between mb-2 gap-3">
+        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Timeline</h3>
+        {/* A fixed readout rather than a native title: a 0.6%-wide bar is close to
+            unhoverable, and the browser tooltip needs a hover to be held still on top of it
+            before it appears at all — so the information was effectively unreachable. */}
+        <div className="text-[11px] font-mono truncate text-right flex-1 min-w-0">
+          {active ? (
+            <span className="text-gray-700 dark:text-gray-200">
+              {active.iteration !== undefined && (
+                <span className="text-indigo-600 dark:text-indigo-400 font-bold">{unit} {active.iteration} · </span>
+              )}
+              {stepLabel(active)}
+              <span className="text-gray-400">
+                {' · '}{((new Date(active.end_time || active.start_time!).getTime()
+                        - new Date(active.start_time!).getTime()) / 1000).toFixed(2)}s
+                {' · +'}{((new Date(active.start_time!).getTime() - minStart) / 1000).toFixed(1)}s
+              </span>
+              {active.status !== 'completed' && (
+                <span className={active.status === 'error' ? ' text-red-500' : ' text-indigo-500'}>
+                  {' · '}{active.status}
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="text-gray-400 dark:text-gray-600">hover a bar for details</span>
+          )}
+        </div>
+      </div>
+
+      {/* Hover is resolved against the whole track rather than per bar. One slow step squeezes
+          the rest to a few pixels each — in a typical run a 4s hold sits beside six sub-50ms
+          calls — so a per-bar hover target makes exactly the steps you want to inspect the ones
+          you cannot hit. Picking the step nearest the cursor's position in time makes every bar
+          reachable regardless of how thin it was drawn. */}
+      <div
+        className="relative h-8 rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden cursor-crosshair"
+        onMouseLeave={() => setHovered(null)}
+        onMouseMove={e => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          if (rect.width === 0) return;
+          const at = minStart + ((e.clientX - rect.left) / rect.width) * totalMs;
+          let best = 0;
+          let bestDistance = Infinity;
+          for (let i = 0; i < timed.length; i++) {
+            // Zero when the cursor is inside the step's own span, so a real hit always wins.
+            const distance = at < starts[i] ? starts[i] - at : at > ends[i] ? at - ends[i] : 0;
+            if (distance < bestDistance) { bestDistance = distance; best = i; }
+          }
+          setHovered(best);
+        }}
+      >
+        {showBoundaries && iterations.slice(1).map(iteration => {
+          const first = timed.findIndex(s => s.iteration === iteration);
+          if (first < 0) return null;
+          return (
+            <div
+              key={`b-${iteration}`}
+              className="absolute top-0 h-full w-px bg-gray-300 dark:bg-white/20 z-10"
+              style={{ left: `${((starts[first] - minStart) / totalMs) * 100}%` }}
+            />
+          );
+        })}
         {timed.map((step, idx) => {
-          const start = new Date(step.start_time).getTime();
-          const end = new Date(step.end_time || step.start_time).getTime();
-          const leftPct = ((start - minStart) / totalMs) * 100;
+          const leftPct = ((starts[idx] - minStart) / totalMs) * 100;
           // A near-instant step would otherwise round to an invisible sliver — floor its width
-          // so every logged action stays clickable/hoverable, not just the slow ones.
-          const widthPct = Math.max(((end - start) / totalMs) * 100, 0.6);
-          const label = (step.instrument === 'Flow_Control' || step.instrument === 'Flow Control')
-            ? step.method
-            : `${step.instrument}.${step.method}`;
-          const durationS = ((end - start) / 1000).toFixed(2);
+          // so every logged action stays hoverable, not just the slow ones.
+          const widthPct = Math.max(((ends[idx] - starts[idx]) / totalMs) * 100, 0.6);
           return (
             <div
               key={idx}
-              title={`${label} — ${step.status}, ${durationS}s`}
-              className={`absolute top-0 h-full ${STATUS_BAR_COLOR[step.status] || 'bg-gray-400'} hover:opacity-80 transition-opacity cursor-help border-r border-white/60 dark:border-black/40`}
+              className={`absolute top-0 h-full pointer-events-none ${STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${
+                hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
+              }`}
               style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
             />
           );
         })}
       </div>
-      <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+
+      <div className="flex justify-between text-[10px] text-gray-400 mt-1 gap-2">
         <span>{new Date(minStart).toLocaleTimeString()}</span>
-        <span>{((maxEnd - minStart) / 1000).toFixed(1)}s total &middot; {timed.length} step{timed.length === 1 ? '' : 's'}</span>
+        <span className="text-center">
+          {((maxEnd - minStart) / 1000).toFixed(1)}s total &middot; {timed.length} step{timed.length === 1 ? '' : 's'}
+          {iterations.length > 1 && <> &middot; {iterations.length} {unit.toLowerCase()}s</>}
+        </span>
         <span>{new Date(maxEnd).toLocaleTimeString()}</span>
       </div>
+
+      {slowest.length > 1 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[10px] text-gray-500 dark:text-gray-400">
+          <span className="uppercase font-bold tracking-wider text-gray-400">Most time</span>
+          {slowest.map(([label, ms]) => (
+            <span key={label} className="font-mono">
+              {label}
+              <span className="text-gray-400"> {(ms / 1000).toFixed(1)}s ({Math.round((ms / totalMs) * 100)}%)</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -139,11 +245,8 @@ export default function DataPage() {
               });
               // The objective's value is whatever step in the template was configured with that
               // returnVar — match by template position since steps themselves don't store returnVar.
-              const objectiveValues = objectiveNames.map((name: string) => {
-                  const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === name);
-                  const step = tmplIdx >= 0 ? iterSteps[tmplIdx] : null;
-                  return step?.outputs?.result !== undefined ? step.outputs.result : '';
-              });
+              const objectiveValues = objectiveNames.map((name: string) =>
+                  readNamedOutput(name, seqTemplate, iterSteps));
 
               rows.push({
                   row: i + 1,
@@ -167,7 +270,12 @@ export default function DataPage() {
           // record of which step is "the" output, so they fall back to input-only columns below
           // (their outputs are still visible per-row in the UI, and via Export Log).
           const seqTemplate = r.parameters?.sequence_template || [];
-          const returnVars = seqTemplate.filter((t: any) => t.returnVar).map((t: any) => t.returnVar);
+          // One step can save several named outputs (one per field of a structured return), so
+          // each becomes its own column rather than the whole "a, b" list becoming one.
+          const returnVars = seqTemplate.flatMap((t: any) =>
+              t.returnBindings?.length
+                  ? t.returnBindings.map((b: any) => b.var).filter(Boolean)
+                  : String(t.returnVar || '').split(',').map((v: string) => v.trim()).filter(Boolean));
           const seqLength = seqTemplate.length || (rowCount > 0 && r.steps?.length ? Math.floor(r.steps.length / rowCount) : 0);
           vars = [...inputVars, ...returnVars];
 
@@ -181,11 +289,7 @@ export default function DataPage() {
               const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
               // Match each returnVar to the step at the same position in the per-row template —
               // rowSteps mirrors seqTemplate's order since every row repeats the same block sequence.
-              const outputVals = returnVars.map((rv: string) => {
-                  const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === rv);
-                  const step = tmplIdx >= 0 ? rowSteps[tmplIdx] : null;
-                  return step?.outputs?.result !== undefined ? step.outputs.result : '';
-              });
+              const outputVals = returnVars.map((rv: string) => readNamedOutput(rv, seqTemplate, rowSteps));
               const dataStr = [...inputVals, ...outputVals].join(',');
 
               rows.push({
@@ -621,9 +725,13 @@ export default function DataPage() {
                           </div>
                       )}
                       <ExecutionTimeline
+                          iterationLabel={selectedRun.type === 'Optimization' ? 'Trial' : 'Row'}
                           steps={selectedRun.type === 'Sequence'
                               ? (selectedRun.steps || [])
-                              : selectedRun.rows.flatMap((r: any) => r.details || [])}
+                              // Carry the row/trial number onto each step. Flattening without it
+                              // left every repeated run as one undifferentiated band of bars.
+                              : selectedRun.rows.flatMap((r: any) =>
+                                  (r.details || []).map((d: any) => ({ ...d, iteration: r.row })))}
                       />
                       {selectedRun.type === 'Sequence' ? (
                           <div className="space-y-4 min-w-0">
@@ -633,6 +741,17 @@ export default function DataPage() {
                                     const paramsWithoutPhase = { ...(step.parameters || {}) };
                                     const phase = paramsWithoutPhase._phase;
                                     delete paramsWithoutPhase._phase;
+
+                                    // Return pointers read better as "name <- field" than as raw
+                                    // JSON, and the flat _return_var list is redundant beside them.
+                                    const bindings = paramsWithoutPhase._return_bindings;
+                                    if (Array.isArray(bindings) && bindings.length > 0) {
+                                        delete paramsWithoutPhase._return_bindings;
+                                        delete paramsWithoutPhase._return_var;
+                                        paramsWithoutPhase.saves = bindings
+                                            .map((b: any) => (b.path ? `${b.var} \u2190 ${b.path}` : b.var))
+                                            .join(', ');
+                                    }
                                     
                                     const prevPhase = idx > 0 ? selectedRun.steps[idx - 1].parameters?._phase : null;
                                     const showPhaseDivider = phase && phase !== prevPhase;

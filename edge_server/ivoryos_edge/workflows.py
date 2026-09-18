@@ -734,6 +734,14 @@ def expand_workflow_blocks(
             ret = block.get("returnVar") or block.get("return")
             if ret:
                 params["_return_var"] = ret
+            # Explicit per-field pointers into a structured return value — see
+            # extract_return_values in queue.py. Carried alongside _return_var, which stays as
+            # the flat positional fallback for sequences saved before pointers existed. Every
+            # step reaches this branch, including ones inside a linked workflow, since the
+            # library branch recurses back through here.
+            ret_bindings = block.get("returnBindings") or block.get("return_bindings")
+            if ret_bindings:
+                params["_return_bindings"] = ret_bindings
             nb["params"] = params
             expanded.append(nb)
             continue

@@ -453,6 +453,16 @@ export default function DesignerPage() {
           // Allow dynamic variables (strings starting with #) to pass through here, they are checked in execution/optimizer
           if (typeof val === 'string' && val.startsWith('#')) continue;
 
+          // Only a required parameter has to be filled in. Anything else is the driver's own
+          // default, and leaving it out is how you ask for it — cast_arguments passes only what
+          // is present, so the signature supplies the rest. This used to demand a value for
+          // every parameter in the schema, which blocked any step that simply relied on a
+          // default: fine for a block dragged in, since the form pre-fills them, but not for
+          // one from an imported workflow or from the assistant, which writes only what the
+          // protocol states. (Introspection never marks a parameter both required and
+          // defaulted — `required` is precisely "has no default".)
+          if (!(param as any)?.required) continue;
+
           if (val === undefined || val === '') {
             await notify(`Missing parameter '${key}' in ${block.instrument}.${block.method}`,
                          { title: 'Incomplete step', tone: 'error' });

@@ -118,15 +118,36 @@ export function generatePythonCode(
         body += `${pad}${block.instrument}.${propertyName} = ${formatValue(block.params.value)}\n`;
         return;
       }
+      // A step's saved names are fields of one returned value, not a tuple to unpack — so write
+      // the expression to a temp and pull each field out of it by the same path the run resolves
+      // at execution time. `x, y = expr` would be a TypeError against a dataclass or Pydantic
+      // result. Shared by the property getter and the method call below: a property typed as a
+      // dataclass is as much a structured result as a method returning one.
+      const emitAssignment = (expr: string) => {
+        const bindings = (block.returnBindings || []).filter((b: any) => b && b.var);
+        if (bindings.length === 1 && !bindings[0].path) {
+          body += `${pad}${bindings[0].var} = ${expr}\n`;
+        } else if (bindings.length > 0) {
+          body += `${pad}_result = ${expr}\n`;
+          bindings.forEach((b: any) => {
+            const accessor = String(b.path).split('.')
+              .map((seg: string) => (/^\d+$/.test(seg) ? `[${seg}]` : `.${seg}`))
+              .join('');
+            body += `${pad}${b.var} = _result${accessor}\n`;
+          });
+        } else {
+          const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
+          body += `${pad}${returnStr}${expr}\n`;
+        }
+      };
+
       if (propertyName && block.schema?.property_access === 'get') {
-        const getStr = block.returnVar ? `${block.returnVar} = ` : '';
-        body += `${pad}${getStr}${block.instrument}.${propertyName}\n`;
+        emitAssignment(`${block.instrument}.${propertyName}`);
         return;
       }
 
       const params = Object.entries(block.params).map(([k, v]) => `${k}=${formatValue(v)}`).join(', ');
-      const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
-      body += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;
+      emitAssignment(`${block.instrument}.${block.method}(${params})`);
     });
     return body;
   };

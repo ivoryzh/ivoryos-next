@@ -82,3 +82,7 @@ out/
 edge_server/ivoryos_edge/workflows/.versions/
 # Workflow tags — local bookkeeping alongside the versions above, not protocol content.
 edge_server/ivoryos_edge/workflows/.meta.json
+
+# Agent provider settings — endpoint, model, and possibly an API key. Runtime state that lives
+# beside the workflow store (see agent/routes.py), never something to commit.
+edge_server/ivoryos_edge/agent_settings.json

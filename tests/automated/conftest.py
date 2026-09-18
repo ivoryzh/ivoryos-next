@@ -1,7 +1,24 @@
 import pytest
 import asyncio
+import dataclasses
 from httpx import AsyncClient, ASGITransport
 from ivoryos_edge.server import app
+
+
+@dataclasses.dataclass
+class AssayMetrics:
+    purity: float
+    peaks: int
+
+
+@dataclasses.dataclass
+class AssayResult:
+    """A deliberately non-scalar result: one method call produces several numbers plus
+    non-numeric metadata, which is the shape a return pointer has to address."""
+    yield_pct: float
+    metrics: AssayMetrics
+    sample_id: str
+
 
 class DummyInstrument:
     def __init__(self):
@@ -30,6 +47,26 @@ class DummyInstrument:
         self.counter_b += 0.5
         return self.counter_b
 
+    def assay_method(self) -> AssayResult:
+        """Returns a structured result whose numeric fields sit at different depths, so a test
+        can bind an objective to a nested pointer rather than the whole object."""
+        self.counter += 1
+        return AssayResult(
+            yield_pct=float(self.counter),
+            metrics=AssayMetrics(purity=0.5 * self.counter, peaks=self.counter),
+            sample_id=f"S{self.counter}",
+        )
+
+    @property
+    def last_assay(self) -> AssayResult:
+        """A property typed as a dataclass — the crossover between property introspection and
+        return pointers, where a getter is a step whose result still needs addressing by field."""
+        return AssayResult(
+            yield_pct=float(self.counter),
+            metrics=AssayMetrics(purity=0.5 * self.counter, peaks=self.counter),
+            sample_id=f"S{self.counter}",
+        )
+
     @property
     def flow_rate(self) -> float:
         """A setting exposed as a property rather than a method, the way plenty of real
@@ -52,7 +89,15 @@ async def setup_app_state():
     from ivoryos_edge.server import app, queue_manager
     from ivoryos_edge.models import init_db
     
+    from ivoryos_edge.introspection import inspect_device_module
+
     app.state.instruments = {"dummy": DummyInstrument()}
+    # The real startup_event introspects every instrument into instrument_schemas, and anything
+    # reading the deck rather than driving it — /api/status, the agent tool layer — works from
+    # that, not from the live objects. Without it those read an empty deck.
+    app.state.instrument_schemas = {
+        name: inspect_device_module(instance) for name, instance in app.state.instruments.items()
+    }
     await init_db()
     await queue_manager.init_asyncio()
     yield
@@ -83,3 +128,35 @@ def isolated_workflow_store(tmp_path, monkeypatch):
         yield
     finally:
         engine.dispose()
+
+
+@pytest.fixture
+def api_workflows_dir(tmp_path, monkeypatch):
+    """Point the live endpoints at a scratch directory instead of the package's own workflows/.
+
+    `isolated_workflow_store` above isolates the database, but the directory is the other half
+    of the store and is shared — without this a test that saves a workflow writes a real JSON
+    file into the repository, which then shows up in every later test's listing.
+    """
+    d = tmp_path / "api_workflows"
+    d.mkdir()
+    monkeypatch.setattr("ivoryos_edge.server.WORKFLOWS_DIR", str(d))
+    return str(d)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def clean_agent_proposals():
+    """Empty the agent review queue between tests.
+
+    `isolated_workflow_store` isolates the workflow store, but proposals live in the main
+    application database, which is shared and persists across runs. Without this, a test that
+    asserts "nothing is waiting for review" passes or fails depending on what an earlier test —
+    or an earlier *run* — happened to leave behind.
+    """
+    from sqlalchemy import delete
+    from ivoryos_edge.models import AgentProposal, async_session
+
+    async with async_session() as session:
+        await session.execute(delete(AgentProposal))
+        await session.commit()
+    yield

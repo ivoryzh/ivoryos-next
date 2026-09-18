@@ -11,6 +11,7 @@ type SignatureBlock = {
   method: string;
   params?: Record<string, any>;
   returnVar?: string;
+  returnBindings?: { path: string; var: string }[];
   isHidden?: boolean;
   isBatchAction?: boolean;
 };
@@ -21,6 +22,9 @@ const normalize = (blocks: SignatureBlock[] = []) =>
     method: b.method,
     params: b.params || {},
     returnVar: b.returnVar || '',
+    // Re-pointing a variable from one field of a structured result to another keeps the same
+    // names, so without this such an edit wouldn't register as one.
+    returnBindings: b.returnBindings || [],
     isHidden: !!b.isHidden,
     isBatchAction: !!b.isBatchAction,
   }));

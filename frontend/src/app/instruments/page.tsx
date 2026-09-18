@@ -393,7 +393,18 @@ export default function InstrumentsPage() {
                     ) : log.status === 'started' ? (
                       <span className="text-yellow-600 dark:text-yellow-400 animate-pulse">{log.result}</span>
                     ) : (
-                      <span>{log.result?.return_value !== undefined ? JSON.stringify(log.result.return_value) : (log.result?.status === 'queued' ? 'Task queued in background...' : 'Executed successfully.')}</span>
+                      <span>
+                        {/* The poll response is {status, result}. This read `return_value`, a key
+                            the server has never sent, so every successful action rendered the
+                            fallback and the method's actual output was thrown away. */}
+                        {log.result?.status === 'queued'
+                          ? 'Task queued in background...'
+                          : log.result?.result === undefined || log.result?.result === null
+                            ? 'Executed successfully (no value returned).'
+                            : typeof log.result.result === 'object'
+                              ? <code className="whitespace-pre-wrap break-all">{JSON.stringify(log.result.result, null, 1)}</code>
+                              : String(log.result.result)}
+                      </span>
                     )}
                   </div>
                 </div>

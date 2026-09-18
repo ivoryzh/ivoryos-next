@@ -1,9 +1,13 @@
 export { default as WorkflowEditor } from './WorkflowEditor';
-export type { SequenceBlock } from './WorkflowEditor';
+export type { SequenceBlock, ReturnBinding, ReturnLeaf } from './WorkflowEditor';
+export { getReturnLeaves, getBoundVar } from './WorkflowEditor';
 export { PythonCodeView } from './PythonCodeView';
 export { generatePythonCode } from './generatePythonCode';
 export { buildRunName } from './runNaming';
 export { workflowSignature } from './workflowSignature';
+export { readNamedOutput, resolveResultPath } from './returnValues';
+export { FLOW_CONTROL_SCHEMAS, flowControlSchema, isFlowControlInstrument } from './flowControl';
+export type { ReturnBindingRef, OutputTemplateStep } from './returnValues';
 export { WorkflowMap } from './WorkflowMap';
 export { WorkflowPeek } from './WorkflowPeek';
 export { WorkflowDiff } from './WorkflowDiff';

@@ -250,11 +250,14 @@ Two independent copies of the same idea exist, and it's worth understanding the 
 
 Both center on `extract_type_info(annotation, default)`, which recognizes: plain classes (`float`, `int`, a dataclass — reported by clean `__name__`, not Python's `<class 'float'>` repr, which broke a real frontend check for `NoneType` return types before both copies were fixed the same way), `Enum` (→ a dropdown of `.value`s), `Literal[...]` (→ a dropdown of the literal values), `bool` (→ `["True", "False"]`), and dataclasses/Pydantic `BaseModel`s (→ `is_object: true` with a recursively-extracted `fields` dict, so a nested-object parameter renders as a nested form instead of a raw JSON textbox). `cast_value`/`cast_arguments` (edge_server only — schema_worker never executes anything) are the inverse operation at call time, and have to agree with whatever `extract_type_info` reported for the same annotation, since they're never invoked on the same object in the same request — a casting rule added to one without checking the other silently produces a runtime `TypeError` that a signature/schema mismatch, not a symptom, actually caused.
 
-**Where the two copies currently disagree (schema_worker is ahead; edge_server, the one real devices actually use, is not)** — both are real, fixable gaps in `edge_server/ivoryos_edge/introspection.py`, not intentional differences:
-1. **`Optional[X]` / `Union[X, None]` unwrapping.** `schema_worker/introspection.py` unwraps a `Union` with exactly one non-`None` arm and re-extracts on the inner type, so `Optional[MyEnum]` still gets its dropdown `options` and `Optional[MyDataclass]` still gets its expanded `fields`. `edge_server`'s copy has no such unwrapping — an `Optional`-wrapped enum or dataclass parameter degrades to a bare free-text box on every real instrument connected to Core today.
-2. **PEP 563 string annotations** (`from __future__ import annotations`, or any `annotations = "..."` future import — increasingly the default in newer driver code). Under PEP 563, `param.annotation`/`sig.return_annotation` are plain **strings**, not the real type objects — so every `isinstance`/`issubclass` check in `extract_type_info` (the Enum check, the dataclass check, the bool check) silently fails and every such parameter degrades to a free-text box, with no error anywhere to point at why. `schema_worker/introspection.py`'s `inspect_class` resolves this first via `typing.get_type_hints(method)` (falling back to the raw, possibly-string annotation only if resolution itself throws, e.g. an unresolvable forward reference) before calling `extract_type_info`. `edge_server`'s `inspect_device_module` does not — a driver written with `from __future__ import annotations` loses every dropdown/nested-object field in its real, live schema.
+**Variadic parameters are excluded from `parameters`, keyed on `param.kind` and never on the name** (`*positions` is the same case as `*args`). A variadic is never required — that is what `*` and `**` mean — but `required` is computed as "has no default", and a variadic has no default to have, so it used to come out required and a form offered to fill it. Filling it is an error rather than a no-op: `def move(self, *positions)` called as `move(positions=[1,2])` raises `TypeError`, and a `**options` method quietly receives a key called `options`. Neither is an argument a caller can name, so neither is a parameter. A method taking `**` instead carries `accepts_kwargs: true`, which is what lets validation treat an unlisted argument as real rather than as a typo — without it, dropping them would turn every forwarded argument into a false error. `required` meaning exactly "has no default" is also why both validators check only that and nothing about defaults.
 
-If you're asked to touch instrument schema extraction, porting these two fixes from `schema_worker/introspection.py` into `edge_server/ivoryos_edge/introspection.py`'s `inspect_device_module`/`extract_type_info` is probably the highest-leverage thing to do — it fixes a real, live gap for actual connected instruments, not just the less-exercised Hub path. (Both copies *do* resolve PEP 563 strings for **properties**, via `_resolve_hints` — gap 2 above is specifically about the method sweep in `inspect_device_module`.)
+**The two copies are now in sync** on the two things they used to disagree about, both closed in `edge_server/ivoryos_edge/introspection.py` (the copy real devices actually use) by porting `schema_worker`'s version:
+
+1. **`Optional[X]` / `Union[X, None]` unwrapping** — a `Union` with exactly one non-`None` arm re-extracts on the inner type, so `Optional[MyEnum]` keeps its dropdown `options`, `Optional[MyDataclass]` keeps its expanded `fields`, and `-> Optional[MyResult]` keeps its return pointers.
+2. **PEP 563 string annotations** (`from __future__ import annotations`) — `inspect_device_module` resolves `typing.get_type_hints(method)` first, falling back to the raw (possibly string) annotation only if resolution throws. Without it every `isinstance`/`issubclass` check silently fails and each parameter degrades to a free-text box with nothing to point at why. Dataclass *fields* get the same treatment via `_resolve_field_type`. Property entries already resolved theirs through `_resolve_hints`, which the method sweep now shares.
+
+Both copies also cap object recursion (`MAX_OBJECT_DEPTH`) and break annotation cycles, so a self-referencing model (`parent: Optional[Node]`) no longer recurses until the stack blows.
 
 ### Properties are steps, in both directions
 
@@ -274,6 +277,26 @@ Three things follow from this and are easy to break:
 - **`generatePythonCode` renders property steps as attribute access** — `reactor.stir_rate = 750`, `temp_c = reactor.temperature` — keyed off `schema.property_access`. Without that branch the preview shows `reactor.stir_rate_(setter)(value=750)`, which is not Python.
 
 Properties inherited from a *framework* base class are filtered out (`FRAMEWORK_PROPERTY_PACKAGES`): pydantic's `model_extra` / `model_fields_set` describe the modelling library, not the instrument. Note that the equivalent *methods* from such bases (`model_dump`, `model_validate`, …) are **not** filtered and still show up — a pre-existing wart, not a decision.
+
+### Return values: `return_paths` and return pointers
+
+`extract_type_info` marks a leaf `numeric: true` for `int`/`float` (never `bool`), and `build_return_paths(annotation)` flattens a *return* annotation into the ordered list of leaves a variable can be bound to, published per method as `return_paths`:
+
+```json
+[{"path": "composition.yield_percent", "type": "float", "numeric": true},
+ {"path": "method", "type": "str", "numeric": false}]
+```
+
+Dotted for nested dataclass/Pydantic fields, `"0"`/`"1"` for a fixed-length tuple (`Tuple[X, ...]` is variadic and stays one opaque leaf), `""` for a scalar — meaning "the result itself" — and `[]` for `-> None`.
+
+This exists because a driver method rarely returns one number: it returns a rich object, and an optimizer can only take numbers. So a step binds **one variable per field** rather than one variable per call:
+
+- The Designer writes `returnBindings: [{path, var}]` on each block (`WorkflowEditor`'s Outputs panel, shown in the expanded block whenever a return has >2 leaves or any nested one). `returnVar` stays alongside it as the flat comma-separated list of the same names in leaf order — still what Optimize's objective list, Data History's columns and codegen read, so nothing downstream had to learn a new shape.
+- The backend resolves each pointer against the *serialized* result in `queue.py`'s `extract_return_values` (`_return_bindings` for live runs, `returnBindings` in an Optimization `sequence_template`), falling back to the legacy **positional** mapping when a sequence has no bindings. That positional mapping is precisely what pointers replace — it binds the wrong name to the wrong field the moment a driver reorders its return fields.
+- A pointer whose path isn't in the actual result is skipped, not recorded as `None`; an objective value that isn't a number is dropped rather than failing the trial. The Optimize page only offers **numeric** leaves as objectives and lists the rest as "also saved, but not numeric".
+- Reading a named output back out of a finished run (Data History columns/CSV, Optimize's seed-from-history) goes through `readNamedOutput` in `packages/shared-ui/src/returnValues.ts` — one implementation for all three, since each needs the same "resolve this name through that step's pointer" logic.
+
+`example/lab_drivers.py`'s `HPLC.analyze() -> HPLCReport` is the demo deck's worked example of this shape (nested numeric fields plus non-numeric metadata).
 
 ---
 
@@ -418,7 +441,43 @@ state correctly clears the badge again instead of staying stuck dirty.
 
 ---
 
-## 14. Build Requirements
+## 14. Agent in the loop (`edge_server/ivoryos_edge/agent/`)
+
+Prose in, reviewable workflow out. Full setup and rationale in `docs/agent_in_the_loop.md`; the
+parts worth knowing before touching any of it:
+
+- **One tool layer, two surfaces.** `/api/agent/*` (`agent/routes.py`) is the whole contract.
+  `agent/mcp_server.py` is a *thin stdio process that calls those endpoints over HTTP* — it
+  holds no logic, so a tool's behaviour is never implemented twice. The Designer's
+  `AgentPanel.tsx` calls the same endpoints. Adding a surface, or switching model, must not
+  mean reimplementing what a tool does.
+- **Nothing an agent posts takes effect.** Every write files an `AgentProposal` (kind
+  `workflow` or `run`) and stops; a person accepts it. Do not add an endpoint that lets an
+  agent save or dispatch directly — the single human gate is the entire safety argument for
+  letting a model near a deck that moves liquid. Accepting re-validates, because the deck can
+  change between a model writing something and a person reading it.
+- **`agent/validate.py` is the load-bearing piece**, not the prompt. It is what makes model
+  output reviewable: unknown instrument/method (answered with the real list), missing or
+  mistyped arguments, `"65 C"` where a float belongs, values outside an enum, `#variables`
+  nothing produces, unbalanced If/While, return bindings naming fields that do not exist.
+  `chat.py` feeds those errors back to the model and retries up to three times — which is why
+  a small local model is usable here at all. Extend the validator when you add a step kind;
+  a gap here shows up as a scientist reviewing a workflow that cannot run.
+- **`unbound_variables` gates run requests.** A saved workflow leaves values open for the
+  spreadsheet or the optimizer; a one-shot run has neither, so a request without them is
+  refused up front rather than approved and then failing mid-reaction.
+- **`describe_deck` is deliberately lossy.** `/api/status`'s schema is right for building forms
+  and far too large for a prompt. Keep what is needed to choose and call a method; drop what is
+  only needed to draw a widget. If you add a field to the schema, decide which of those it is.
+- **`providers.py` is the only module that knows a model exists.** Ollama (default: no key, and
+  protocol text never leaves the building) and any OpenAI-compatible endpoint. No streaming and
+  no tool-calling protocol on purpose — small local models are unreliable at tool calling and
+  fine at emitting one JSON object, and the validate-and-retry loop gets the reliability without
+  depending on a capability the model may not have.
+
+---
+
+## 15. Build Requirements
 
 **Always run `npm run build` in `frontend/`** (and `cloud_frontend/` when applicable) after structural or UI changes, so the static export the Python edge server serves is up to date. Type-check first with `npx tsc --noEmit -p .` in whichever of `frontend/`, `cloud_frontend/`, `packages/shared-ui/` you touched.
 

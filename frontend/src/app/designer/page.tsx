@@ -2,8 +2,10 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree } from 'lucide-react';
+import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import AgentPanel from '@/components/AgentPanel';
+import AgentToolboxButton from '@/components/AgentToolboxButton';
 import {
   WorkflowEditor,
   SequenceBlock,
@@ -49,6 +51,9 @@ export default function DesignerPage() {
   });
 
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  // The assistant panel is opt-in and remembered: a lab with no model configured should
+  // never see it, and one that uses it every day should not reopen it every visit.
+  const [agentOpen, setAgentOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
@@ -154,6 +159,7 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
 
     // Load saved sequence if exists
+    setAgentOpen(localStorage.getItem('ivoryos_agent_panel') === 'true');
     const savedSeq = localStorage.getItem('ivoryos_sequence');
     if (savedSeq) {
       try {
@@ -300,6 +306,13 @@ export default function DesignerPage() {
     localStorage.setItem('ivoryos_is_unsaved', String(dirty));
   }, [hasLoaded, sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
+  // One toggle, reached from either the toolbox or the right-edge tab.
+  const toggleAgent = () => {
+    const next = !agentOpen;
+    setAgentOpen(next);
+    localStorage.setItem('ivoryos_agent_panel', String(next));
+  };
+
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
     setTheme(newTheme);
@@ -308,12 +321,19 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
   };
 
-  const clearCanvas = async () => {
-    if (await confirmDialog("Every block on the canvas will be removed. This cannot be undone.", {
-      title: 'Clear the canvas?',
-      confirmLabel: 'Clear',
-      tone: 'danger',
-    })) {
+  const startNewWorkflow = async () => {
+    // Was "Clear" with a trash icon, which read as destroying something rather than starting
+    // the next thing. The behaviour was already "empty canvas, no name" — this names it.
+    const hasContent = prepSequence.length + sequence.length + cleanupSequence.length > 0;
+    if (!hasContent || await confirmDialog(
+      isUnsaved
+        ? "The canvas has unsaved changes. Starting a new workflow discards them."
+        : "This clears the canvas and starts an untitled workflow.",
+      {
+        title: 'Start a new workflow?',
+        confirmLabel: 'New workflow',
+        tone: isUnsaved ? 'danger' : 'default',
+      })) {
       setSequence([]);
       setPrepSequence([]);
       setCleanupSequence([]);
@@ -580,6 +600,16 @@ export default function DesignerPage() {
           // Allow dynamic variables (strings starting with #) to pass through here, they are checked in execution/optimizer
           if (typeof val === 'string' && val.startsWith('#')) continue;
 
+          // Only a required parameter has to be filled in. Anything else is the driver's own
+          // default, and leaving it out is how you ask for it — cast_arguments passes only what
+          // is present, so the signature supplies the rest. This used to demand a value for
+          // every parameter in the schema, which blocked any step that simply relied on a
+          // default: fine for a block dragged in, since the form pre-fills them, but not for
+          // one from an imported workflow or from the assistant, which writes only what the
+          // protocol states. (Introspection never marks a parameter both required and
+          // defaulted — `required` is precisely "has no default".)
+          if (!(param as any)?.required) continue;
+
           if (val === undefined || val === '') {
             await notify(`Missing parameter '${key}' in ${block.instrument}.${block.method}`,
                          { title: 'Incomplete step', tone: 'error' });
@@ -659,13 +689,48 @@ export default function DesignerPage() {
     {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
         panes at narrow widths (which just produces overlapping, clipped controls), it holds its
         natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
-    <div className="flex h-full min-w-[1080px]">
+    {/* The assistant takes the toolbox's column rather than adding one, so the minimum only
+        grows by the difference between them (26rem panel vs 18rem toolbox) — not by the panel's
+        full width, which is what it cost when the two were shown side by side. */}
+    <div className={`flex h-full ${agentOpen ? 'min-w-[1208px]' : 'min-w-[1080px]'}`}>
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
+
+      {agentOpen && (
+        <AgentPanel
+          prepSequence={prepSequence}
+          sequence={sequence}
+          cleanupSequence={cleanupSequence}
+          workflowName={currentWorkflowName}
+          instruments={instruments}
+          onApply={(body) => {
+            // Replaces the canvas wholesale, which is why it is only reachable from an explicit
+            // accept and why the diff is offered first: the proposal is always a complete body.
+            setPrepSequence(body.prep);
+            setSequence(body.script);
+            setCleanupSequence(body.cleanup);
+            // The steps persist themselves on change, but the name and description do not —
+            // they are only written when a workflow is saved or loaded from the Library. Doing
+            // the same here keeps them through a reload, rather than leaving the canvas full
+            // and the header blank.
+            if (body.name && !currentWorkflowName) {
+              setCurrentWorkflowName(body.name);
+              localStorage.setItem('ivoryos_editing_workflow', body.name);
+            }
+            if (body.description && !currentWorkflowDescription) {
+              setCurrentWorkflowDescription(body.description);
+              localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
+            }
+          }}
+          onClose={toggleAgent}
+        />
+      )}
 
       {/* Main Designer Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <WorkflowEditor
+          toolboxFooter={<AgentToolboxButton open={agentOpen} onToggle={toggleAgent} />}
+          hideToolbox={agentOpen}
           statusData={statusData}
           prepSequence={prepSequence}
           setPrepSequence={setPrepSequence}
@@ -691,23 +756,6 @@ export default function DesignerPage() {
                       <span>Offline Mode</span>
                     </span>
                   )}
-                  <div className="flex items-center space-x-1.5 pl-2 border-l border-gray-200 dark:border-white/10">
-                    <button
-                      onClick={saveWorkflow}
-                      disabled={sequence.length === 0}
-                      title="Save"
-                      className="flex items-center justify-center p-1.5 rounded transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={clearCanvas}
-                      title="Clear"
-                      className="flex items-center justify-center p-1.5 rounded transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
                 </div>
                 <input
                   type="text"
@@ -718,6 +766,27 @@ export default function DesignerPage() {
                 />
               </div>
               <div className="flex items-center space-x-2">
+                {/* Save and New belong with the other actions. They used to sit beside the name,
+                    against a two-line block, so they were vertically offset from every other
+                    control in the header no matter what padding they were given. */}
+                <button
+                  onClick={startNewWorkflow}
+                  title="Start a new, empty workflow"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+                >
+                  <FilePlus2 className="w-4 h-4 text-gray-400" />
+                  <span className="hidden sm:inline">New</span>
+                </button>
+
+                <button
+                  onClick={saveWorkflow}
+                  disabled={sequence.length === 0}
+                  title="Save this workflow to the library"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Save className="w-4 h-4" />
+                  <span className="hidden sm:inline">Save</span>
+                </button>
 
                 <div className="relative group">
                   <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
@@ -751,18 +820,6 @@ export default function DesignerPage() {
                   onChange={handleFileUpload}
                 />
 
-                {/* The steps a linked workflow stands in for are otherwise invisible until the run
-                    is already underway. This shows them before anything is committed to hardware. */}
-                <button
-                  onClick={() => setIsMapOpen(true)}
-                  disabled={prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0}
-                  title="Preview every step this sequence will run, with linked workflows expanded"
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <ListTree className="w-4 h-4 text-emerald-500" />
-                  <span className="hidden sm:inline">Preview</span>
-                </button>
-
                 <button
                   onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
@@ -792,16 +849,14 @@ export default function DesignerPage() {
                               return;
                             }
                           }
-                          if (hasPendingRuns) {
-                            if (!await confirmDialog("A task is already running. Add this sequence to the execution queue?", {
-                              title: 'Queue this run?',
-                              confirmLabel: 'Add to queue',
-                            })) {
-                              return;
-                            }
-                          }
-                          if (hasDynamicParams) window.location.href = '/execution';
-                          else runSequence();
+                          // Configure is not a dispatch — it hands off to the page where values
+                          // get filled in, and the preview belongs in front of the real run
+                          // that happens there, not in front of the handoff.
+                          if (hasDynamicParams) { window.location.href = '/execution'; return; }
+                          // The preview is the last thing seen before hardware moves. It is no
+                          // longer a button of its own, so this is where it earns its place:
+                          // linked workflows expanded, exactly what will be queued.
+                          setIsMapOpen(true);
                         }}
                         disabled={hasNoSteps}
                         className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
@@ -849,11 +904,22 @@ export default function DesignerPage() {
           }}
         />
         <WorkflowMap
+          confirmLabel={hasPendingRuns ? 'Add to queue' : 'Run'}
+          onConfirm={async () => {
+            setIsMapOpen(false);
+            if (hasPendingRuns && !await confirmDialog(
+              "A task is already running. Add this sequence to the execution queue?",
+              { title: 'Queue this run?', confirmLabel: 'Add to queue' })) {
+              return;
+            }
+            runSequence();
+          }}
           isOpen={isMapOpen}
           onClose={() => setIsMapOpen(false)}
           fetchExpansion={fetchExpansion}
         />
       </div>
+
     </div>
     </div>
   );

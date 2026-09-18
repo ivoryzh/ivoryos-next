@@ -11,6 +11,7 @@
  */
 
 import type { SequenceBlock } from './WorkflowEditor';
+import { flowControlSchema } from './flowControl';
 
 export const LIBRARY_INSTRUMENT = 'Library Workflows';
 
@@ -44,7 +45,10 @@ export function newBlockId(): string {
 
 function lookupSchema(instruments: any, instrument: string, method: string): any {
   const found = instruments?.[instrument]?.[method];
-  return found || { parameters: {} };
+  if (found) return found;
+  // Flow control has no entry in the instrument schema — it is the designer's own vocabulary,
+  // so without this fallback a rebuilt If/User_Input block renders with no fields to edit.
+  return flowControlSchema(instrument, method) || { parameters: {} };
 }
 
 /** Saved JSON block -> editor block. Tolerates both the `action`/`args` and `method`/`params` shapes. */
@@ -58,6 +62,11 @@ export function toSequenceBlock(saved: SavedBlock, instruments: any = {}): Seque
     schema: lookupSchema(instruments, instrument, method),
     params: saved.args || saved.params || {},
     returnVar: saved.return || saved.returnVar || '',
+    // Per-field pointers into a structured return value. Absent on anything saved before
+    // pointers existed, where the flat `return` list maps onto the result positionally instead.
+    ...(saved.return_bindings || saved.returnBindings
+      ? { returnBindings: saved.return_bindings || saved.returnBindings }
+      : {}),
     isExpanded: false,
     isBatchAction: !!(saved.batch_action ?? saved.isBatchAction),
     ...(saved.ref ? { ref: saved.ref } : {}),
@@ -135,6 +144,7 @@ export function toSavedBlock(block: SequenceBlock, index: number): SavedBlock {
     args: block.params,
     arg_types: argTypes,
     return: block.returnVar || '',
+    ...(block.returnBindings?.length ? { return_bindings: block.returnBindings } : {}),
     batch_action: !!block.isBatchAction,
     consolidate_batch_args: false,
     // Reuse provenance has to survive the round trip: `ref` is what makes a link resolve to a
@@ -274,6 +284,7 @@ export type DiffStep = {
   method: string;
   params: Record<string, any>;
   returnVar: string;
+  returnBindings: { path: string; var: string }[];
   batch: boolean;
 };
 
@@ -290,6 +301,7 @@ export function toDiffStep(block: any): DiffStep {
     method: String(block.action || block.method || ''),
     params: block.args || block.params || {},
     returnVar: String(block.return ?? block.returnVar ?? ''),
+    returnBindings: block.return_bindings ?? block.returnBindings ?? [],
     batch: !!(block.batch_action ?? block.isBatchAction),
   };
 }
@@ -306,6 +318,13 @@ function changesBetween(before: DiffStep, after: DiffStep): StepChange[] {
   });
   if (before.returnVar !== after.returnVar) {
     changes.push({ key: 'saves as', from: before.returnVar || '—', to: after.returnVar || '—' });
+  }
+  // Repointing a variable at a different field keeps the same names, so the check above misses
+  // it — and "yield now reads purity instead" is exactly the kind of change a diff exists for.
+  const pointerList = (step: DiffStep) =>
+    (step.returnBindings || []).map(b => `${b.var} \u2190 ${b.path || 'result'}`).join(', ');
+  if (pointerList(before) !== pointerList(after)) {
+    changes.push({ key: 'saves from', from: pointerList(before) || '—', to: pointerList(after) || '—' });
   }
   if (before.batch !== after.batch) {
     changes.push({
@@ -368,7 +387,8 @@ export function summariseDiff(rows: DiffRow[]) {
   };
 }
 
-/** The output variable names a block writes. `returnVar` holds a comma-separated list for tuples. */
+/** The output variable names a block writes. `returnVar` holds a comma-separated list — one name
+ *  per return pointer (or per tuple element, for a sequence saved before pointers existed). */
 export function returnVarNames(block: SequenceBlock): string[] {
   return String(block.returnVar || '').split(',').map(s => s.trim()).filter(Boolean);
 }
@@ -431,6 +451,11 @@ export function uniquifyReturnVars(
     blocks: blocks.map(block => ({
       ...block,
       returnVar: returnVarNames(block).map(name => rename.get(name) || name).join(', '),
+      // A renamed output has to be renamed in its pointer too, or the binding would keep
+      // writing the old (colliding) name and the rename would silently do nothing.
+      ...(block.returnBindings?.length
+        ? { returnBindings: block.returnBindings.map(b => ({ ...b, var: rename.get(b.var) || b.var })) }
+        : {}),
       params: rewrite(block.params || {}),
     })),
     renamed: [...rename.entries()].map(([from, to]) => ({ from, to })),

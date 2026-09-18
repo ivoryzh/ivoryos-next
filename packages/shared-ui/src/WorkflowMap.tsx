@@ -45,6 +45,13 @@ type Props = {
    * setting rather than being a private what-if, so what the preview shows is what will run.
    */
   spreadsheet?: { rows: number; batchSize: number; onBatchSizeChange?: (size: number) => void };
+  /**
+   * Turns the preview into the step before a run. The Designer has no separate Preview
+   * button any more — this panel *is* what you see before committing, so the confirming
+   * action belongs on it rather than behind a second trip to the header.
+   */
+  confirmLabel?: string;
+  onConfirm?: () => void;
 };
 
 /** Used when no spreadsheet is loaded (the Designer), so batch behaviour is still explorable. */
@@ -136,7 +143,7 @@ function batchGroups(steps: ExpandedStep[], rows: number, batchSize: number) {
   return groups;
 }
 
-export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet }: Props) {
+export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, confirmLabel, onConfirm }: Props) {
   const [result, setResult] = useState<ExpansionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -222,6 +229,29 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet }: Pr
             </button>
           </div>
         </header>
+
+        {confirmLabel && onConfirm && (
+          <div className="shrink-0 px-5 py-3 border-b border-gray-200 dark:border-white/10 bg-gray-50/70 dark:bg-white/[0.02] flex items-center justify-between gap-3">
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              This is what will be dispatched. Nothing has started yet.
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={onClose}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-white/10 bg-white dark:bg-white/5 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={onConfirm}
+                disabled={isLoading}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+              >
+                {confirmLabel}
+              </button>
+            </div>
+          </div>
+        )}
 
         {result && (
           <div className="shrink-0 px-5 py-3 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.02] flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs">

@@ -6,7 +6,7 @@ import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, Gr
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
-import { buildRunName, LIBRARY_INSTRUMENT, WorkflowMap, confirmDialog, notify } from '@ivoryos/shared-ui';
+import { buildRunName, LIBRARY_INSTRUMENT, WorkflowMap, confirmDialog, notify, readNamedOutput } from '@ivoryos/shared-ui';
 
 /**
  * Resolve any `Library Workflows` blocks into the steps they stand for, via the server's own
@@ -49,6 +49,9 @@ async function expandLinkedBlocks(seqs: { prep: any[]; sequence: any[]; cleanup:
         Object.entries(step.params || {}).filter(([k]) => !k.startsWith('_'))
       ),
       returnVar: step.params?._return_var || step.returnVar || '',
+      ...(step.params?._return_bindings || step.returnBindings
+        ? { returnBindings: step.params?._return_bindings || step.returnBindings }
+        : {}),
       isBatchAction: !!(step.batch_action ?? step.isBatchAction),
       // Steps expanded out of the same linked workflow are grouped, so the spreadsheet table can
       // still show which saved workflow a step came from. The id keys on `_expansion_id` rather
@@ -79,6 +82,7 @@ function toWireBlock(b: any) {
     method: b.method,
     params: b.params,
     returnVar: b.returnVar,
+    ...(b.returnBindings?.length ? { returnBindings: b.returnBindings } : {}),
     batch_action: !!b.isBatchAction,
     ...(b.ref ? { ref: b.ref } : {}),
   };
@@ -377,25 +381,28 @@ export default function ExecutionPage() {
 
   const downloadResultsCSV = () => {
     if (executionState.results.length === 0) return;
-    const returnVars = sequence.filter(b => b.returnVar).map(b => b.returnVar);
+    // One step can save several named outputs (one per field of a structured return value), so
+    // each name is its own column and each is read back through its own return pointer.
+    const returnVars = sequence.flatMap(b =>
+      b.returnBindings?.length
+        ? b.returnBindings.map((bind: { path: string; var: string }) => bind.var).filter(Boolean)
+        : String(b.returnVar || '').split(',').map(v => v.trim()).filter(Boolean)
+    );
     const headerCols = [...variables, ...returnVars];
     const header = headerCols.join(',');
-    
+
     const csvRows = rows.map((row, idx) => {
       const log = executionState.results.find(l => l.row === idx);
-      const outputValues: Record<string, string> = {};
-      
-      if (log && log.status === 'success') {
-        log.details.forEach((d: any, i: number) => {
-           const block = sequence[i];
-           if (block && block.returnVar) {
-               outputValues[block.returnVar] = d.result !== undefined ? JSON.stringify(d.result).replace(/,/g, ';') : '';
-           }
-        });
-      }
+      const steps = (log && log.status === 'success')
+        ? log.details.map((d: any) => ({ outputs: { result: d.result } }))
+        : [];
 
       const inputCols = variables.map(v => row[v] || '');
-      const outputCols = returnVars.map(v => outputValues[v] || '');
+      const outputCols = returnVars.map(v => {
+        const value = readNamedOutput(v, sequence, steps);
+        if (value === '' || value === undefined) return '';
+        return (typeof value === 'object' ? JSON.stringify(value) : String(value)).replace(/,/g, ';');
+      });
       return [...inputCols, ...outputCols].join(',');
     });
 
@@ -599,7 +606,14 @@ export default function ExecutionPage() {
           // Records which step (by position within one row's block sequence) is tagged with a
           // returnVar, so Data History can later match a row's output back to a named column —
           // the persisted run otherwise has no way to tell which step produced "the" result.
-          sequence_template: sequence.map(b => ({ instrument: b.instrument, method: b.method, returnVar: b.returnVar || null }))
+          sequence_template: sequence.map(b => ({
+            instrument: b.instrument,
+            method: b.method,
+            returnVar: b.returnVar || null,
+            // Which field of a structured result each of those names points at, so Data History
+            // can export the field itself instead of the whole result object.
+            returnBindings: b.returnBindings || null
+          }))
         },
         prep: resolvedPrep,
         sequence: fullSequence.map(s => ({

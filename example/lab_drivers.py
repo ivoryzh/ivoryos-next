@@ -20,6 +20,7 @@ couple of seconds.
 import math
 import random
 import time
+from dataclasses import dataclass
 from typing import Literal
 
 # One simulated minute costs this many real seconds. A 120 min hold -> ~2.4 s.
@@ -406,11 +407,36 @@ class UVVisSpectrometer:
         return round(max(0.0, self.MOLAR_ABSORPTIVITY * conc_m * self.path_length_cm * band), 4)
 
 
+@dataclass
+class PeakComposition:
+    """What the peak table adds up to, as percentages of the limiting substrate."""
+
+    yield_percent: float
+    substrate_remaining_percent: float
+    impurities_percent: float
+    purity_percent: float
+
+
+@dataclass
+class HPLCReport:
+    """A realistically-shaped analysis result: several numbers worth optimizing, nested one
+    level deep, mixed in with run metadata that is not a number at all. Which of these is
+    "the" objective is the experimenter's call, which is why each field is individually
+    addressable as a return pointer in the Designer rather than being one opaque result."""
+
+    composition: PeakComposition
+    catalyst_mol_percent: float
+    boronic_acid_equivalents: float
+    reaction_time_min: float
+    method: str
+
+
 class HPLC:
     """Reverse-phase HPLC-UV with an autosampler, calibrated against an internal standard."""
 
     def __init__(self):
         self.injections = 0
+        self.last_method = "fast_gradient"
 
     def inject(
         self,
@@ -423,6 +449,7 @@ class HPLC:
         print(f"[HPLC] Injecting {sample_volume_ul:.1f} uL, {method} ({runtime_min:.0f} min)")
         time.sleep(runtime_min * SIM_MINUTE_SECONDS)
         self.injections += 1
+        self.last_method = method
         return {"injection": self.injections, "method": method, "runtime_min": runtime_min}
 
     def measure_yield(self) -> float:
@@ -434,21 +461,24 @@ class HPLC:
         print(f"[HPLC] Assay yield {value:.2f} %")
         return value
 
-    def analyze(self) -> dict:
+    def analyze(self) -> HPLCReport:
         """Full peak table: product yield, unreacted substrate and the impurity balance."""
         time.sleep(0.5)
         product = _reaction.product_yield_percent()
         remaining = _reaction.substrate_remaining_percent()
         impurities = max(0.0, 100.0 - product - remaining)
-        return {
-            "yield_percent": round(product, 2),
-            "substrate_remaining_percent": round(remaining, 2),
-            "impurities_percent": round(impurities, 2),
-            "purity_percent": round(100.0 * product / max(product + impurities, 1e-6), 2),
-            "catalyst_mol_percent": round(_reaction.catalyst_loading_mol_percent(), 3),
-            "boronic_acid_equivalents": round(_reaction.boronic_acid_equivalents(), 2),
-            "reaction_time_min": _reaction.hold_minutes,
-        }
+        return HPLCReport(
+            composition=PeakComposition(
+                yield_percent=round(product, 2),
+                substrate_remaining_percent=round(remaining, 2),
+                impurities_percent=round(impurities, 2),
+                purity_percent=round(100.0 * product / max(product + impurities, 1e-6), 2),
+            ),
+            catalyst_mol_percent=round(_reaction.catalyst_loading_mol_percent(), 3),
+            boronic_acid_equivalents=round(_reaction.boronic_acid_equivalents(), 2),
+            reaction_time_min=_reaction.hold_minutes,
+            method=self.last_method,
+        )
 
 
 class ReactionVialWasher:

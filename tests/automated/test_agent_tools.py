@@ -437,3 +437,94 @@ async def test_a_run_request_is_refused_when_values_are_missing(api_workflows_di
         run = (await ac.get(f"/api/queue/runs/{accepted.json()['run_id']}")).json()
         assert run["steps"][0]["parameters"]["value"] == "A1"
         assert run["parameters"]["agent_variables"] == {"sample_id": "A1"}
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_with_errors_is_refused_and_the_errors_come_back(api_workflows_dir):
+    """The agent has everything it needs to fix these, so it is sent back rather than filed —
+    a scientist's review queue is not where you discover a draft was never going to run."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        broken = {"name": "Broken", "prep": [], "cleanup": [], "script": [
+            {"instrument": "dummy", "action": "no_such_method", "args": {}},
+        ]}
+        resp = await ac.post("/api/agent/propose", json={"name": "Broken", "body": broken})
+        assert resp.status_code == 422
+        payload = resp.json()
+        assert payload["filed"] is False
+        assert any("no method 'no_such_method'" in i["message"] for i in payload["issues"])
+        assert "allow_invalid" in payload["hint"]
+
+        # Nothing reached the review queue.
+        pending = (await ac.get("/api/agent/proposals")).json()["proposals"]
+        assert all(p["name"] != "Broken" for p in pending)
+
+        # The escape hatch still exists, for an agent that has tried and wants a person to look.
+        forced = await ac.post("/api/agent/propose", json={
+            "name": "Broken", "body": broken, "allow_invalid": True,
+            "summary": "Could not find a method for the centrifugation step.",
+        })
+        assert forced.status_code == 200
+        assert forced.json()["status"] == "pending"
+        assert "unresolved errors" in forced.json()["note"]
+
+
+@pytest.mark.asyncio
+async def test_warnings_alone_do_not_block_a_proposal(api_workflows_dir):
+    """An unresolved #variable is how a reusable workflow is meant to look — the optimizer or
+    the spreadsheet fills it. Refusing those would make the agent unable to write one."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post("/api/agent/propose", json={
+            "name": "Reusable", "body": {"name": "Reusable", "prep": [], "cleanup": [], "script": [
+                {"instrument": "dummy", "action": "echo_method", "args": {"value": "#sample_id"}},
+            ]},
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["validation"]["ok"] is True
+        assert any(i["severity"] == "warning" for i in resp.json()["issues"])
+
+
+def test_a_linked_workflow_is_checked_for_the_arguments_it_needs():
+    """Decomposing a protocol into small reusable workflows only reduces mistakes if calling one
+    is checked like calling a method. Its open '#variables' are its parameters — the expander
+    substitutes them from the calling step's args by name."""
+    charge = _body([
+        _step("pump", "dispense", {"volume_ml": "#volume_ml"}),
+        _step("reactor", "set_temperature", {"setpoint_c": "#temperature"}),
+    ])
+    resolve = lambda name: charge if name == "Charge vial" else None
+
+    # Called with nothing: both inputs are reported, by name.
+    caller = _body([_step("Library Workflows", "Charge vial", {})])
+    issues = validate_body(caller, _schema(), ["Charge vial"], resolve)
+    messages = [i["message"] for i in _errors(issues)]
+    assert any("needs a value for 'volume_ml'" in m for m in messages)
+    assert any("needs a value for 'temperature'" in m for m in messages)
+
+    # Called with both: clean.
+    caller = _body([_step("Library Workflows", "Charge vial",
+                          {"volume_ml": 1.5, "temperature": 65})])
+    assert validate_body(caller, _schema(), ["Charge vial"], resolve) == []
+
+    # One from an earlier step's output is fine too — scope carries into the call.
+    caller = _body([
+        _step("hplc", "analyze", {}, **{"return": "temperature",
+              "return_bindings": [{"path": "composition.yield_percent", "var": "temperature"}]}),
+        _step("Library Workflows", "Charge vial", {"volume_ml": 1.5}),
+    ])
+    assert validate_body(caller, _schema(), ["Charge vial"], resolve) == []
+
+    # An argument the sub-workflow does not take is a warning, not an error — harmless, but
+    # almost always a sign the caller meant a different name.
+    caller = _body([_step("Library Workflows", "Charge vial",
+                          {"volume_ml": 1.5, "temperature": 65, "sovlent": "dioxane"})])
+    issues = validate_body(caller, _schema(), ["Charge vial"], resolve)
+    assert _errors(issues) == []
+    assert any("does not use: sovlent" in i["message"] for i in issues)
+
+
+def test_link_arguments_are_only_checked_when_the_body_can_be_read():
+    """Without a resolver the old behaviour stands — existence only. The Designer's own
+    client-side checks do not have the sub-workflow bodies to hand, so this has to degrade
+    rather than invent errors."""
+    caller = _body([_step("Library Workflows", "Charge vial", {})])
+    assert validate_body(caller, _schema(), ["Charge vial"]) == []

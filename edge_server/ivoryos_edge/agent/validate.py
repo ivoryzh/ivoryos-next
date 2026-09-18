@@ -172,11 +172,12 @@ def _check_returns(where, entry, block, issues, instrument, method):
             ))
 
 
-def validate_body(body, schema, known_workflows=()):
+def validate_body(body, schema, known_workflows=(), resolve_workflow=None):
     """Return a list of issues, most severe first. An empty list means the body is runnable.
 
     `schema` is the live instrument schema (`app.state.instrument_schemas`). `known_workflows`
-    names the saved workflows a `Library Workflows` step may call.
+    names the saved workflows a `Library Workflows` step may call, and `resolve_workflow` reads
+    one's body by name — supply it and a link's arguments are checked too, not just its target.
     """
     issues = []
     body = body or {}
@@ -273,6 +274,34 @@ def validate_body(body, schema, known_workflows=()):
                         f"There is no saved workflow called '{method}'.",
                         hint="Available: " + ", ".join(sorted(known_workflows)),
                     ))
+                elif resolve_workflow is not None:
+                    # A linked workflow is a call, and its open '#variables' are its arguments:
+                    # the expander substitutes them from this step's args by name. Checking only
+                    # that the target exists would leave the one error decomposition actually
+                    # introduces — calling a sub-protocol without telling it the volume — to be
+                    # discovered at run time instead of here.
+                    try:
+                        target = resolve_workflow(method)
+                    except Exception:
+                        target = None
+                    if target:
+                        needed = unbound_variables(target)
+                        supplied = set(params) | known_vars
+                        for var in needed:
+                            if var not in supplied:
+                                issues.append(_issue(
+                                    "error", where,
+                                    f"'{method}' needs a value for '{var}', which this step does not pass.",
+                                    hint=(f"Add \"{var}\": <value> to this step's args, or '#{var}' "
+                                          f"to take it from an earlier step."),
+                                ))
+                        extra = [k for k in params if k not in needed and not k.startswith("_")]
+                        if extra and needed:
+                            issues.append(_issue(
+                                "warning", where,
+                                f"'{method}' does not use: " + ", ".join(sorted(extra)) + ".",
+                                hint="Its inputs are: " + ", ".join(needed) + ".",
+                            ))
                 known_vars.update(_flatten_return_names(block))
                 continue
 

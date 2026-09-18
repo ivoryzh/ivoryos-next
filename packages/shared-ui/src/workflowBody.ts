@@ -11,6 +11,7 @@
  */
 
 import type { SequenceBlock } from './WorkflowEditor';
+import { flowControlSchema } from './flowControl';
 
 export const LIBRARY_INSTRUMENT = 'Library Workflows';
 
@@ -44,7 +45,10 @@ export function newBlockId(): string {
 
 function lookupSchema(instruments: any, instrument: string, method: string): any {
   const found = instruments?.[instrument]?.[method];
-  return found || { parameters: {} };
+  if (found) return found;
+  // Flow control has no entry in the instrument schema — it is the designer's own vocabulary,
+  // so without this fallback a rebuilt If/User_Input block renders with no fields to edit.
+  return flowControlSchema(instrument, method) || { parameters: {} };
 }
 
 /** Saved JSON block -> editor block. Tolerates both the `action`/`args` and `method`/`params` shapes. */

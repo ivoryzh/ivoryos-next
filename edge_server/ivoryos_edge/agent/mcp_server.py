@@ -126,7 +126,7 @@ def validate_workflow(body: dict) -> dict:
 
 
 @server.tool()
-def propose_workflow(name: str, body: dict, summary: str) -> dict:
+def propose_workflow(name: str, body: dict, summary: str, allow_invalid: bool = False) -> dict:
     """Put a workflow in front of the scientist for review. This does not save it.
 
     It appears in IvoryOS as a pending proposal, shown as a diff against whatever is currently
@@ -138,10 +138,16 @@ def propose_workflow(name: str, body: dict, summary: str) -> dict:
     {instrument, action, args: {...}}; prep runs once at the start, script is the part repeated
     per sample or per optimization trial, cleanup runs once at the end. To save a result, add
     "return": "var_name" and "return_bindings": [{"path": "<a save_from value>", "var": "var_name"}].
+
+    A draft with errors is REFUSED, and the errors come back to you — fix them and call this
+    again rather than handing a person something that cannot run. Only if you have genuinely
+    tried and cannot resolve them, pass allow_invalid=True to file it anyway, and say in the
+    summary what defeated you.
     """
-    return _post("/api/agent/propose", {
-        "name": name, "body": body, "summary": summary, "source": SOURCE,
-    })
+    payload = {"name": name, "body": body, "summary": summary, "source": SOURCE}
+    if allow_invalid:
+        payload["allow_invalid"] = True
+    return _post("/api/agent/propose", payload)
 
 
 @server.tool()

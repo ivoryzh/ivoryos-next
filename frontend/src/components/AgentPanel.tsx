@@ -49,7 +49,10 @@ type Props = {
   cleanupSequence: SequenceBlock[];
   workflowName: string;
   /** Replace the canvas with an accepted proposal. */
-  onApply: (body: { prep: SequenceBlock[]; script: SequenceBlock[]; cleanup: SequenceBlock[]; name?: string }) => void;
+  onApply: (body: {
+    prep: SequenceBlock[]; script: SequenceBlock[]; cleanup: SequenceBlock[];
+    name?: string; description?: string;
+  }) => void;
   instruments: any;
   onClose: () => void;
 };
@@ -189,6 +192,7 @@ export default function AgentPanel({
       script: toSequenceBlocks(body.script || body.sequence, instruments),
       cleanup: toSequenceBlocks(body.cleanup, instruments),
       name: body.name || proposal.name,
+      description: body.description,
     });
     // Recorded as accepted but not saved: the scientist edits on the canvas and saves when
     // they are satisfied, the same way they would with anything else they built.
@@ -320,7 +324,9 @@ export default function AgentPanel({
   const providerInfo = providers.find(p => p.name === settings?.provider);
 
   return (
-    <div className="w-[26rem] shrink-0 border-l border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/20 flex flex-col h-full">
+    // Docked on the left, between the app sidebar and the module toolbox. The right edge belongs
+    // to the Prep & Cleanup drawer, and a second right-hand column fought it for the same space.
+    <div className="w-[26rem] shrink-0 border-r border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/20 flex flex-col h-full">
       <div className="h-16 shrink-0 px-4 flex items-center justify-between border-b border-gray-200 dark:border-white/10 bg-white/80 dark:bg-black/20">
         <div className="flex items-center gap-2 min-w-0">
           <Sparkles className="w-4 h-4 text-purple-500 shrink-0" />

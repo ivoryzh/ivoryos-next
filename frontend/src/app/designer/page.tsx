@@ -671,6 +671,36 @@ export default function DesignerPage() {
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
+      {agentOpen && (
+        <AgentPanel
+          prepSequence={prepSequence}
+          sequence={sequence}
+          cleanupSequence={cleanupSequence}
+          workflowName={currentWorkflowName}
+          instruments={instruments}
+          onApply={(body) => {
+            // Replaces the canvas wholesale, which is why it is only reachable from an explicit
+            // accept and why the diff is offered first: the proposal is always a complete body.
+            setPrepSequence(body.prep);
+            setSequence(body.script);
+            setCleanupSequence(body.cleanup);
+            // The steps persist themselves on change, but the name and description do not —
+            // they are only written when a workflow is saved or loaded from the Library. Doing
+            // the same here keeps them through a reload, rather than leaving the canvas full
+            // and the header blank.
+            if (body.name && !currentWorkflowName) {
+              setCurrentWorkflowName(body.name);
+              localStorage.setItem('ivoryos_editing_workflow', body.name);
+            }
+            if (body.description && !currentWorkflowDescription) {
+              setCurrentWorkflowDescription(body.description);
+              localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
+            }
+          }}
+          onClose={() => { setAgentOpen(false); localStorage.setItem('ivoryos_agent_panel', 'false'); }}
+        />
+      )}
+
       {/* Main Designer Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <WorkflowEditor
@@ -878,24 +908,6 @@ export default function DesignerPage() {
         />
       </div>
 
-      {agentOpen && (
-        <AgentPanel
-          prepSequence={prepSequence}
-          sequence={sequence}
-          cleanupSequence={cleanupSequence}
-          workflowName={currentWorkflowName}
-          instruments={instruments}
-          onApply={(body) => {
-            // Replaces the canvas wholesale, which is why it is only reachable from an explicit
-            // accept and why the diff is offered first: the proposal is always a complete body.
-            setPrepSequence(body.prep);
-            setSequence(body.script);
-            setCleanupSequence(body.cleanup);
-            if (body.name && !currentWorkflowName) setCurrentWorkflowName(body.name);
-          }}
-          onClose={() => { setAgentOpen(false); localStorage.setItem('ivoryos_agent_panel', 'false'); }}
-        />
-      )}
     </div>
     </div>
   );

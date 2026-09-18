@@ -142,3 +142,21 @@ def api_workflows_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr("ivoryos_edge.server.WORKFLOWS_DIR", str(d))
     return str(d)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def clean_agent_proposals():
+    """Empty the agent review queue between tests.
+
+    `isolated_workflow_store` isolates the workflow store, but proposals live in the main
+    application database, which is shared and persists across runs. Without this, a test that
+    asserts "nothing is waiting for review" passes or fails depending on what an earlier test —
+    or an earlier *run* — happened to leave behind.
+    """
+    from sqlalchemy import delete
+    from ivoryos_edge.models import AgentProposal, async_session
+
+    async with async_session() as session:
+        await session.execute(delete(AgentProposal))
+        await session.commit()
+    yield

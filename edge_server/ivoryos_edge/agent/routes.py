@@ -67,6 +67,16 @@ def _clip(text, limit):
     return text[:limit]
 
 
+def _resolver(request):
+    """Reads a saved workflow body by name, so validation can check a link's arguments."""
+    def resolve(name):
+        try:
+            return wf.read_head(_workflow_dir(request), name)
+        except Exception:
+            return None
+    return resolve
+
+
 @router.get("/deck")
 def agent_deck(request: Request, instrument: str = None):
     schema = _schema(request)
@@ -128,7 +138,7 @@ async def agent_validate(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
     body = data.get("body", data)
-    issues = validate_body(body, _schema(request), _known_workflows(request))
+    issues = validate_body(body, _schema(request), _known_workflows(request), _resolver(request))
     return {
         "ok": not any(i["severity"] == "error" for i in issues),
         "summary": summarise(issues),
@@ -159,7 +169,24 @@ async def agent_propose(request: Request):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-    issues = validate_body(body, _schema(request), _known_workflows(request))
+    issues = validate_body(body, _schema(request), _known_workflows(request), _resolver(request))
+    errors = [i for i in issues if i["severity"] == "error"]
+
+    # Refuse rather than file something broken. The agent has everything it needs to fix it —
+    # each error names the field and lists the legal alternatives — and a scientist's review
+    # queue is not the place to discover that a draft was never going to run. The escape hatch
+    # exists for the one honest case: the agent has tried and cannot get there, and wants a
+    # person to look at how far it got. That mirrors the panel, which files an imperfect draft
+    # only after exhausting its own retries.
+    if errors and not data.get("allow_invalid"):
+        return JSONResponse(status_code=422, content={
+            "error": summarise(issues),
+            "issues": issues,
+            "hint": ("Fix these and propose again. If you have tried and cannot resolve them, "
+                     "re-send with allow_invalid: true to put the draft in front of a person "
+                     "anyway, and say in the summary what you could not work out."),
+            "filed": False,
+        })
 
     try:
         current = wf.read_head(_workflow_dir(request), name)
@@ -188,6 +215,9 @@ async def agent_propose(request: Request):
     }
     result["note"] = (
         "Filed for review. It is not saved and will not run until a person accepts it."
+        + ("" if not errors else
+           " Filed with unresolved errors at your request — tell the scientist what you could"
+           " not work out.")
     )
     return result
 
@@ -310,7 +340,7 @@ async def agent_accept(proposal_id: int, request: Request):
             # workflow and a person reading it — an instrument goes offline, a driver is
             # updated — and the issues stored on the proposal are a record of what the agent
             # was told, not a current verdict.
-            issues = validate_body(row.payload, _schema(request), _known_workflows(request))
+            issues = validate_body(row.payload, _schema(request), _known_workflows(request), _resolver(request))
             blocking = [i for i in issues if i["severity"] == "error"]
             if blocking and not data.get("force"):
                 return JSONResponse(status_code=400, content={

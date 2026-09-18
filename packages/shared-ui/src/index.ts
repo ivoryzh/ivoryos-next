@@ -6,6 +6,7 @@ export { generatePythonCode } from './generatePythonCode';
 export { buildRunName } from './runNaming';
 export { workflowSignature } from './workflowSignature';
 export { readNamedOutput, resolveResultPath } from './returnValues';
+export { FLOW_CONTROL_SCHEMAS, flowControlSchema, isFlowControlInstrument } from './flowControl';
 export type { ReturnBindingRef, OutputTemplateStep } from './returnValues';
 export { WorkflowMap } from './WorkflowMap';
 export { WorkflowPeek } from './WorkflowPeek';

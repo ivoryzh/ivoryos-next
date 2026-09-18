@@ -18,12 +18,13 @@ so it is worth being blunt about which is which:
 Nothing an agent posts reaches hardware, or even the workflow library, without an accept.
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 
 from ivoryos_edge import workflows as wf
@@ -526,28 +527,15 @@ async def agent_models(request: Request):
     return {"provider": provider.name, "models": models, "current": provider.model}
 
 
-@router.post("/chat")
-async def agent_chat(request: Request):
-    """Translate prose into a workflow and file it for review.
-
-    One call does the whole loop — generate, validate against the live deck, correct — and
-    always ends at a proposal, including when the model could not get it fully valid: the
-    scientist is better served by a draft with its problems named than by a failure message.
-    """
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-
+async def _run_translation(request, data, on_progress=None):
+    """Run the loop and file the result. Shared by /chat and /chat/stream so the two cannot
+    drift into producing different proposals for the same request."""
     message = (data.get("message") or "").strip()
     if not message:
-        return JSONResponse(status_code=400, content={"error": "Say what the protocol should do."})
+        raise ValueError("Say what the protocol should do.")
 
     settings = _read_settings(request)
-    try:
-        provider = build_provider(settings)
-    except ProviderError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+    provider = build_provider(settings)
 
     existing_name = (data.get("workflow_name") or "").strip() or None
     existing_body = data.get("workflow_body")
@@ -557,26 +545,20 @@ async def agent_chat(request: Request):
         except Exception:
             existing_body = None
 
-    known = _known_workflows(request)
-    try:
-        result, transcript = await translate(
-            provider,
-            _schema(request),
-            message,
-            history=data.get("history") or [],
-            workflows=known,
-            existing_name=existing_name,
-            existing_body=existing_body,
-        )
-    except ProviderError as e:
-        return JSONResponse(status_code=503, content={"error": str(e)})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"The model call failed: {e}"})
+    result, transcript = await translate(
+        provider,
+        _schema(request),
+        message,
+        history=data.get("history") or [],
+        workflows=_known_workflows(request),
+        existing_name=existing_name,
+        existing_body=existing_body,
+        on_progress=on_progress,
+        resolve_workflow=_resolver(request),
+    )
 
     body = result["body"]
     name = existing_name or (body.get("name") or "Untitled protocol")
-    # `model` is what wrote it; `source` also says which surface asked, since the MCP server
-    # files proposals into the same queue and the reviewer should be able to tell them apart.
     model_id = f"{provider.name}/{provider.model}"
     source = f"panel:{model_id}"
 
@@ -603,7 +585,79 @@ async def agent_chat(request: Request):
         "questions": result["questions"],
         "attempts": result["attempts"],
         "model": model_id,
-        # Only on failure, and only the last reply: enough to see what the model actually said
-        # when it could not produce something valid, without dumping every attempt into the UI.
         "raw": None if result["ok"] else (transcript[-1]["raw"][:4000] if transcript else None),
     }
+
+
+@router.post("/chat")
+async def agent_chat(request: Request):
+    """Translate prose into a workflow and file it for review.
+
+    One call does the whole loop — generate, validate against the live deck, correct — and
+    always ends at a proposal, including when the model could not get it fully valid: the
+    scientist is better served by a draft with its problems named than by a failure message.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    try:
+        return await _run_translation(request, data)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except ProviderError as e:
+        return JSONResponse(status_code=503, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"The model call failed: {e}"})
+
+
+@router.post("/chat/stream")
+async def agent_chat_stream(request: Request):
+    """The same translation, reported as it happens.
+
+    A local model takes tens of seconds per attempt and the loop may run three, so a spinner
+    tells the scientist nothing about whether it is going well. These events carry the part
+    worth watching: how many steps it wrote, what failed validation, and that it is fixing it.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    async def event_stream():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def on_progress(event):
+            await queue.put(event)
+
+        async def run():
+            try:
+                result = await _run_translation(request, data, on_progress=on_progress)
+                await queue.put({"phase": "filed", **result})
+            except ValueError as e:
+                await queue.put({"phase": "error", "error": str(e)})
+            except ProviderError as e:
+                await queue.put({"phase": "error", "error": str(e)})
+            except Exception as e:
+                await queue.put({"phase": "error", "error": f"The model call failed: {e}"})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        # Without this an intermediate proxy buffers the whole stream and the progress arrives
+        # all at once at the end, which is the same as not having it.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -123,10 +123,39 @@ what is needed to choose a method and call it correctly, drop what is only neede
 form. The summary view gives one line plus argument names per method; `describe_method` gives
 the full shape for the one method the model settled on.
 
+## Watching it work
+
+`POST /api/agent/chat/stream` is the same translation reported as it happens, as SSE. The panel
+uses it; `/api/agent/chat` stays for anything that just wants the result. A real exchange, with
+a model that got the first draft wrong:
+
+```
+  0.0s  reading_deck   {'instruments': 7}
+  0.0s  drafting       {'attempt': 1, 'max_attempts': 3}
+  3.0s  validating     {'attempt': 1, 'steps': 9, 'name': 'Suzuki coupling, 65 C'}
+  3.0s  found_problems - script[3]: 'setpoint_c' expects a number (float) but got '65 C'.
+                       - script[4]: 'reactor' has no method 'warm_up'.
+  3.0s  drafting       {'attempt': 2, 'max_attempts': 3}
+  6.0s  validating     {'attempt': 2, 'steps': 8}
+  6.0s  valid          {'attempt': 2, 'steps': 8}
+  6.0s  filed          proposal #10, ok=True, attempts=2
+```
+
+What is streamed is the loop, not the tokens. The interesting part of a translation is the
+check-and-correct cycle — "wrote 9 steps, two were wrong, fixing" tells a waiting scientist both
+that it is working and roughly how well, which a token stream does not. Token streaming remains
+possible (the provider interface would need a streaming `complete`) but buys much less.
+
+### Trying it without a model
+
+There is no fake provider in the codebase. To exercise the panel on a machine with no Ollama,
+run something that speaks `/api/tags` and `/api/chat` on port 11434 and point the settings at
+it; returning a deliberately wrong first draft and a corrected second is what makes the retry
+cycle visible.
+
 ## Known limits
 
-- **No streaming.** A reply arrives when the loop finishes, which on a local model is tens of
-  seconds. The panel says what it is doing but shows no partial output.
+- **No token streaming.** Phase progress is streamed (above), but not partial text.
 - **No tool calling from the panel.** The loop asks for one JSON object and validates it, which
   is more reliable across small local models than a tool-calling protocol they support poorly.
   A provider that does support tools can be added without changing the contract.

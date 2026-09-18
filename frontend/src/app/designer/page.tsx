@@ -5,6 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree, Sparkles } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import AgentPanel from '@/components/AgentPanel';
+import AgentTab from '@/components/AgentTab';
 import {
   WorkflowEditor,
   SequenceBlock,
@@ -670,6 +671,15 @@ export default function DesignerPage() {
     <div className={`flex h-full ${agentOpen ? 'min-w-[1496px]' : 'min-w-[1080px]'}`}>
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
+
+      <AgentTab
+        open={agentOpen}
+        onToggle={() => {
+          const next = !agentOpen;
+          setAgentOpen(next);
+          localStorage.setItem('ivoryos_agent_panel', String(next));
+        }}
+      />
 
       {agentOpen && (
         <AgentPanel

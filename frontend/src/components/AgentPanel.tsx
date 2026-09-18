@@ -69,6 +69,10 @@ export default function AgentPanel({
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  // What the loop is doing right now, newest last. A local model spends tens of seconds
+  // per attempt and may take three, so the check-and-correct cycle is shown as it happens
+  // rather than behind a spinner that says nothing about whether it is going well.
+  const [progress, setProgress] = useState<{ text: string; detail?: string; bad?: boolean }[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<any>(null);
   const [providers, setProviders] = useState<any[]>([]);
@@ -139,11 +143,34 @@ export default function AgentPanel({
     cleanup: toSavedBlocks(cleanupSequence),
   });
 
+  const describePhase = (e: any): { text: string; detail?: string; bad?: boolean } | null => {
+    switch (e.phase) {
+      case 'reading_deck':
+        return { text: e.editing ? `Reading the deck and “${e.editing}”` : `Reading the deck (${e.instruments} instruments)` };
+      case 'drafting':
+        return { text: e.attempt === 1 ? 'Writing the steps' : `Rewriting (attempt ${e.attempt} of ${e.max_attempts})` };
+      case 'validating':
+        return { text: `Checking ${e.steps} steps against the deck` };
+      case 'valid':
+        return { text: 'Everything checks out' };
+      case 'found_problems':
+        return { text: `Found ${e.errors.length} problem${e.errors.length === 1 ? '' : 's'} — fixing`,
+                 detail: e.errors.join('\n'), bad: true };
+      case 'unreadable':
+        return { text: 'The reply was not usable JSON — asking again', bad: true };
+      case 'gave_up':
+        return { text: `Still ${e.remaining} unresolved — handing it to you anyway`, bad: true };
+      default:
+        return null;
+    }
+  };
+
   const send = async () => {
     const message = draft.trim();
     if (!message || busy) return;
     setDraft('');
     setBusy(true);
+    setProgress([]);
 
     const history = turns
       .filter(t => t.role === 'user' || (t.role === 'assistant' && t.content))
@@ -153,35 +180,61 @@ export default function AgentPanel({
     setTurns(prev => [...prev, { role: 'user', content: message }]);
 
     const hasCanvas = prepSequence.length + sequence.length + cleanupSequence.length > 0;
+    const finish = (data: any) => {
+      setTurns(prev => [...prev, {
+        role: 'assistant',
+        content: data.proposal?.summary || '(no summary)',
+        proposal: data.proposal,
+        questions: data.questions || [],
+        ok: data.ok,
+        raw: data.raw,
+      }]);
+    };
+
     try {
-      const res = await fetch(`${API_BASE}/api/agent/chat`, {
+      const res = await fetch(`${API_BASE}/api/agent/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message,
           history,
-          // Sending the canvas is what turns "add a wash step" into an edit rather than a
-          // fresh protocol that throws away everything already on screen.
           ...(hasCanvas ? { workflow_name: workflowName || undefined, workflow_body: currentBody() } : {}),
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
         setTurns(prev => [...prev, { role: 'error', content: data.error || `Request failed (${res.status}).` }]);
       } else {
-        setTurns(prev => [...prev, {
-          role: 'assistant',
-          content: data.proposal?.summary || '(no summary)',
-          proposal: data.proposal,
-          questions: data.questions || [],
-          ok: data.ok,
-          raw: data.raw,
-        }]);
+        // Plain SSE framing: events are separated by a blank line, and a chunk can split one,
+        // so the tail is carried over rather than parsed as a truncated event.
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+          for (const part of parts) {
+            const line = part.split('\n').find(l => l.startsWith('data: '));
+            if (!line) continue;
+            let event: any;
+            try { event = JSON.parse(line.slice(6)); } catch { continue; }
+            if (event.phase === 'filed') finish(event);
+            else if (event.phase === 'error') setTurns(prev => [...prev, { role: 'error', content: event.error }]);
+            else {
+              const described = describePhase(event);
+              if (described) setProgress(prev => [...prev, described]);
+            }
+          }
+        }
       }
     } catch (e: any) {
       setTurns(prev => [...prev, { role: 'error', content: e.message }]);
     } finally {
       setBusy(false);
+      setProgress([]);
     }
   };
 
@@ -493,9 +546,32 @@ export default function AgentPanel({
         ))}
 
         {busy && (
-          <div className="flex items-center gap-2 text-xs text-gray-400">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            drafting and checking it against the deck…
+          <div className="rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-[#141414] p-3 space-y-1.5">
+            {progress.map((step, i) => {
+              const current = i === progress.length - 1;
+              return (
+                <div key={i} className="flex items-start gap-2 text-[11px]">
+                  {current ? (
+                    <Loader2 className="w-3 h-3 mt-0.5 shrink-0 animate-spin text-purple-500" />
+                  ) : (
+                    <Check className="w-3 h-3 mt-0.5 shrink-0 text-green-500" />
+                  )}
+                  <div className="min-w-0">
+                    <div className={step.bad ? 'text-amber-700 dark:text-amber-400' : 'text-gray-600 dark:text-gray-300'}>
+                      {step.text}
+                    </div>
+                    {step.detail && (
+                      <pre className="mt-0.5 whitespace-pre-wrap text-[10px] text-gray-400 font-mono">{step.detail}</pre>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {progress.length === 0 && (
+              <div className="flex items-center gap-2 text-[11px] text-gray-400">
+                <Loader2 className="w-3 h-3 animate-spin" /> starting…
+              </div>
+            )}
           </div>
         )}
       </div>

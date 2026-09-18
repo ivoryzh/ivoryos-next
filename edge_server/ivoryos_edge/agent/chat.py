@@ -90,13 +90,22 @@ def _retry_prompt(issues):
 
 
 async def translate(provider, schema, user_message, history=None, workflows=(),
-                    existing_name=None, existing_body=None, max_attempts=MAX_ATTEMPTS):
+                    existing_name=None, existing_body=None, max_attempts=MAX_ATTEMPTS,
+                    on_progress=None, resolve_workflow=None):
     """Run the translate-validate-correct loop.
 
     Returns (result, transcript) where result is {summary, body, questions, issues, ok,
     attempts} and transcript is the raw exchange, kept so a failure can be shown to the
     scientist rather than swallowed.
+
+    `on_progress` is awaited with a dict at each phase. The interesting part of this loop is not
+    the tokens, it is the check-and-correct cycle — "wrote 9 steps, two were wrong, fixing" is
+    what tells a waiting scientist the thing is working and roughly how well. A local model
+    takes tens of seconds per attempt, which is far too long to show nothing.
     """
+    async def report(**event):
+        if on_progress is not None:
+            await on_progress(event)
     messages = []
     context = [_deck_prompt(schema, workflows)]
     if existing_body:
@@ -115,9 +124,13 @@ async def translate(provider, schema, user_message, history=None, workflows=(),
 
     messages.append({"role": "user", "content": user_message})
 
+    await report(phase="reading_deck", instruments=len(schema),
+                 editing=existing_name or None)
+
     transcript = []
     last_error = None
     for attempt in range(1, max_attempts + 1):
+        await report(phase="drafting", attempt=attempt, max_attempts=max_attempts)
         raw = await provider.complete(SYSTEM_PROMPT, messages, json_mode=True)
         transcript.append({"attempt": attempt, "raw": raw})
 
@@ -125,6 +138,7 @@ async def translate(provider, schema, user_message, history=None, workflows=(),
             parsed = extract_json_object(raw)
         except ValueError as e:
             last_error = str(e)
+            await report(phase="unreadable", attempt=attempt, detail=str(e))
             messages.append({"role": "assistant", "content": raw[:4000]})
             messages.append({
                 "role": "user",
@@ -135,6 +149,7 @@ async def translate(provider, schema, user_message, history=None, workflows=(),
         body = parsed.get("body")
         if not isinstance(body, dict):
             last_error = "The reply had no 'body' object."
+            await report(phase="unreadable", attempt=attempt, detail=last_error)
             messages.append({"role": "assistant", "content": raw[:4000]})
             messages.append({
                 "role": "user",
@@ -146,7 +161,11 @@ async def translate(provider, schema, user_message, history=None, workflows=(),
         for phase in ("prep", "script", "cleanup"):
             body.setdefault(phase, [])
 
-        issues = validate_body(body, schema, workflows)
+        step_count = sum(len(body.get(phase) or []) for phase in ("prep", "script", "cleanup"))
+        await report(phase="validating", attempt=attempt, steps=step_count,
+                     name=body.get("name"))
+
+        issues = validate_body(body, schema, workflows, resolve_workflow)
         errors = [i for i in issues if i["severity"] == "error"]
         result = {
             "summary": str(parsed.get("summary") or "").strip(),
@@ -158,9 +177,14 @@ async def translate(provider, schema, user_message, history=None, workflows=(),
             "attempts": attempt,
         }
         if not errors:
+            await report(phase="valid", attempt=attempt, steps=step_count)
             return result, transcript
 
+        await report(phase="found_problems", attempt=attempt,
+                     errors=[f"{i['where']}: {i['message']}" for i in errors])
+
         if attempt == max_attempts:
+            await report(phase="gave_up", attempt=attempt, remaining=len(errors))
             # Out of attempts, but the draft still goes back: a workflow with two bad arguments
             # and the errors named against it is a far better starting point for the scientist
             # than an apology, and the Designer shows the issues inline.

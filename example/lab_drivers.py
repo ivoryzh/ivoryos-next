@@ -254,6 +254,25 @@ class HeaterStirrer:
         """Internal vial temperature in C, as read by the probe."""
         return _reaction.temperature_c + _noise.gauss(0.0, 0.15)
 
+    # Real drivers routinely expose a setting as a property rather than a method, so the demo
+    # deck has one too -- the designer should offer `reactor.stir_rate` as a readable step and
+    # `stir_rate_(setter)` as a writable one, exactly like a get_/set_ pair.
+    @property
+    def stir_rate(self) -> int:
+        """Current stir rate in rpm."""
+        return _reaction.stir_rpm
+
+    @stir_rate.setter
+    def stir_rate(self, rpm: int):
+        print(f"[Reactor] Stirring at {rpm} rpm")
+        _reaction.stir_rpm = rpm
+
+    @property
+    def temperature(self) -> float:
+        """Internal vial temperature in C. Read-only: use set_temperature so the vial ramps
+        at a believable rate instead of jumping."""
+        return self.read_temperature()
+
     def cool_down(self, target_c: float = 25.0) -> dict:
         """Quench the heat and let the vial cool before sampling."""
         ramp_min = abs(_reaction.temperature_c - target_c) / 3.0

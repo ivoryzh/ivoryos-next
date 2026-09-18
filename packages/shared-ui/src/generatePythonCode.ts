@@ -40,6 +40,10 @@ export function generatePythonCode(
   const formatValue = (v: any): string => {
     if (typeof v === 'string' && v.startsWith('#')) return v.substring(1).trim(); // bare reference to a variable set earlier in the script
     if (typeof v === 'string') return `"${v}"`;
+    // Python's literals, not JavaScript's — a bool param was rendering as `true`/`false`, which
+    // is a NameError when the generated script is actually run.
+    if (typeof v === 'boolean') return v ? 'True' : 'False';
+    if (v === null || v === undefined) return 'None';
     if (typeof v === 'object' && v !== null) {
       const dictEntries = Object.entries(v).map(([subK, subV]) => `"${subK}": ${formatValue(subV)}`);
       return `{${dictEntries.join(', ')}}`;
@@ -106,28 +110,44 @@ export function generatePythonCode(
         return;
       }
 
-      const params = Object.entries(block.params).map(([k, v]) => `${k}=${formatValue(v)}`).join(', ');
-      const call = `${block.instrument}.${block.method}(${params})`;
-      const bindings = (block.returnBindings || []).filter((b: any) => b && b.var);
-
-      // With return pointers, the names a step saves are fields of one returned object, not a
-      // tuple to unpack — so write the call to a temp and pull each field out of it by the same
-      // path the run resolves at execution time. `x, y = call` (the legacy shape below) would be
-      // a TypeError against a dataclass or Pydantic result.
-      if (bindings.length === 1 && !bindings[0].path) {
-        body += `${pad}${bindings[0].var} = ${call}\n`;
-      } else if (bindings.length > 0) {
-        body += `${pad}_result = ${call}\n`;
-        bindings.forEach((b: any) => {
-          const accessor = String(b.path).split('.')
-            .map((seg: string) => (/^\d+$/.test(seg) ? `[${seg}]` : `.${seg}`))
-            .join('');
-          body += `${pad}${b.var} = _result${accessor}\n`;
-        });
-      } else {
-        const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
-        body += `${pad}${returnStr}${call}\n`;
+      // A property is an attribute in Python, not a call. Introspection surfaces a writable
+      // property as two steps — `speed` and `speed_(setter)` — and rendering either of them as
+      // `instrument.speed_(setter)(value=5)` would preview code that cannot run.
+      const propertyName = block.schema?.property_name;
+      if (propertyName && block.schema?.property_access === 'set') {
+        body += `${pad}${block.instrument}.${propertyName} = ${formatValue(block.params.value)}\n`;
+        return;
       }
+      // A step's saved names are fields of one returned value, not a tuple to unpack — so write
+      // the expression to a temp and pull each field out of it by the same path the run resolves
+      // at execution time. `x, y = expr` would be a TypeError against a dataclass or Pydantic
+      // result. Shared by the property getter and the method call below: a property typed as a
+      // dataclass is as much a structured result as a method returning one.
+      const emitAssignment = (expr: string) => {
+        const bindings = (block.returnBindings || []).filter((b: any) => b && b.var);
+        if (bindings.length === 1 && !bindings[0].path) {
+          body += `${pad}${bindings[0].var} = ${expr}\n`;
+        } else if (bindings.length > 0) {
+          body += `${pad}_result = ${expr}\n`;
+          bindings.forEach((b: any) => {
+            const accessor = String(b.path).split('.')
+              .map((seg: string) => (/^\d+$/.test(seg) ? `[${seg}]` : `.${seg}`))
+              .join('');
+            body += `${pad}${b.var} = _result${accessor}\n`;
+          });
+        } else {
+          const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
+          body += `${pad}${returnStr}${expr}\n`;
+        }
+      };
+
+      if (propertyName && block.schema?.property_access === 'get') {
+        emitAssignment(`${block.instrument}.${propertyName}`);
+        return;
+      }
+
+      const params = Object.entries(block.params).map(([k, v]) => `${k}=${formatValue(v)}`).join(', ');
+      emitAssignment(`${block.instrument}.${block.method}(${params})`);
     });
     return body;
   };

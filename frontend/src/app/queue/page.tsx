@@ -20,6 +20,67 @@ const orderPending = (runs: any[] | undefined, activeId?: number) =>
       return pos(a) - pos(b) || a.id - b.id;
     });
 
+// 'error' on a run means two different things, and telling them apart is the whole problem:
+//
+//  - The execution loop stopped on a failed step and is waiting for a retry / skip / cancel
+//    decision. The run is marked 'error' with no end_time, but it is still live and still needs
+//    its controls.
+//  - The run failed and is over. It belongs in Data History.
+//
+// The panel used to treat every 'error' run as the current one, so a run that failed days ago
+// permanently occupied it — and there is no shortage of those, because that wait for a decision
+// lives in memory and does not survive a restart, stranding runs as 'error' with no end_time.
+// Clearing the panel then took one Cancel click per stale run: the cancel endpoint accepts
+// 'error' and flips it to 'cancelled', so each click retired exactly one and the next took its
+// place.
+//
+// status and end_time both lie about a stranded run, so liveness comes from the queue manager's
+// own active_workflow_id instead.
+const ACTIVE_STATUSES = ['running', 'paused', 'cancelling', 'error'];
+const TERMINAL_STATUSES = ['completed', 'error', 'cancelled'];
+
+/** Just the fields the selection below reads; run payloads carry plenty more. */
+type QueueRun = { id: number; status: string; end_time?: string | null };
+
+// A run that just finished stays up briefly, so a failure is readable instead of vanishing the
+// instant it ends. The server applies the same window to the `recent_run` it pushes over the
+// websocket (see broadcast_global_queue); mirroring it here keeps a page load consistent with a
+// live update rather than blanking a failure that a connected client would still be showing.
+const RECENT_FINISH_MS = 10_000;
+
+// Run times arrive as naive UTC — datetime.utcnow().isoformat(), no offset — and JS parses a
+// string like that as *local* time. Anywhere west of UTC that puts every finished run in the
+// future, so "did this just end?" would answer yes forever and re-create the bug above. Pin it.
+const parseServerTime = (value?: string | null) => {
+  if (!value) return NaN;
+  return Date.parse(/([zZ]|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`);
+};
+
+const justFinished = (runs: QueueRun[] | undefined) => {
+  const recent = (runs || [])
+    .filter(r => TERMINAL_STATUSES.includes(r.status) && r.end_time)
+    .sort((a, b) => parseServerTime(b.end_time) - parseServerTime(a.end_time))[0];
+  if (!recent) return undefined;
+  const age = Date.now() - parseServerTime(recent.end_time);
+  return age >= 0 && age < RECENT_FINISH_MS ? recent : undefined;
+};
+
+/**
+ * The run the Currently Executing panel should show, if any.
+ *
+ * `activeId` is the queue manager's active_workflow_id. When it is known, it alone decides which
+ * run is live — a run the server isn't executing cannot be executing, whatever its stored status
+ * says. Passing `undefined` (server didn't report one) means nothing is running.
+ */
+const pickActive = (runs: QueueRun[] | undefined, activeId?: number | null) =>
+  (activeId ? (runs || []).find(r => r.id === activeId && ACTIVE_STATUSES.includes(r.status)) : undefined)
+  || justFinished(runs)
+  || (runs || []).slice().reverse().find(r => r.status === 'pending');
+
+/** Whether this run can still be paused, cancelled or resolved — i.e. the server is on it. */
+const isLive = (run: QueueRun | null | undefined, activeId?: number | null) =>
+  !!run && !!activeId && run.id === activeId;
+
 export default function QueuePage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [activeWorkflowId, setActiveWorkflowId] = useState<number | null>(null);
@@ -41,14 +102,18 @@ export default function QueuePage() {
 
   const fetchQueue = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/queue/runs`);
+        // /api/queue/runs carries no notion of which run the server is actually on, and a stored
+        // status can't be trusted to say so (see ACTIVE_STATUSES), so ask /api/status too. The
+        // websocket delivers the same id inline as `status.active_workflow_id`.
+        const [res, statusRes] = await Promise.all([
+          fetch(`${API_BASE}/api/queue/runs`),
+          fetch(`${API_BASE}/api/status`),
+        ]);
         const data = await res.json();
-        // Filter runs
-        let active = data.runs?.find((r: any) => ['running', 'paused', 'cancelling', 'error'].includes(r.status));
-        if (!active) {
-            active = data.runs?.slice().reverse().find((r: any) => r.status === 'pending');
-        }
-        
+        const liveId = (await statusRes.json())?.active_workflow_id ?? null;
+        setActiveWorkflowId(liveId);
+        const active = pickActive(data.runs, liveId);
+
         if (active) {
             const runDetails = await fetch(`${API_BASE}/api/queue/runs/${active.id}`);
             const detailsData = await runDetails.json();
@@ -73,11 +138,10 @@ export default function QueuePage() {
         try {
             const data = JSON.parse(event.data);
             if (data.runs) {
-                let active = data.runs?.find((r: any) => ['running', 'paused', 'cancelling', 'error'].includes(r.status));
-                if (!active) {
-                    active = data.runs?.slice().reverse().find((r: any) => r.status === 'pending');
-                }
-                
+                const liveId = data.status?.active_workflow_id ?? null;
+                setActiveWorkflowId(liveId);
+                const active = pickActive(data.runs, liveId);
+
                 if (active) {
                     if (data.active_run && data.active_run.id === active.id) {
                         setActiveRun(data.active_run);
@@ -105,6 +169,17 @@ export default function QueuePage() {
         ws.close();
     };
   }, []);
+
+  // Nothing re-runs the selection on its own — the panel only updates on a websocket message or a
+  // manual fetch, and a server with nothing to do sends neither. Without this, a run shown in its
+  // brief post-finish window just stays up: the same lingering this change set out to remove, only
+  // with a nicer reason. Schedule one re-check for the moment that window closes.
+  useEffect(() => {
+    if (!activeRun?.end_time || !TERMINAL_STATUSES.includes(activeRun.status)) return;
+    const remaining = RECENT_FINISH_MS - (Date.now() - parseServerTime(activeRun.end_time));
+    const timer = setTimeout(fetchQueue, Math.max(remaining, 0) + 250);
+    return () => clearTimeout(timer);
+  }, [activeRun?.id, activeRun?.status, activeRun?.end_time]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -135,6 +210,24 @@ export default function QueuePage() {
       fetchQueue();
     } catch (e) {
       alert(`Failed to ${action} run`);
+    }
+  };
+
+  // When a step fails the execution loop stops and waits for one of these. The endpoint has always
+  // existed; nothing called it, so a stopped run's only visible option was Cancel — which is why
+  // a failure looked like something you had to dismiss rather than decide about.
+  const resolveRunError = async (action: 'retry' | 'skip' | 'abort') => {
+    const targetId = activeRun?.id;
+    if (!targetId) return;
+    try {
+      await fetch(`${API_BASE}/api/queue/runs/${targetId}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      fetchQueue();
+    } catch {
+      alert(`Failed to ${action} the failed step`);
     }
   };
 
@@ -238,7 +331,23 @@ export default function QueuePage() {
             <span>Execution Queue</span>
           </h2>
           
-          {activeRun && (
+          {/* Controls only while the server is actually on this run. A run shown here in its brief
+              post-finish window, or a stranded one from a previous session, is over — offering
+              "Cancel Run" on it is what made a failed run look like it needed dismissing. */}
+          {isLive(activeRun, activeWorkflowId) && activeRun.status === 'error' ? (
+            // Stopped on a failed step: the useful choices are about that step, not the run.
+            <div className="flex items-center space-x-3">
+              <button onClick={() => resolveRunError('retry')} className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-500/30">
+                  <Play className="w-4 h-4" /><span>Retry Step</span>
+              </button>
+              <button onClick={() => resolveRunError('skip')} className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">
+                  <ArrowDown className="w-4 h-4" /><span>Skip Step</span>
+              </button>
+              <button onClick={() => handleRunControl('cancel')} className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30">
+                  <XCircle className="w-4 h-4" /><span>Abort Run</span>
+              </button>
+            </div>
+          ) : isLive(activeRun, activeWorkflowId) || (activeRun && activeRun.status === 'pending') ? (
             <div className="flex items-center space-x-3">
               {activeRun.status === 'pausing' ? (
                 <div className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-yellow-50 text-yellow-600 border border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:border-yellow-500/30 animate-pulse">
@@ -263,7 +372,7 @@ export default function QueuePage() {
                 </button>
               )}
             </div>
-          )}
+          ) : null}
         </header>
 
         <div className="flex-1 overflow-y-auto p-8">
@@ -311,6 +420,12 @@ export default function QueuePage() {
                                 return workflow.steps?.map((step: any, idx: number) => {
                                     const phase = step.parameters?._phase || 'main';
                                     const parentWorkflow = step.parameters?._parent_workflow || null;
+                                    // Two uses of one saved workflow are two groups. Keyed on the
+                                    // expansion, not the name, or the second one silently
+                                    // continues the first's header.
+                                    const workflowGroupKey = parentWorkflow
+                                        ? `${step.parameters?._expansion_id ?? 'n'}:${parentWorkflow}`
+                                        : null;
                                     
                                     const elements = [];
                                     
@@ -354,8 +469,8 @@ export default function QueuePage() {
                                     }
                                     
                                     // 3. Check Library Workflow Grouping
-                                    if (parentWorkflow !== currentWorkflowGroup) {
-                                        currentWorkflowGroup = parentWorkflow;
+                                    if (workflowGroupKey !== currentWorkflowGroup) {
+                                        currentWorkflowGroup = workflowGroupKey;
                                         if (parentWorkflow) {
                                             elements.push(
                                                 <div key={`wf-group-${parentWorkflow}-${idx}`} className="pt-2 pb-1 flex items-center space-x-2">
@@ -370,6 +485,7 @@ export default function QueuePage() {
                                     const displayParams = { ...step.parameters };
                                     delete displayParams._phase;
                                     delete displayParams._parent_workflow;
+                                    delete displayParams._expansion_id;
 
                                     // Return pointers read better as "name <- field" than as raw
                                     // JSON, and the flat _return_var list is redundant beside them.

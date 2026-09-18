@@ -124,6 +124,32 @@ def test_inspect_device_module_publishes_return_paths():
     assert schema["reset"]["return_paths"] == []
 
 
+def test_property_getter_gets_return_paths_too():
+    """A property is a step like any other (see AGENTS.md section 12), so a property typed as a
+    dataclass has to be addressable by field — otherwise `reactor.readings` would be bindable
+    only as one opaque object while `reactor.read_all()` was bindable field by field."""
+    class Device:
+        @property
+        def readings(self) -> Result:
+            raise AssertionError("introspection must never run a getter")
+
+        @property
+        def flow_rate(self) -> float:
+            raise AssertionError("introspection must never run a getter")
+
+        @flow_rate.setter
+        def flow_rate(self, value: float):
+            pass
+
+    schema = inspect_device_module(Device())
+
+    assert [p["path"] for p in schema["readings"]["return_paths"]][:2] == ["yield_pct", "metrics.purity"]
+    # A scalar property is still one addressable leaf, and a numeric one at that.
+    assert schema["flow_rate"]["return_paths"] == [{"path": "", "type": "float", "numeric": True}]
+    # A setter returns nothing, so it has nothing to point at.
+    assert schema["flow_rate_(setter)"]["return_paths"] == []
+
+
 def test_resolve_output_path_walks_dicts_lists_and_objects():
     obj = Result(yield_pct=91.2, metrics=Metrics(purity=0.98, peaks=3), sample_id="A1")
     serialized = dataclasses.asdict(obj)

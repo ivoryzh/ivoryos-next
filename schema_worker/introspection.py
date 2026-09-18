@@ -234,6 +234,136 @@ def resolve_output_path(value, path):
             return _MISSING
     return current
 
+PROPERTY_SETTER_SUFFIX = "_(setter)"
+
+
+def _resolve_hints(func):
+    """Annotations as real objects where possible.
+
+    Under PEP 563 every annotation arrives as a string, which would make extract_type_info's
+    Enum/bool/dataclass checks fall through and turn a dropdown into a free-text box.
+    """
+    try:
+        return typing.get_type_hints(func)
+    except Exception:
+        return {}
+
+
+# Modelling frameworks put properties on their own base class -- pydantic's `model_extra` and
+# `model_fields_set`, for instance. They describe the library, not the instrument, and nobody is
+# going to drive one from a workflow, so they don't belong in the schema.
+FRAMEWORK_PROPERTY_PACKAGES = ("pydantic",)
+
+
+def _defining_class(cls, name):
+    """The class in `cls`'s MRO that actually defines `name`."""
+    for base in getattr(cls, "__mro__", (cls,)):
+        if name in vars(base):
+            return base
+    return None
+
+
+def _iter_class_properties(cls):
+    """Yield (name, property) for every public property on `cls`.
+
+    Properties have to be found on the *class*: looking one up on an instance runs fget, so
+    on a real driver merely building the schema would go and talk to the hardware.
+    """
+    for name, attr in inspect.getmembers(cls, lambda x: isinstance(x, property)):
+        if name.startswith("_"):
+            continue
+        owner = _defining_class(cls, name)
+        if owner is not None and getattr(owner, "__module__", "").split(".")[0] in FRAMEWORK_PROPERTY_PACKAGES:
+            continue
+        yield name, attr
+
+
+def _setter_value_annotation(prop):
+    """The type a property's setter accepts: its own parameter annotation when it has one,
+    otherwise whatever the getter promises to return."""
+    if prop.fset is not None:
+        try:
+            hints = _resolve_hints(prop.fset)
+            params = [p for n, p in inspect.signature(prop.fset).parameters.items() if n != "self"]
+            if params:
+                annotation = hints.get(params[0].name, params[0].annotation)
+                if annotation is not inspect.Parameter.empty:
+                    return annotation
+        except (TypeError, ValueError):
+            pass
+    if prop.fget is not None:
+        try:
+            annotation = _resolve_hints(prop.fget).get("return", inspect.signature(prop.fget).return_annotation)
+            if annotation is not inspect.Signature.empty:
+                return annotation
+        except (TypeError, ValueError):
+            pass
+    return inspect.Parameter.empty
+
+
+def describe_property(name, prop):
+    """Expand one `@property` into the schema entries a workflow can actually use: a
+    zero-argument getter under the property's own name, and — when the property is writable —
+    a one-argument setter under "<name>_(setter)".
+
+    A property is an attribute in Python but a *step* in a workflow: plenty of drivers expose
+    `pump.speed = 5` as the only way to set a speed, so dropping properties from the schema
+    (which is what inspecting only callables did) made those drivers half-unusable. The
+    "_(setter)" suffix is the same convention the original ivoryos designer uses, so workflows
+    stay readable across both.
+    """
+    entries = {}
+    docstring = inspect.getdoc(prop) or ""
+
+    if prop.fget is not None:
+        return_type = "Any"
+        return_info = None
+        try:
+            annotation = _resolve_hints(prop.fget).get("return", inspect.signature(prop.fget).return_annotation)
+        except (TypeError, ValueError):
+            annotation = inspect.Signature.empty
+        return_paths = []
+        if annotation is not inspect.Signature.empty:
+            return_type = annotation.__name__ if isinstance(annotation, type) else str(annotation).replace("typing.", "")
+            return_info = extract_type_info(annotation)
+            # A property getter is a step like any other, so a property typed as a dataclass
+            # gets the same per-field pointers a method returning one would.
+            if return_type not in ("None", "NoneType"):
+                return_paths = build_return_paths(annotation, return_info)
+        entries[name] = {
+            "description": docstring,
+            "parameters": {},
+            "return_type": return_type,
+            "return_info": return_info,
+            "return_paths": return_paths,
+            "is_coroutine": False,
+            "is_property": True,
+            "property_access": "get",
+            "property_name": name,
+            "has_setter": prop.fset is not None,
+        }
+
+    if prop.fset is not None:
+        value_info = extract_type_info(_setter_value_annotation(prop))
+        value_info["required"] = True
+        setter_doc = inspect.getdoc(prop.fset)
+        if not setter_doc:
+            setter_doc = f"Set {name}." if not docstring else f"Set {name}. {docstring}"
+        entries[name + PROPERTY_SETTER_SUFFIX] = {
+            "description": setter_doc,
+            "parameters": {"value": value_info},
+            "return_type": "None",
+            "return_info": extract_type_info(type(None)),
+            "return_paths": [],
+            "is_coroutine": False,
+            "is_property": True,
+            "property_access": "set",
+            "property_name": name,
+            "has_setter": True,
+        }
+
+    return entries
+
 
 def inspect_class(cls):
     """
@@ -241,10 +371,20 @@ def inspect_class(cls):
     schema of its available methods, their arguments, and return types.
     """
     schema = {}
-    
+
+    # Properties become getter/setter entries — a driver that exposes `pump.speed = 5` has no
+    # callable for it at all, so inspecting only callables dropped that capability entirely.
+    property_names = set()
+    for name, prop in _iter_class_properties(cls):
+        property_names.add(name)
+        try:
+            schema.update(describe_property(name, prop))
+        except Exception as e:
+            print(f"Failed to inspect property {name} of class {cls.__name__}: {e}")
+
     # Get all callable methods that don't start with '_' (private)
     for name, method in inspect.getmembers(cls, predicate=callable):
-        if name.startswith("_"):
+        if name.startswith("_") or name in property_names:
             continue
             
         try:
@@ -256,10 +396,7 @@ def inspect_class(cls):
             # silently fail and a dropdown degrades into a free-text box. Resolve the real objects
             # first where we can; if a forward reference cannot be resolved, fall back to the raw
             # annotations rather than losing the method.
-            try:
-                hints = typing.get_type_hints(method)
-            except Exception:
-                hints = {}
+            hints = _resolve_hints(method)
 
             params = {}
             for param_name, param in sig.parameters.items():

@@ -5,6 +5,10 @@ edge_server/ivoryos_edge/.certs/
 # The Cloud daemon's own AWS IoT Thing certificate + private key (see .env.local.example's
 # AWS_IOT_CA_PATH/AWS_IOT_CERT_PATH/AWS_IOT_KEY_PATH) — a real, privileged secret, not source.
 cloud_frontend/certs/
+# *.pem below doesn't actually cover the two directories above's contents: private keys are .key,
+# and the downloaded root CA is .crt.
+*.key
+*.crt
 
 # Python
 __pycache__/
@@ -42,15 +46,8 @@ node_modules/
 coverage/
 .next/
 out/
-build/
 .DS_Store
 *.pem
-# AWS IoT / MQTT certs (per-device and daemon private keys + CA chain) — *.pem above didn't
-# actually cover these: private keys are .key, and the downloaded root CA is .crt.
-*.key
-*.crt
-cloud_frontend/certs/
-edge_server/ivoryos_edge/.certs/
 
 # IDE
 .idea/
@@ -60,6 +57,9 @@ edge_server/ivoryos_edge/.certs/
 
 # Local SQLite
 *.db
+# SQLite's WAL sidecars — created since the workflow store enabled WAL (see models.py).
+*.db-shm
+*.db-wal
 *.sqlite3
 
 # Auto-dumped on every edge server startup (server.py's startup_event) for local inspection —
@@ -75,3 +75,10 @@ edge_server/ivoryos_edge/.certs/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Append-only workflow version snapshots. Local runtime state, like the SQLite DB above — the
+# committed workflows/*.json files are the heads; every past save lives here and is regenerated
+# lazily (see ensure_versioned in edge_server/ivoryos_edge/workflows.py).
+edge_server/ivoryos_edge/workflows/.versions/
+# Workflow tags — local bookkeeping alongside the versions above, not protocol content.
+edge_server/ivoryos_edge/workflows/.meta.json

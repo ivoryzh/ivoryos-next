@@ -625,12 +625,14 @@ async def execute_method(req: ExecuteRequest):
         return JSONResponse(status_code=404, content={"error": f"Module {req.module} not found"})
         
     instance = instruments[req.module]
-    if not hasattr(instance, req.method):
+    from ivoryos_edge.introspection import cast_arguments, has_member, resolve_callable
+    if not has_member(instance, req.method):
         return JSONResponse(status_code=404, content={"error": f"Method {req.method} not found on {req.module}"})
-        
-    method = getattr(instance, req.method)
-    
-    from ivoryos_edge.introspection import cast_arguments
+
+    # resolve_callable, not getattr: a property getter/setter is a schema entry the designer can
+    # place as a step, but it isn't a callable attribute until it's wrapped.
+    method = resolve_callable(instance, req.method)
+
     req.args = cast_arguments(method, req.args or {})
     
     # Generate task ID and run in background
@@ -663,8 +665,13 @@ async def kill_execution(task_id: str):
 WORKFLOWS_DIR = os.path.join(os.path.dirname(__file__), "workflows")
 os.makedirs(WORKFLOWS_DIR, exist_ok=True)
 
-def _workflow_error(e, status=400):
-    return JSONResponse(status_code=status, content={"error": str(e)})
+def _workflow_error(e, status=400, forceable=None):
+    """`forceable` names a check the caller may re-submit past with `force: true`. It is what
+    lets the Designer offer "save anyway" instead of just reporting a dead end."""
+    content = {"error": str(e)}
+    if forceable:
+        content["forceable"] = forceable
+    return JSONResponse(status_code=status, content=content)
 
 
 def _workflow_summary(name):
@@ -845,6 +852,13 @@ async def save_workflow(name: str, req: Request):
     except Exception:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
+    # A rejection here is advice, not a verdict: building A before the B it calls exists is a
+    # normal order to work in, and refusing to write anything means losing the edit. `force`
+    # records that the author was told and chose to save anyway. The run path validates
+    # independently and still refuses to dispatch a broken expansion, so nothing unsafe reaches
+    # hardware either way.
+    force = bool(data.pop("force", False))
+
     try:
         wf.validate_name(name)
 
@@ -852,21 +866,23 @@ async def save_workflow(name: str, req: Request):
         # the Cloud sequence editor POST here, and client-only validation in this project has
         # already drifted out of sync twice (see AGENTS.md section 3).
         missing = wf.missing_links(WORKFLOWS_DIR, data)
-        if missing:
+        if missing and not force:
             return _workflow_error(
                 WorkflowError(
                     "This workflow links to a workflow that no longer exists: "
                     + ", ".join(sorted(missing))
-                )
+                ),
+                forceable="missing_links",
             )
 
         cycle = wf.find_cycle(WORKFLOWS_DIR, name, data)
-        if cycle:
+        if cycle and not force:
             return _workflow_error(
                 WorkflowError(
                     "Linked workflows would form a cycle: " + " -> ".join(cycle)
                     + ". A workflow cannot use itself, directly or indirectly."
-                )
+                ),
+                forceable="cycle",
             )
 
         body, version, created = wf.save_version(

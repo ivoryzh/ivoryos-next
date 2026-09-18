@@ -57,6 +57,9 @@ out/
 
 # Local SQLite
 *.db
+# SQLite's WAL sidecars — created since the workflow store enabled WAL (see models.py).
+*.db-shm
+*.db-wal
 *.sqlite3
 
 # Auto-dumped on every edge server startup (server.py's startup_event) for local inspection —

@@ -571,3 +571,198 @@ async def test_list_reports_the_link_graph(api_workflows_dir):
     assert by_name["wash"]["linked_by"] == ["screening"]
     assert by_name["screening"]["links"] == ["wash"]
     assert by_name["wash"]["version"] == 1
+
+
+# --- DB-backed store, disk mirror ----------------------------------------------------------------
+#
+# Workflows live in the database now, with the JSON files kept in step on every write. The files
+# are not a leftover: they are how a workflow arrives from outside this process, so the store has
+# to keep reconciling with them rather than trusting its own cache once it has seen a name.
+
+def test_save_mirrors_head_and_snapshot_to_disk(workflows_dir):
+    write(workflows_dir, "wash", body(script=[step()], description="first"))
+    write(workflows_dir, "wash", body(script=[step()], description="second"))
+
+    head = json.load(open(wf.workflow_path(workflows_dir, "wash")))
+    assert head["description"] == "second" and head["version"] == 2
+
+    for version, expected in ((1, "first"), (2, "second")):
+        snapshot = json.load(open(os.path.join(workflows_dir, ".versions", "wash", f"{version}.json")))
+        assert snapshot["description"] == expected
+        # and the DB agrees with its own mirror
+        assert wf.read_version(workflows_dir, "wash", version)["description"] == expected
+
+
+def test_reads_come_from_the_db_not_the_file(workflows_dir):
+    """The mirror is an export. Deleting it is not how you delete a workflow — but see
+    test_hand_edited_file_wins for what happens when something genuinely rewrites it."""
+    write(workflows_dir, "wash", body(script=[step()], description="stored"))
+    stored = wf.read_head(workflows_dir, "wash")
+    assert stored["description"] == "stored"
+
+
+def test_hand_edited_file_wins(workflows_dir):
+    """A file rewritten behind the API's back — hand-edited, restored from git, synced down from
+    Cloud — is the new head. The DB having already seen the name must not shadow it."""
+    write(workflows_dir, "wash", body(script=[step()], description="original"))
+
+    edited = body(script=[step(args={"duration": 9})], description="edited on disk")
+    with open(wf.workflow_path(workflows_dir, "wash"), "w") as fp:
+        json.dump(edited, fp)
+
+    assert wf.read_head(workflows_dir, "wash")["description"] == "edited on disk"
+    # An out-of-band edit is not a save: it must not append to the history.
+    assert wf.list_versions(workflows_dir, "wash") == [1]
+    assert wf.read_version(workflows_dir, "wash", 1)["description"] == "original"
+
+
+def test_file_removed_behind_the_api_leaves_the_library(workflows_dir):
+    write(workflows_dir, "wash", body(script=[step()]))
+    write(workflows_dir, "rinse", body(script=[step()]))
+    os.remove(wf.workflow_path(workflows_dir, "wash"))
+
+    assert wf.list_workflow_names(workflows_dir) == ["rinse"]
+    with pytest.raises(wf.WorkflowNotFound):
+        wf.read_head(workflows_dir, "wash")
+    # The snapshots survive: a finished run may still reference one.
+    assert wf.read_version(workflows_dir, "wash", 1) is not None
+
+
+def test_snapshots_outlive_a_deleted_workflow(workflows_dir):
+    write(workflows_dir, "wash", body(script=[step()], description="v1"))
+    write(workflows_dir, "wash", body(script=[step()], description="v2"))
+    wf.delete_workflow(workflows_dir, "wash")
+
+    assert "wash" not in wf.list_workflow_names(workflows_dir)
+    assert wf.read_version(workflows_dir, "wash", 2)["description"] == "v2"
+
+
+def test_unchanged_file_is_not_reparsed(workflows_dir, monkeypatch):
+    """The stat check is what keeps the DB worth having: listing a library must not turn back
+    into one JSON parse per workflow."""
+    write(workflows_dir, "wash", body(script=[step()]))
+    wf.read_head(workflows_dir, "wash")  # first read populates the recorded stat
+
+    reads = []
+    real = wf._read_json
+    monkeypatch.setattr(wf, "_read_json", lambda p: (reads.append(p), real(p))[1])
+
+    for _ in range(5):
+        wf.read_head(workflows_dir, "wash")
+    assert reads == [], f"re-read an unchanged file: {reads}"
+
+
+def test_tags_survive_in_the_db_and_mirror_to_meta(workflows_dir):
+    write(workflows_dir, "wash", body(script=[step()]))
+    wf.set_tags(workflows_dir, "wash", ["Screening", "screening", " calibration "])
+
+    assert wf.get_tags(workflows_dir, "wash") == ["Screening", "calibration"]
+    meta = json.load(open(os.path.join(workflows_dir, wf.META_FILENAME)))
+    assert meta["wash"]["tags"] == ["Screening", "calibration"]
+
+
+# --- two uses of one workflow are two expansions --------------------------------------------------
+
+def test_repeated_link_gets_a_distinct_expansion_id(workflows_dir):
+    """Using the same saved workflow twice must stay two things.
+
+    Both runs of steps carry the same `_parent_workflow`, so every reader that grouped by name
+    alone fused them: the preview showed one 32-step block where there were two 16-step uses, and
+    the Queue printed a single header over both.
+    """
+    write(workflows_dir, "wash", body(script=[step(args={"n": 1}), step(args={"n": 2})]))
+
+    out = wf.expand_workflow_blocks([link("wash"), link("wash")], workflows_dir, "main")
+
+    assert len(out) == 4
+    assert all(b["params"]["_parent_workflow"] == "wash" for b in out)
+    ids = [b["params"]["_expansion_id"] for b in out]
+    assert ids[0] == ids[1] and ids[2] == ids[3], ids
+    assert ids[0] != ids[2], f"both uses share an expansion id: {ids}"
+
+
+def test_expansion_ids_are_stable_across_calls(workflows_dir):
+    """The preview endpoint and the dispatch path both expand the same sequence and have to agree,
+    so the id is a counter rather than something random."""
+    write(workflows_dir, "wash", body(script=[step()]))
+    blocks = [link("wash"), link("wash")]
+
+    first = [b["params"]["_expansion_id"] for b in wf.expand_workflow_blocks(blocks, workflows_dir, "main")]
+    second = [b["params"]["_expansion_id"] for b in wf.expand_workflow_blocks(blocks, workflows_dir, "main")]
+    assert first == second
+
+
+def test_nested_links_get_their_own_expansion_ids(workflows_dir):
+    write(workflows_dir, "inner", body(script=[step()]))
+    write(workflows_dir, "outer", body(script=[link("inner"), link("inner")]))
+
+    out = wf.expand_workflow_blocks([link("outer")], workflows_dir, "main")
+
+    # The innermost owner wins, as ever, and the two inner uses stay distinct.
+    assert [b["params"]["_parent_workflow"] for b in out] == ["inner", "inner"]
+    assert out[0]["params"]["_expansion_id"] != out[1]["params"]["_expansion_id"]
+
+
+# --- force save -----------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_save_offers_force_when_a_link_is_missing(api_workflows_dir):
+    """Refusing outright loses the edit. Building A before the B it calls is a normal order to
+    work in, so the rejection has to be re-submittable."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = body(script=[link("not yet written")])
+
+        res = await ac.post("/api/workflows/a", json=payload)
+        assert res.status_code == 400
+        assert res.json()["forceable"] == "missing_links"
+        assert "a" not in wf.list_workflow_names(api_workflows_dir)
+
+        forced = await ac.post("/api/workflows/a", json={**payload, "force": True})
+        assert forced.status_code == 200, forced.text
+        assert forced.json()["status"] == "success"
+        assert "a" in wf.list_workflow_names(api_workflows_dir)
+
+
+@pytest.mark.asyncio
+async def test_save_offers_force_for_a_cycle(api_workflows_dir):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        await ac.post("/api/workflows/a", json=body(script=[step()]))
+        await ac.post("/api/workflows/b", json=body(script=[link("a")]))
+
+        payload = body(script=[link("b")])  # a -> b -> a
+        res = await ac.post("/api/workflows/a", json=payload)
+        assert res.status_code == 400
+        assert res.json()["forceable"] == "cycle"
+
+        forced = await ac.post("/api/workflows/a", json={**payload, "force": True})
+        assert forced.status_code == 200, forced.text
+
+
+@pytest.mark.asyncio
+async def test_force_is_not_stored_in_the_saved_body(api_workflows_dir):
+    """`force` is a instruction about this request, not part of the protocol. Leaving it in the
+    body would change the content hash and make the next ordinary save look like an edit."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = body(script=[link("missing")])
+        await ac.post("/api/workflows/a", json={**payload, "force": True})
+
+        stored = wf.read_head(api_workflows_dir, "a")
+        assert "force" not in stored
+
+        # and an identical resave is still recognised as a no-op
+        again = await ac.post("/api/workflows/a", json={**payload, "force": True})
+        assert again.json()["created_version"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_forced_broken_workflow_still_cannot_dispatch(api_workflows_dir):
+    """Force is about keeping the edit, not about getting past the run gate."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        await ac.post("/api/workflows/a", json={**body(script=[link("missing")]), "force": True})
+
+        run = await ac.post("/api/queue/runs", json={
+            "name": "should be refused",
+            "sequence": [link("a")],
+        })
+        assert run.status_code == 400
+        assert "missing" in run.json()["error"]

@@ -122,7 +122,21 @@ class WorkflowQueueManager:
             for run in runs.scalars():
                 run.status = "error"
                 run.end_time = datetime.utcnow()
-            
+
+            # A run that stopped on a failed step is marked 'error' but deliberately left without
+            # an end_time: the execution loop is still sitting on it, waiting for a retry / skip /
+            # cancel decision. That wait lives in memory (`self.error_action`), so a restart
+            # abandons it — nothing can ever resolve it, yet it still looks unfinished to every
+            # reader. Left alone these accumulate forever and keep claiming the "currently
+            # executing" slot in the UI. Close them out; the status stays 'error' because the run
+            # really did fail.
+            unresolved = await session.execute(
+                select(WorkflowRun).where(WorkflowRun.status == "error", WorkflowRun.end_time.is_(None))
+            )
+            for run in unresolved.scalars():
+                run.end_time = datetime.utcnow()
+
+
             # Fix stuck and pending steps
             steps = await session.execute(
                 select(WorkflowStep).where(WorkflowStep.status.in_(["running", "pending"]))
@@ -625,13 +639,15 @@ class WorkflowQueueManager:
                                 raise Exception(f"Instrument {step.instrument} not found")
                                 
                             instance = instruments[step.instrument]
-                            if not hasattr(instance, step.method):
+                            from ivoryos_edge.introspection import cast_arguments, has_member, resolve_callable
+                            if not has_member(instance, step.method):
                                 raise Exception(f"Method {step.method} not found on {step.instrument}")
-                                
-                            method = getattr(instance, step.method)
+
+                            # resolve_callable, not getattr: a property getter/setter is a real
+                            # step in the designer but isn't a callable attribute on its own.
+                            method = resolve_callable(instance, step.method)
                             args = substitute_workflow_vars(step.parameters or {}, workflow_context)
 
-                            from ivoryos_edge.introspection import cast_arguments
                             args = cast_arguments(method, args)
                             
                             if inspect.iscoroutinefunction(method):
@@ -891,10 +907,10 @@ class WorkflowQueueManager:
                     from ivoryos_edge.server import app, run_and_track_task
                     instruments = getattr(app.state, "instruments", {})
                     instance = instruments.get(db_step.instrument)
-                    method = getattr(instance, db_step.method)
-                    
+                    from ivoryos_edge.introspection import cast_arguments, resolve_callable
+                    method = resolve_callable(instance, db_step.method)
+
                     task_id = str(uuid.uuid4())
-                    from ivoryos_edge.introspection import cast_arguments
                     casted_args = cast_arguments(method, db_step.parameters or {})
                     self.current_step_task = asyncio.create_task(
                         run_and_track_task(task_id, method, casted_args)
@@ -1007,9 +1023,9 @@ class WorkflowQueueManager:
                         if db_step.instrument not in instruments:
                             raise Exception(f"Instrument {db_step.instrument} not found")
                         instance = instruments[db_step.instrument]
-                        method = getattr(instance, db_step.method)
+                        from ivoryos_edge.introspection import cast_arguments, resolve_callable
+                        method = resolve_callable(instance, db_step.method)
 
-                        from ivoryos_edge.introspection import cast_arguments
                         casted_args = cast_arguments(method, db_step.parameters or {})
 
                         if inspect.iscoroutinefunction(method):

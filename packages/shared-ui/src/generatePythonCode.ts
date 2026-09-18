@@ -110,6 +110,20 @@ export function generatePythonCode(
         return;
       }
 
+      // A property is an attribute in Python, not a call. Introspection surfaces a writable
+      // property as two steps — `speed` and `speed_(setter)` — and rendering either of them as
+      // `instrument.speed_(setter)(value=5)` would preview code that cannot run.
+      const propertyName = block.schema?.property_name;
+      if (propertyName && block.schema?.property_access === 'set') {
+        body += `${pad}${block.instrument}.${propertyName} = ${formatValue(block.params.value)}\n`;
+        return;
+      }
+      if (propertyName && block.schema?.property_access === 'get') {
+        const getStr = block.returnVar ? `${block.returnVar} = ` : '';
+        body += `${pad}${getStr}${block.instrument}.${propertyName}\n`;
+        return;
+      }
+
       const params = Object.entries(block.params).map(([k, v]) => `${k}=${formatValue(v)}`).join(', ');
       const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
       body += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;

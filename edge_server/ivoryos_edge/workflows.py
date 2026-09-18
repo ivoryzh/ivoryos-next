@@ -6,20 +6,42 @@ dispatch path (`create_run`) and the dry-run preview endpoint (`/api/workflows/e
 about to do, so it must be produced by the same code that actually produces the run. Mirroring
 this logic client-side would let the two drift, and a drifted preview is worse than no preview.
 
-Storage layout (Edge):
+Storage (Edge): the database is the store, the JSON files are its mirror.
 
-    workflows/{name}.json               the head — unchanged format, every existing reader still works
-    workflows/.versions/{name}/{n}.json immutable snapshots, append-only
+    saved_workflows           one row per workflow: the head body, its version, tags
+    saved_workflow_versions   immutable snapshots, append-only, never cascaded away
 
-The head file gains three metadata keys (`version`, `body_hash`, `updated_at`). They are additive;
-a workflow saved before versioning existed is lazily adopted as v1 the first time it is read.
+    workflows/{name}.json               the head, mirrored on every save — unchanged format
+    workflows/.versions/{name}/{n}.json snapshots, mirrored on every save
+
+Both halves earn their keep. The database is what makes the library cheap to query: listing it is
+one statement instead of a file read per workflow plus one per version, tags stop living in a
+side-car that can drift from the files beside it, and a save is a transaction rather than two
+writes that can half-succeed. The files are how a workflow arrives from *outside* this process —
+dropped in by hand, synced down from Cloud, restored from git — which is a capability this module
+has always had and deliberately keeps.
+
+So reconciliation runs on read, not once at startup: a file that has appeared is imported, one
+that has changed becomes the new head (without appending a version — only `save_version` does
+that), and one that has been removed takes its head row with it. The recorded mtime/size make the
+common case a stat rather than a re-parse. An out-of-band edit to the head does not touch the
+snapshots, exactly as hand-editing the head file never touched `.versions/` before.
+
+The head body carries three metadata keys (`version`, `body_hash`, `updated_at`). They are
+additive; a workflow saved before versioning existed is adopted as v1 the first time it is seen.
 """
 
 import hashlib
+import itertools
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
+
+from sqlalchemy import select
+
+from ivoryos_edge.models import SavedWorkflow, SavedWorkflowVersion, sync_session
 
 # The synthetic instrument name a saved workflow is exposed under in the Designer toolbox. Kept in
 # one place because frontend, dispatch and cycle detection all have to agree on the exact string.
@@ -99,16 +121,6 @@ def _version_path(workflows_dir, name, version):
     return os.path.join(_versions_dir(workflows_dir, name), f"{int(version)}.json")
 
 
-def list_workflow_names(workflows_dir):
-    try:
-        return sorted(
-            f[:-5] for f in os.listdir(workflows_dir)
-            if f.endswith(".json") and not f.startswith(".")
-        )
-    except OSError:
-        return []
-
-
 # --- block helpers ------------------------------------------------------------------------------
 
 def block_method(block):
@@ -182,18 +194,67 @@ def body_hash(body):
 
 # --- version store ------------------------------------------------------------------------------
 
-def read_head(workflows_dir, name):
-    path = workflow_path(workflows_dir, name)
-    if not os.path.exists(path):
-        raise WorkflowNotFound(f"Workflow '{name}' not found")
+# --- storage ------------------------------------------------------------------------------------
+#
+# The database is the source of truth; the JSON files are kept in step on every write.
+#
+# Both, rather than either alone, because they do different jobs. The files are how a workflow
+# gets in from *outside* -- dropped in by hand, synced down from Cloud, committed to git -- and
+# `ensure_versioned` has always existed to adopt one. The DB is what makes everything else sane:
+# listing the library stops being one file read per workflow plus one per version, tags stop
+# living in a side-car that can drift from the files beside it, and a save becomes one transaction
+# instead of two writes that can half-succeed.
+#
+# The rule is one-directional and worth keeping that way: a write lands in the DB first and then
+# mirrors to disk; a read comes from the DB, importing from disk first if the DB has never seen
+# that name. Disk never overwrites a name the DB already knows -- otherwise a stale file left by
+# an older build could silently roll a workflow back.
+
+
+@contextmanager
+def _db():
+    session = sync_session()
     try:
-        with open(path, "r") as fp:
-            return json.load(fp)
-    except (OSError, ValueError) as e:
-        raise WorkflowError(f"Workflow '{name}' could not be read: {e}")
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
-def list_versions(workflows_dir, name):
+def _head_row(session, name):
+    return session.get(SavedWorkflow, validate_name(name))
+
+
+def _version_row(session, name, version):
+    return session.execute(
+        select(SavedWorkflowVersion).where(
+            SavedWorkflowVersion.name == name,
+            SavedWorkflowVersion.version == int(version),
+        )
+    ).scalar_one_or_none()
+
+
+def _db_versions(session, name):
+    rows = session.execute(
+        select(SavedWorkflowVersion.version).where(SavedWorkflowVersion.name == name)
+    ).scalars()
+    return sorted(int(v) for v in rows)
+
+
+def _disk_names(workflows_dir):
+    try:
+        return sorted(
+            f[:-5] for f in os.listdir(workflows_dir)
+            if f.endswith(".json") and not f.startswith(".")
+        )
+    except OSError:
+        return []
+
+
+def _disk_versions(workflows_dir, name):
     try:
         entries = os.listdir(_versions_dir(workflows_dir, name))
     except OSError:
@@ -208,59 +269,179 @@ def list_versions(workflows_dir, name):
     return sorted(versions)
 
 
+def _read_json(path):
+    with open(path, "r") as fp:
+        return json.load(fp)
+
+
+def _file_stat(path):
+    try:
+        st = os.stat(path)
+        return float(st.st_mtime), int(st.st_size)
+    except OSError:
+        return None
+
+
+def _sync_from_disk(session, workflows_dir, name):
+    """Reconcile one workflow's DB row with its mirror file. Returns the head row, or None.
+
+    The DB is the query surface, but the file stays authoritative for existence and content,
+    because things outside this process write it: a workflow dropped in by hand, synced down from
+    Cloud, restored from git, or hand-edited. That is a documented capability (the expander
+    defends itself against a file that has gone cyclic behind the API's back), so "the DB already
+    knows this name" is not a reason to stop looking at the file.
+
+    Cheap in the common case: the recorded mtime/size are compared first, and only a file that
+    actually moved is re-read and re-hashed.
+    """
+    row = _head_row(session, name)
+    path = workflow_path(workflows_dir, name)
+    stat = _file_stat(path)
+
+    if stat is None:
+        # Deleted behind the API's back. The head goes with it; snapshots stay, as ever.
+        if row is not None:
+            session.delete(row)
+            session.flush()
+        return None
+
+    if row is not None and (row.file_mtime, row.file_size) == stat:
+        return row
+
+    try:
+        file_body = _read_json(path)
+    except (OSError, ValueError) as e:
+        raise WorkflowError(f"Workflow '{name}' could not be read: {e}")
+    if not isinstance(file_body, dict):
+        raise WorkflowError(f"Workflow '{name}' is not a JSON object")
+
+    file_hash = body_hash(file_body)
+
+    if row is not None:
+        if row.body_hash != file_hash:
+            # Same reconciliation the old code got for free by reading the file every time.
+            row.body = file_body
+            row.body_hash = file_hash
+            row.updated_at = float(file_body.get("updated_at") or time.time())
+            try:
+                row.version = int(file_body.get("version") or row.version)
+            except (TypeError, ValueError):
+                pass
+        row.file_mtime, row.file_size = stat
+        session.flush()
+        return row
+
+    # First sight of this name: bring its snapshots across too, and adopt a pre-versioning
+    # workflow as v1.
+    body = dict(file_body)
+    body.setdefault("version", 1)
+    body.setdefault("body_hash", file_hash)
+    body.setdefault("updated_at", time.time())
+
+    snapshots = {}
+    for version in _disk_versions(workflows_dir, name):
+        try:
+            snapshots[version] = _read_json(_version_path(workflows_dir, name, version))
+        except (OSError, ValueError):
+            continue
+    if not snapshots:
+        snapshots = {int(body["version"]): body}
+
+    for version, snap in sorted(snapshots.items()):
+        if _version_row(session, name, version) is not None:
+            continue
+        session.add(SavedWorkflowVersion(
+            name=name,
+            version=int(version),
+            body=snap,
+            body_hash=str(snap.get("body_hash") or body_hash(snap)),
+            updated_at=float(snap.get("updated_at") or time.time()),
+            note=snap.get("note"),
+            author=snap.get("author"),
+        ))
+
+    row = SavedWorkflow(
+        name=name,
+        version=int(body.get("version") or max(snapshots)),
+        body=body,
+        body_hash=str(body.get("body_hash") or file_hash),
+        updated_at=float(body.get("updated_at") or time.time()),
+        tags=normalise_tags((read_meta(workflows_dir).get(name) or {}).get("tags")),
+        file_mtime=stat[0],
+        file_size=stat[1],
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def list_workflow_names(workflows_dir):
+    with _db() as session:
+        known = set(session.execute(select(SavedWorkflow.name)).scalars().all())
+        # The union, not just what is on disk: a file deleted behind the API's back has no name
+        # left to iterate, so reconciling only disk names would leave its row (and its tags) in
+        # the library forever.
+        for name in sorted(known | set(_disk_names(workflows_dir))):
+            try:
+                _sync_from_disk(session, workflows_dir, name)
+            except WorkflowError:
+                continue  # one unreadable file shouldn't take the whole library down
+        names = session.execute(select(SavedWorkflow.name)).scalars().all()
+    return sorted(names)
+
+
+def read_head(workflows_dir, name):
+    with _db() as session:
+        row = _sync_from_disk(session, workflows_dir, name)
+        if row is None:
+            raise WorkflowNotFound(f"Workflow '{name}' not found")
+        return dict(row.body)
+
+
+def list_versions(workflows_dir, name):
+    with _db() as session:
+        _sync_from_disk(session, workflows_dir, name)
+        return _db_versions(session, name)
+
+
 def ensure_versioned(workflows_dir, name):
     """Adopt a pre-versioning workflow as v1, idempotently.
 
-    Called lazily on read rather than as a migration step so that a workflow file dropped into
-    WORKFLOWS_DIR by hand (or synced down from Cloud) is picked up the same way as one saved
-    through the UI.
+    Still the name every reader calls, even though adoption now happens inside the import: the
+    contract ("give me the head, whatever state it was left in") has not changed, and a caller
+    that only wants the body should not have to know whether it came from disk or the DB.
     """
-    body = read_head(workflows_dir, name)
-    if list_versions(workflows_dir, name):
-        return body
-
-    body = dict(body)
-    body.setdefault("version", 1)
-    body.setdefault("body_hash", body_hash(body))
-    body.setdefault("updated_at", time.time())
-
-    os.makedirs(_versions_dir(workflows_dir, name), exist_ok=True)
-    _write_json(_version_path(workflows_dir, name, 1), body)
-    _write_json(workflow_path(workflows_dir, name), body)
-    return body
+    return read_head(workflows_dir, name)
 
 
 def head_version(workflows_dir, name):
-    body = ensure_versioned(workflows_dir, name)
-    try:
-        return int(body.get("version") or 1)
-    except (TypeError, ValueError):
-        return 1
+    with _db() as session:
+        row = _sync_from_disk(session, workflows_dir, name)
+        if row is None:
+            raise WorkflowNotFound(f"Workflow '{name}' not found")
+        return int(row.version or 1)
 
 
 def read_version(workflows_dir, name, version=None):
     """Load an exact version, or the head when `version` is None.
 
     A pinned reference to a version that no longer exists is an error, never a silent fallback to
-    head — the whole point of pinning is that the run is reproducible, so quietly substituting
+    head -- the whole point of pinning is that the run is reproducible, so quietly substituting
     different steps would be the one unacceptable outcome.
     """
     if version is None:
-        return ensure_versioned(workflows_dir, name)
+        return read_head(workflows_dir, name)
 
-    ensure_versioned(workflows_dir, name)
-    path = _version_path(workflows_dir, name, version)
-    if not os.path.exists(path):
-        available = list_versions(workflows_dir, name)
-        raise WorkflowNotFound(
-            f"Workflow '{name}' has no version {version} "
-            f"(available: {', '.join(str(v) for v in available) or 'none'})"
-        )
-    try:
-        with open(path, "r") as fp:
-            return json.load(fp)
-    except (OSError, ValueError) as e:
-        raise WorkflowError(f"Workflow '{name}' v{version} could not be read: {e}")
+    with _db() as session:
+        _sync_from_disk(session, workflows_dir, name)
+        row = _version_row(session, name, version)
+        if row is None:
+            available = _db_versions(session, name)
+            raise WorkflowNotFound(
+                f"Workflow '{name}' has no version {version} "
+                f"(available: {', '.join(str(v) for v in available) or 'none'})"
+            )
+        return dict(row.body)
 
 
 def _write_json(path, data):
@@ -269,10 +450,20 @@ def _write_json(path, data):
         json.dump(data, fp, indent=4)
 
 
+def _mirror_to_disk(workflows_dir, name, body, version):
+    """Keep the on-disk copy in step. Never fatal: the DB write has already committed, so a failed
+    mirror is a degraded export, not a lost workflow."""
+    try:
+        _write_json(_version_path(workflows_dir, name, version), body)
+        _write_json(workflow_path(workflows_dir, name), body)
+    except OSError as e:
+        print(f"Workflow '{name}' saved, but its on-disk mirror failed: {e}")
+
+
 def save_version(workflows_dir, name, body, note=None, author=None):
     """Append-only save. Returns (body, version, created).
 
-    `created` is False when the incoming body is semantically identical to the head — people hit
+    `created` is False when the incoming body is semantically identical to the head -- people hit
     save reflexively, and a no-op save must not burn a version number or invent a fake edit in the
     history.
     """
@@ -280,43 +471,71 @@ def save_version(workflows_dir, name, body, note=None, author=None):
     body = dict(body)
     incoming_hash = body_hash(body)
 
-    existing_versions = []
-    if os.path.exists(workflow_path(workflows_dir, name)):
-        ensure_versioned(workflows_dir, name)
-        existing_versions = list_versions(workflows_dir, name)
-        head = read_head(workflows_dir, name)
-        if head.get("body_hash") == incoming_hash:
-            # Keep the head file authoritative anyway (it may predate the metadata keys), but
-            # report no new version.
-            return head, int(head.get("version") or 1), False
+    with _db() as session:
+        row = _sync_from_disk(session, workflows_dir, name)
 
-    version = (max(existing_versions) + 1) if existing_versions else 1
-    body["version"] = version
-    body["body_hash"] = incoming_hash
-    body["updated_at"] = time.time()
-    if note:
-        body["note"] = note
-    if author:
-        body["author"] = author
+        if row is not None and row.body_hash == incoming_hash:
+            return dict(row.body), int(row.version), False
 
-    _write_json(_version_path(workflows_dir, name, version), body)
-    _write_json(workflow_path(workflows_dir, name), body)
+        existing = _db_versions(session, name)
+        version = (max(existing) + 1) if existing else 1
+        body["version"] = version
+        body["body_hash"] = incoming_hash
+        body["updated_at"] = time.time()
+        if note:
+            body["note"] = note
+        if author:
+            body["author"] = author
+
+        session.add(SavedWorkflowVersion(
+            name=name,
+            version=version,
+            body=body,
+            body_hash=incoming_hash,
+            updated_at=body["updated_at"],
+            note=note,
+            author=author,
+        ))
+        if row is None:
+            row = SavedWorkflow(name=name, tags=[])
+            session.add(row)
+        row.version = version
+        row.body = body
+        row.body_hash = incoming_hash
+        row.updated_at = body["updated_at"]
+
+        # Mirror inside the transaction so the stat we record is the stat of the file we just
+        # wrote. Recording it afterwards would leave the row looking stale and make the very next
+        # read re-parse the file it had itself produced.
+        _mirror_to_disk(workflows_dir, name, body, version)
+        stat = _file_stat(workflow_path(workflows_dir, name))
+        if stat is not None:
+            row.file_mtime, row.file_size = stat
+
     return body, version, True
 
 
 def delete_workflow(workflows_dir, name):
-    """Remove the head. Version snapshots are deliberately left on disk — a finished run may still
+    """Remove the head. Version snapshots are deliberately kept -- a finished run may still
     reference one, and that provenance is the reason the store exists."""
-    path = workflow_path(workflows_dir, name)
-    if not os.path.exists(path):
-        raise WorkflowNotFound(f"Workflow '{name}' not found")
-    os.remove(path)
-    set_tags(workflows_dir, name, [])
+    with _db() as session:
+        row = _sync_from_disk(session, workflows_dir, name)
+        if row is None:
+            raise WorkflowNotFound(f"Workflow '{name}' not found")
+        session.delete(row)
+
+    try:
+        os.remove(workflow_path(workflows_dir, name))
+    except OSError:
+        pass
+    _write_meta_mirror(workflows_dir)
 
 
 # --- tags ---------------------------------------------------------------------------------------
 
 def read_meta(workflows_dir):
+    """The on-disk tag side-car. Only read during import now -- the DB holds tags once a workflow
+    is known -- but still written, so the files remain a complete export."""
     try:
         with open(os.path.join(workflows_dir, META_FILENAME), "r") as fp:
             data = json.load(fp)
@@ -325,11 +544,21 @@ def read_meta(workflows_dir):
         return {}
 
 
+def _write_meta_mirror(workflows_dir):
+    with _db() as session:
+        rows = session.execute(select(SavedWorkflow)).scalars().all()
+        meta = {r.name: {"tags": list(r.tags or [])} for r in rows if r.tags}
+    try:
+        _write_json(os.path.join(workflows_dir, META_FILENAME), meta)
+    except OSError as e:
+        print(f"Tag mirror could not be written: {e}")
+
+
 def normalise_tags(tags):
     """Trim, drop blanks, dedupe case-insensitively (keeping the first spelling), and cap.
 
-    Case-insensitive deduping matters because "Screening" and "screening" filing a workflow into two
-    different buckets is exactly the kind of quiet mess that makes tagging useless.
+    Case-insensitive deduping matters because "Screening" and "screening" filing a workflow into
+    two different buckets is exactly the kind of quiet mess that makes tagging useless.
     """
     out = []
     seen = set()
@@ -350,32 +579,31 @@ def normalise_tags(tags):
 
 
 def get_tags(workflows_dir, name):
-    entry = read_meta(workflows_dir).get(validate_name(name)) or {}
-    return normalise_tags(entry.get("tags"))
+    with _db() as session:
+        row = _sync_from_disk(session, workflows_dir, name)
+        return normalise_tags(row.tags if row is not None else [])
 
 
 def set_tags(workflows_dir, name, tags):
-    """Replace a workflow's tags. An empty list removes its entry entirely, so deleting a workflow
-    doesn't leave orphaned metadata behind that a later workflow of the same name would inherit."""
-    validate_name(name)
-    meta = read_meta(workflows_dir)
+    """Replace a workflow's tags. Returns the normalised list actually stored."""
     cleaned = normalise_tags(tags)
-    if cleaned:
-        meta[name] = {**(meta.get(name) or {}), "tags": cleaned}
-    else:
-        meta.pop(name, None)
-    _write_json(os.path.join(workflows_dir, META_FILENAME), meta)
+    with _db() as session:
+        row = _sync_from_disk(session, workflows_dir, name)
+        if row is None:
+            raise WorkflowNotFound(f"Workflow '{name}' not found")
+        row.tags = cleaned
+    _write_meta_mirror(workflows_dir)
     return cleaned
 
 
 def all_tags(workflows_dir):
-    """Every tag in use, deduped case-insensitively, alphabetical — the Library's filter bar."""
-    known = set(list_workflow_names(workflows_dir))
+    """Every tag in use, deduped case-insensitively, alphabetical -- the Library's filter bar."""
+    list_workflow_names(workflows_dir)  # pick up anything newly dropped on disk
+    with _db() as session:
+        rows = session.execute(select(SavedWorkflow.tags)).scalars().all()
     collected = []
-    for name, entry in read_meta(workflows_dir).items():
-        if name not in known:
-            continue  # metadata for a workflow that has since been deleted
-        collected.extend((entry or {}).get("tags") or [])
+    for tags in rows:
+        collected.extend(tags or [])
     return sorted(normalise_tags(collected), key=str.casefold)
 
 
@@ -470,6 +698,7 @@ def expand_workflow_blocks(
     resolved=None,
     _depth=0,
     _stack=(),
+    _counter=None,
 ):
     """Flatten `Library Workflows` blocks into the real steps they stand for.
 
@@ -482,6 +711,14 @@ def expand_workflow_blocks(
     actually followed. `create_run` persists that onto the run, so a finished run can say exactly
     which body of each subworkflow it executed.
     """
+    # Every expansion of a link gets its own id. Two links to the *same* workflow produce two runs
+    # of steps carrying the same `_parent_workflow`, and readers that group by name alone merged
+    # them into one block -- the preview showed "Suzuki coupling screen, 32 steps" where there
+    # were two sixteen-step uses. A counter rather than a uuid so the same input expands to the
+    # same output: the preview endpoint and the dispatch path both call this and must agree.
+    if _counter is None:
+        _counter = itertools.count(1)
+
     expanded = []
 
     for block in (sequence_list or []):
@@ -550,6 +787,7 @@ def expand_workflow_blocks(
         # Recurse so a link inside a linked workflow resolves too. The old expander copied inner
         # blocks verbatim, so a nested link shipped straight through to the executor as a bogus
         # step; it was accepted at save time and only failed once running.
+        expansion_id = next(_counter)
         steps = expand_workflow_blocks(
             inner,
             workflows_dir,
@@ -557,14 +795,17 @@ def expand_workflow_blocks(
             resolved=resolved,
             _depth=_depth + 1,
             _stack=tuple(_stack) + (name,),
+            _counter=_counter,
         )
 
         for step in steps:
             params = step.setdefault("params", {})
             # The innermost owner wins, so the Queue page keeps grouping steps under the workflow
-            # they literally came from. `_parent_path` carries the full chain for the preview.
+            # they literally came from. `_parent_path` carries the full chain for the preview, and
+            # `_expansion_id` tells two uses of that same workflow apart.
             params.setdefault("_parent_workflow", name)
             params.setdefault("_parent_path", list(_stack) + [name])
+            params.setdefault("_expansion_id", expansion_id)
 
         expanded.extend(steps)
 

@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical, AlertTriangle, Layers, ListTree } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import Sidebar from '@/components/Sidebar';
+import RunTabs from '@/components/RunTabs';
 import { buildRunName, LIBRARY_INSTRUMENT, WorkflowMap, confirmDialog, notify } from '@ivoryos/shared-ui';
 
 /**
@@ -50,9 +51,14 @@ async function expandLinkedBlocks(seqs: { prep: any[]; sequence: any[]; cleanup:
       returnVar: step.params?._return_var || step.returnVar || '',
       isBatchAction: !!(step.batch_action ?? step.isBatchAction),
       // Steps expanded out of the same linked workflow are grouped, so the spreadsheet table can
-      // still show which saved workflow a step came from.
+      // still show which saved workflow a step came from. The id keys on `_expansion_id` rather
+      // than the name: two uses of the same workflow are two groups, and sharing an id would
+      // make them collapse and move as one.
       group: step.params?._parent_workflow
-        ? { id: `expanded-${step.params._parent_workflow}`, name: step.params._parent_workflow }
+        ? {
+            id: `expanded-${step.params._expansion_id ?? step.params._parent_workflow}`,
+            name: step.params._parent_workflow,
+          }
         : undefined,
     }));
 
@@ -656,6 +662,7 @@ export default function ExecutionPage() {
       {/* Main Area */}
       <div className="flex-1 flex flex-col relative z-0">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+          <RunTabs active="configure" />
           <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Spreadsheet Editor</h2>
           {variables.length > 0 && (
             <span className="text-xs font-semibold text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-white/5 px-2 py-0.5 rounded-full">

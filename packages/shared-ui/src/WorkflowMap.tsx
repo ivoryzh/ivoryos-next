@@ -61,21 +61,38 @@ const isInternalParam = (key: string) => key.startsWith('_');
 
 const isBatchStep = (step: ExpandedStep) => !!(step.batch_action ?? step.isBatchAction);
 
-/** Consecutive steps sharing a `_parent_workflow` form one collapsible group. */
+/**
+ * Consecutive steps from the same *expansion* form one collapsible group.
+ *
+ * Keyed on `_expansion_id`, not on the workflow name: using the same saved workflow twice in a
+ * row produces two adjacent runs of steps with an identical `_parent_workflow`, and grouping by
+ * name silently fused them into one — a sequence that used "Suzuki coupling screen" twice read
+ * as a single 32-step block instead of two 16-step ones. Runs recorded before the expander
+ * emitted the id fall back to the name and keep their old (merged) rendering rather than
+ * breaking.
+ */
 type Group = { parent: string | null; steps: ExpandedStep[]; startIndex: number };
+
+const expansionKey = (step: ExpandedStep) => {
+  const parent = step.params?._parent_workflow || null;
+  if (!parent) return null;
+  const id = step.params?._expansion_id;
+  return id === undefined || id === null ? `name:${parent}` : `exp:${id}`;
+};
 
 function groupSteps(steps: ExpandedStep[]): Group[] {
   const groups: Group[] = [];
+  let lastKey: string | null | undefined;
   steps.forEach((step, index) => {
     const parent = step.params?._parent_workflow || null;
+    const key = expansionKey(step);
     const last = groups[groups.length - 1];
-    if (last && last.parent === parent && parent !== null) {
-      last.steps.push(step);
-    } else if (last && last.parent === null && parent === null) {
+    if (last && key === lastKey) {
       last.steps.push(step);
     } else {
       groups.push({ parent, steps: [step], startIndex: index });
     }
+    lastKey = key;
   });
   return groups;
 }

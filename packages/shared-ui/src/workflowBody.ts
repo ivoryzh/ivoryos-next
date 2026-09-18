@@ -193,13 +193,14 @@ export function scanDynamicParams(body: SavedWorkflowBody | undefined): Record<s
 /**
  * Bring a saved workflow into the sequence being edited.
  *
- * `copy` is the default because that is what users overwhelmingly mean by reuse: they drag a saved
- * protocol in and then adjust it. It inlines the blocks — immediately editable, with no live
- * dependency on the source, so a later edit to that source cannot silently change this workflow.
+ * `link` is the default: it keeps a single reference block that resolves at run time, so the saved
+ * workflow stays one thing and an edit to it reaches everywhere it is used. It pins the version it
+ * was created against, so the step keeps running the body it was built with until someone
+ * explicitly updates it.
  *
- * `link` keeps a single reference block that resolves at run time, for genuine shared boilerplate
- * where one edit *should* reach everywhere. It pins the version it was created against, so the
- * step keeps running the body it was built with until someone explicitly updates it.
+ * `copy` inlines the blocks instead — immediately editable, with no dependency on the source. That
+ * is the right choice when you want to take a protocol and diverge from it, but as a default it
+ * forks the protocol every time someone reuses it, which is how a library stops being one.
  */
 export function reuseWorkflow(
   name: string,

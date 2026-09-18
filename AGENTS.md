@@ -254,7 +254,26 @@ Both center on `extract_type_info(annotation, default)`, which recognizes: plain
 1. **`Optional[X]` / `Union[X, None]` unwrapping.** `schema_worker/introspection.py` unwraps a `Union` with exactly one non-`None` arm and re-extracts on the inner type, so `Optional[MyEnum]` still gets its dropdown `options` and `Optional[MyDataclass]` still gets its expanded `fields`. `edge_server`'s copy has no such unwrapping — an `Optional`-wrapped enum or dataclass parameter degrades to a bare free-text box on every real instrument connected to Core today.
 2. **PEP 563 string annotations** (`from __future__ import annotations`, or any `annotations = "..."` future import — increasingly the default in newer driver code). Under PEP 563, `param.annotation`/`sig.return_annotation` are plain **strings**, not the real type objects — so every `isinstance`/`issubclass` check in `extract_type_info` (the Enum check, the dataclass check, the bool check) silently fails and every such parameter degrades to a free-text box, with no error anywhere to point at why. `schema_worker/introspection.py`'s `inspect_class` resolves this first via `typing.get_type_hints(method)` (falling back to the raw, possibly-string annotation only if resolution itself throws, e.g. an unresolvable forward reference) before calling `extract_type_info`. `edge_server`'s `inspect_device_module` does not — a driver written with `from __future__ import annotations` loses every dropdown/nested-object field in its real, live schema.
 
-If you're asked to touch instrument schema extraction, porting these two fixes from `schema_worker/introspection.py` into `edge_server/ivoryos_edge/introspection.py`'s `inspect_device_module`/`extract_type_info` is probably the highest-leverage thing to do — it fixes a real, live gap for actual connected instruments, not just the less-exercised Hub path.
+If you're asked to touch instrument schema extraction, porting these two fixes from `schema_worker/introspection.py` into `edge_server/ivoryos_edge/introspection.py`'s `inspect_device_module`/`extract_type_info` is probably the highest-leverage thing to do — it fixes a real, live gap for actual connected instruments, not just the less-exercised Hub path. (Both copies *do* resolve PEP 563 strings for **properties**, via `_resolve_hints` — gap 2 above is specifically about the method sweep in `inspect_device_module`.)
+
+### Properties are steps, in both directions
+
+Plenty of real drivers expose a setting as a `@property` rather than a method — `pump.speed = 5` is the only way to set it, and `pump.speed` the only way to read it. A property isn't callable, so an introspection pass that walks callables sees nothing at all, and the capability vanishes from the Designer with no error to explain it. Both copies therefore expand each public property into up to **two** schema entries, using the same convention as the original ivoryos designer so workflows read the same across both:
+
+| Entry key | Shape | Present when |
+| --- | --- | --- |
+| `<prop>` | `parameters: {}`, `return_type` from the getter's annotation | the property has an `fget` |
+| `<prop>_(setter)` | `parameters: {"value": …}`, `return_type: "None"` | the property has an `fset` |
+
+Both carry `is_property: true`, `property_name`, and `property_access: "get" \| "set"`; the getter also carries `has_setter`. The setter's `value` type comes from `fset`'s own parameter annotation, falling back to the getter's return annotation — so an enum property still renders as a dropdown and a step's JSON `"750"` still casts to `int` at call time.
+
+Three things follow from this and are easy to break:
+
+- **Properties are read off the *class*, never the instance** (`_iter_class_properties`). `inspect.getmembers(instance, …)` reads every attribute, which *runs* every getter — on a real driver that means hardware traffic (or an exception, or a several-second blocking read) just to build a schema at startup. The method sweep walks `dir()` and checks `inspect.getattr_static` first for the same reason. `has_member` is likewise answerable without reading.
+- **Execution goes through `resolve_callable(instance, name)`, not `getattr`.** Every call site in `queue.py` and `server.py`'s `/api/execute` expects a callable it can `inspect.signature()`, check with `iscoroutinefunction`, and invoke with `**kwargs`. `resolve_callable` wraps a setter as a one-argument function carrying the property's annotation as its `value` parameter (which is what makes `cast_arguments` work on it) and a getter as a zero-argument function. Plain methods pass straight through. Using `getattr` at a new call site will `AttributeError` on `"speed_(setter)"` and silently return a *value* instead of a callable for a getter.
+- **`generatePythonCode` renders property steps as attribute access** — `reactor.stir_rate = 750`, `temp_c = reactor.temperature` — keyed off `schema.property_access`. Without that branch the preview shows `reactor.stir_rate_(setter)(value=750)`, which is not Python.
+
+Properties inherited from a *framework* base class are filtered out (`FRAMEWORK_PROPERTY_PACKAGES`): pydantic's `model_extra` / `model_fields_set` describe the modelling library, not the instrument. Note that the equivalent *methods* from such bases (`model_dump`, `model_validate`, …) are **not** filtered and still show up — a pre-existing wart, not a decision.
 
 ---
 

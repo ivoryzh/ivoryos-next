@@ -2,9 +2,10 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Zap, Menu, Cloud, HandHelping } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Menu, Cloud, HandHelping } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
+import { lastRunTabHref, runTabForPath, samePath } from './RunTabs';
 
 interface SidebarProps {
   theme: 'light' | 'dark';
@@ -19,12 +20,28 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   // initializer would make the client's first render disagree with the server-rendered HTML
   // whenever the saved preference differs from the default, causing a hydration mismatch.
   const [isExpanded, setIsExpanded] = useState(true);
+  // Configure and Optimize share one entry; it returns you to whichever you were last on. Same
+  // hydration constraint as isExpanded above — start at the default, correct after mount.
+  const [runHref, setRunHref] = useState('/execution');
   const pathname = usePathname();
 
   useEffect(() => {
     const saved = localStorage.getItem('ivoryos_sidebar_expanded');
     if (saved !== null) setIsExpanded(saved === 'true');
   }, []);
+
+  // Re-read on every navigation: landing on /optimize updates the memory, and the entry should
+  // point there from then on without needing a reload.
+  useEffect(() => {
+    setRunHref(lastRunTabHref());
+  }, [pathname]);
+
+  // While you are *on* one of the two, the entry points at that one directly rather than at the
+  // remembered value. RunTabs writes the memory from its own effect, and sibling effects fire in
+  // tree order — Sidebar renders first, so it would otherwise read the previous tab for one
+  // navigation and lag a step behind.
+  const currentRunTab = runTabForPath(pathname);
+  const runEntryHref = currentRunTab ? currentRunTab.href : runHref;
 
   const [waitingRun, setWaitingRun] = useState<{ id: number; prompt: string; inputType: string } | null>(null);
   const [inputValue, setInputValue] = useState('');
@@ -110,8 +127,10 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
     }
   };
 
-  const navItem = (href: string, label: string, icon: React.ReactNode) => {
-    const isActive = pathname === href;
+  const navItem = (href: string, label: string, icon: React.ReactNode, alsoActiveOn: string[] = []) => {
+    // samePath, not ===: with trailingSlash the pathname is "/library/" and every href here is
+    // written "/library", so no entry had ever highlighted as current.
+    const isActive = samePath(href, pathname) || alsoActiveOn.some(p => samePath(p, pathname));
     return (
       <Link 
         href={href} 
@@ -195,8 +214,10 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         {navItem('/', 'Dashboard', <LayoutDashboard className="w-5 h-5 shrink-0" />)}
         {navItem('/library', 'Library', <Library className="w-5 h-5 shrink-0" />)}
         {navItem('/designer', 'Designer', <Workflow className="w-5 h-5 shrink-0" />)}
-        {navItem('/execution', 'Configure', <Settings2 className="w-5 h-5 shrink-0" />)}
-        {navItem('/optimize', 'Optimize', <Zap className="w-5 h-5 shrink-0" />)}
+        {/* One entry for two routes. Both are "fill in this workflow's open parameters"; the tab
+            strip in the page header is what switches between filling them yourself and letting
+            the optimizer do it. */}
+        {navItem(runEntryHref, 'Configure', <Settings2 className="w-5 h-5 shrink-0" />, ['/execution', '/optimize'])}
         {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}
         {navItem('/data', 'Data History', <Database className="w-5 h-5 shrink-0" />)}
         {navItem('/instruments', 'Instruments', <Gamepad2 className="w-5 h-5 shrink-0" />)}

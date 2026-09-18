@@ -2,9 +2,9 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag } from 'lucide-react';
+import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag, Plus } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { workflowSignature, toSequenceBlocks, confirmDialog, notify, openDialog } from '@ivoryos/shared-ui';
+import { workflowSignature, toSequenceBlocks, confirmDialog, notify } from '@ivoryos/shared-ui';
 
 type WorkflowItem = {
   name: string;
@@ -23,6 +23,11 @@ type WorkflowItem = {
   // already its identity — moving one would break every pinned reference to it.
   tags?: string[];
 };
+
+// Mirrors MAX_TAGS / MAX_TAG_LENGTH in edge_server/ivoryos_edge/workflows.py. Enforced here too
+// so the editor shows the real limit instead of silently dropping what the server trims.
+const MAX_TAGS = 24;
+const MAX_TAG_LENGTH = 40;
 
 type VersionEntry = {
   version: number;
@@ -44,6 +49,11 @@ export default function LibraryPage() {
   const [pendingLoad, setPendingLoad] = useState<{ name: string; draftName: string; version?: number } | null>(null);
   const [allTags, setAllTags] = useState<string[]>([]);
   const [activeTags, setActiveTags] = useState<string[]>([]);
+  // The tag editor holds its own working copy, so Cancel really cancels and nothing is written
+  // until Save.
+  const [tagEditor, setTagEditor] = useState<{ name: string; tags: string[] } | null>(null);
+  const [tagDraft, setTagDraft] = useState('');
+  const [savingTags, setSavingTags] = useState(false);
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [versions, setVersions] = useState<VersionEntry[] | null>(null);
 
@@ -102,36 +112,49 @@ export default function LibraryPage() {
   const toggleTag = (tag: string) =>
     setActiveTags(prev => prev.some(t => sameTag(t, tag)) ? prev.filter(t => !sameTag(t, tag)) : [...prev, tag]);
 
-  const editTags = async (workflow: WorkflowItem) => {
-    // openDialog rather than promptDialog: an emptied field has to mean "remove all tags", and
-    // promptDialog collapses empty input to null so it can't be told apart from Cancel.
-    const res = await openDialog({
-      title: `Tags for "${workflow.name}"`,
-      message: 'Separate tags with commas. Tags are only labels for finding things — changing them '
-             + 'creates no new version and affects nothing that links to this workflow. '
-             + 'Clear the field to remove all of them.',
-      input: {
-        defaultValue: (workflow.tags || []).join(', '),
-        placeholder: 'screening, calibration',
-      },
-      actions: [
-        { id: 'cancel', label: 'Cancel', kind: 'cancel' },
-        { id: 'ok', label: 'Save tags', kind: 'primary' },
-      ],
-    });
-    if (res.action !== 'ok') return;
-    const entered = res.value || '';
+  // Tags are edited as chips, not as a comma-separated string. One text field holding
+  // "screening, calibration" makes you retype the whole set to drop one of them, gives no hint
+  // that "Screening" already exists elsewhere in the library, and turns a typo into a new tag
+  // that quietly files the workflow on its own. Add one at a time, remove with an x, and pick
+  // from what's already in use.
+  const editTags = (workflow: WorkflowItem) => {
+    setTagEditor({ name: workflow.name, tags: [...(workflow.tags || [])] });
+    setTagDraft('');
+  };
+
+  const addTag = (raw: string) => {
+    // Mirrors the server's normalise_tags so what you see in the dialog is what gets stored:
+    // collapse whitespace, cap the length, dedupe case-insensitively, cap the count.
+    const cleaned = raw.split(/\s+/).filter(Boolean).join(' ').slice(0, MAX_TAG_LENGTH).trim();
+    if (!cleaned || !tagEditor) return;
+    if (tagEditor.tags.some(t => sameTag(t, cleaned))) { setTagDraft(''); return; }
+    if (tagEditor.tags.length >= MAX_TAGS) return;
+    setTagEditor({ ...tagEditor, tags: [...tagEditor.tags, cleaned] });
+    setTagDraft('');
+  };
+
+  const removeTag = (tag: string) => {
+    if (!tagEditor) return;
+    setTagEditor({ ...tagEditor, tags: tagEditor.tags.filter(t => !sameTag(t, tag)) });
+  };
+
+  const saveTags = async () => {
+    if (!tagEditor) return;
+    setSavingTags(true);
     try {
-      const saved = await fetch(`${API_BASE}/api/workflows/${encodeURIComponent(workflow.name)}/tags`, {
+      const saved = await fetch(`${API_BASE}/api/workflows/${encodeURIComponent(tagEditor.name)}/tags`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tags: entered.split(',') }),
+        body: JSON.stringify({ tags: tagEditor.tags }),
       });
       const data = await saved.json();
       if (!saved.ok) throw new Error(data.error || 'Could not save tags');
+      setTagEditor(null);
       fetchWorkflows();
     } catch (e: any) {
       await notify(e.message, { title: 'Could not save tags', tone: 'error' });
+    } finally {
+      setSavingTags(false);
     }
   };
 
@@ -421,22 +444,17 @@ export default function LibraryPage() {
                             Links to {workflow.links!.join(', ')}
                           </p>
                         )}
-                        {/* Clicking a chip filters by it, so the card is also the way you navigate
-                            between related protocols rather than a dead label. */}
+                        {/* Labels, not controls. Filtering lives in one place — the chip bar above
+                            the list — and a second set of clickable chips on every card only made
+                            it ambiguous which one you were touching. */}
                         <div className="mt-3 flex flex-wrap items-center gap-1.5">
                           {(workflow.tags || []).map(tag => (
-                            <button
+                            <span
                               key={tag}
-                              onClick={() => toggleTag(tag)}
-                              title={isTagActive(tag) ? `Stop filtering by ${tag}` : `Filter by ${tag}`}
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-medium border transition-colors ${
-                                isTagActive(tag)
-                                  ? 'bg-indigo-600 border-indigo-600 text-white'
-                                  : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'
-                              }`}
+                              className="px-2 py-0.5 rounded-full text-[10px] font-medium border bg-gray-50 border-gray-200 text-gray-600 dark:bg-white/5 dark:border-white/10 dark:text-gray-300"
                             >
                               {tag}
-                            </button>
+                            </span>
                           ))}
                           <button
                             onClick={() => editTags(workflow)}
@@ -483,6 +501,131 @@ export default function LibraryPage() {
           )}
         </div>
       </div>
+
+      {tagEditor && (() => {
+        // Only tags that aren't already on this workflow are worth offering — a suggestion that
+        // does nothing when clicked is worse than no suggestion.
+        const suggestions = allTags.filter(t => !tagEditor.tags.some(applied => sameTag(applied, t)));
+        const draftIsNew = tagDraft.trim().length > 0
+          && !allTags.some(t => sameTag(t, tagDraft.trim()))
+          && !tagEditor.tags.some(t => sameTag(t, tagDraft.trim()));
+        const full = tagEditor.tags.length >= MAX_TAGS;
+        return (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 p-4" onClick={() => setTagEditor(null)}>
+          <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md flex flex-col bg-white dark:bg-[#111] rounded-2xl shadow-2xl border border-gray-200 dark:border-white/10">
+            <header className="shrink-0 px-5 py-4 border-b border-gray-200 dark:border-white/10 flex items-start justify-between">
+              <div className="min-w-0">
+                <h2 className="text-base font-bold text-gray-900 dark:text-white break-words">Tags for &ldquo;{tagEditor.name}&rdquo;</h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  Labels for finding things. Changing them creates no new version.
+                </p>
+              </div>
+              <button onClick={() => setTagEditor(null)} className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 shrink-0 ml-4">
+                <X className="w-4 h-4" />
+              </button>
+            </header>
+
+            <div className="px-5 py-4 space-y-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">On this workflow</p>
+                {tagEditor.tags.length === 0 ? (
+                  <p className="text-sm text-gray-400 italic">No tags yet.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {tagEditor.tags.map(tag => (
+                      <span key={tag} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:border-indigo-500/30">
+                        {tag}
+                        <button
+                          onClick={() => removeTag(tag)}
+                          title={`Remove ${tag}`}
+                          className="p-0.5 rounded-full text-indigo-400 hover:text-indigo-700 hover:bg-indigo-100 dark:hover:text-indigo-200 dark:hover:bg-indigo-500/25 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
+                  {suggestions.length > 0 ? 'Already in use' : 'Add a tag'}
+                </p>
+                {suggestions.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-2.5">
+                    {suggestions.map(tag => (
+                      <button
+                        key={tag}
+                        onClick={() => addTag(tag)}
+                        disabled={full}
+                        title={full ? `Limit of ${MAX_TAGS} tags reached` : `Add ${tag}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-dashed border-gray-300 text-gray-600 hover:border-indigo-400 hover:text-indigo-600 dark:border-white/15 dark:text-gray-300 dark:hover:border-indigo-400 dark:hover:text-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <Plus className="w-3 h-3" />
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {/* Still a field, because the first workflow to need a tag has nothing to pick
+                    from — but it takes one tag, on Enter, not a comma-separated list. */}
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    value={tagDraft}
+                    maxLength={MAX_TAG_LENGTH}
+                    disabled={full}
+                    onChange={(e) => setTagDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); addTag(tagDraft); }
+                      // Backspace on an empty field removes the last chip, the way tag fields
+                      // everywhere else behave.
+                      else if (e.key === 'Backspace' && !tagDraft && tagEditor.tags.length) {
+                        removeTag(tagEditor.tags[tagEditor.tags.length - 1]);
+                      }
+                    }}
+                    placeholder={full ? `Limit of ${MAX_TAGS} tags reached` : 'New tag, then Enter'}
+                    className="flex-1 min-w-0 px-3 py-2 rounded-lg text-sm bg-white dark:bg-black/40 border border-gray-300 dark:border-white/10 text-gray-800 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:border-indigo-400 disabled:opacity-50"
+                  />
+                  <button
+                    onClick={() => addTag(tagDraft)}
+                    disabled={!tagDraft.trim() || full}
+                    className="shrink-0 px-3 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Add
+                  </button>
+                </div>
+                {draftIsNew && (
+                  <p className="text-[11px] text-gray-400 mt-1.5">
+                    &ldquo;{tagDraft.trim()}&rdquo; is new — it will be created.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <footer className="shrink-0 px-5 py-3 border-t border-gray-200 dark:border-white/10 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-gray-400">{tagEditor.tags.length}/{MAX_TAGS}</span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setTagEditor(null)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveTags}
+                  disabled={savingTags}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-60 transition-colors"
+                >
+                  {savingTags ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+        );
+      })()}
 
       {historyFor && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={() => setHistoryFor(null)}>

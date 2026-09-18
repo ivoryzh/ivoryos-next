@@ -391,12 +391,38 @@ export default function DesignerPage() {
     const legacyFormat = buildSavedBody(name, currentWorkflowDescription, prepSequence, sequence, cleanupSequence);
 
     try {
-      const res = await fetch(`${API_BASE}/api/workflows/${name}`, {
+      const post = (force: boolean) => fetch(`${API_BASE}/api/workflows/${name}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(legacyFormat)
+        body: JSON.stringify(force ? { ...legacyFormat, force: true } : legacyFormat)
       });
-      const data = await res.json();
+
+      let res = await post(false);
+      let data = await res.json();
+
+      // A link-graph rejection is worth stopping for, but not worth throwing the edit away over:
+      // writing A before the B it calls exists is a normal order to work in. Say exactly what is
+      // wrong, then let the author decide. The run path validates independently, so a workflow
+      // saved this way still cannot dispatch anything broken — it just refuses later, by which
+      // point the missing piece usually exists.
+      if (data.forceable) {
+        const isCycle = data.forceable === 'cycle';
+        const choice = await chooseDialog({
+          title: isCycle ? 'These links form a loop' : 'This links to something missing',
+          message: data.error + (isCycle
+            ? '\n\nSaving anyway keeps your edit, but this workflow will not be runnable until the loop is broken.'
+            : '\n\nSaving anyway keeps your edit. It will not run until that workflow exists.'),
+          tone: 'danger',
+          actions: [
+            { id: 'cancel', label: 'Keep editing', kind: 'cancel' },
+            { id: 'force', label: 'Save anyway', kind: 'danger' },
+          ],
+        });
+        if (choice !== 'force') return false;
+        res = await post(true);
+        data = await res.json();
+      }
+
       if (data.status === 'success') {
         setCurrentWorkflowName(name);
         localStorage.setItem('ivoryos_editing_workflow', name);
@@ -415,7 +441,7 @@ export default function DesignerPage() {
         );
         return true;
       } else {
-        // Cycle and dangling-link rejections arrive here with the offending path named.
+        // Anything not offered as forceable: a bad name, or the write itself failing.
         await notify(data.error, { title: 'Could not save', tone: 'error' });
       }
     } catch (e: any) {

@@ -106,7 +106,10 @@ export default function WorkflowEditor({
   // Copy is the default: dragging a saved workflow in inlines its steps so they can be edited on
   // the spot, which is what people overwhelmingly mean by reuse. Link is the deliberate exception
   // for shared boilerplate that should change everywhere at once.
-  const [reuseMode, setReuseMode] = useState<ReuseMode>('copy');
+  // Link, not copy. Dropping a saved workflow in should keep it *one* thing: edit the source and
+  // every sequence using it follows. Copy inlines the steps and quietly forks the protocol, which
+  // is occasionally what you want but a poor thing to get by default.
+  const [reuseMode, setReuseMode] = useState<ReuseMode>('link');
   // Copied groups start collapsed — dropping a twelve-step protocol onto the canvas as twelve
   // loose cards buries whatever else is already there. This tracks the ones the user has opened;
   // absent means collapsed.
@@ -333,6 +336,14 @@ export default function WorkflowEditor({
         const entry = statusData.instruments[instrument]?.[method] || {};
         const blocks = reuseWorkflow(method, entry.body, statusData.instruments, reuseMode);
         if (!blocks.length) return;
+        // Auto-fill applies to a *link* the same way it applies to any other block: the link's
+        // parameters are the #vars the saved workflow leaves open, and those are exactly what an
+        // Optimization run needs bound. It deliberately does not touch a copy — a copy arrives
+        // with the protocol's real arguments, and overwriting those with #var would throw the
+        // protocol away.
+        if (autoFillVariables && blocks.length === 1 && blocks[0].ref) {
+          blocks[0].params = buildDefaultParams(blocks[0].schema?.parameters, true);
+        }
         // A copied protocol brings its output variables with it; rename any that this workflow is
         // already using, so the two can't silently overwrite each other in the run context.
         void (async () => {
@@ -1764,10 +1775,10 @@ export default function WorkflowEditor({
 
                         {isExpanded && (
                           <div className="ml-2 pl-2 border-l border-gray-100 dark:border-white/5 mt-0.5 mb-2 space-y-0.5">
-                            {/* How a dragged workflow is brought in. Copy is the default because
-                                that is what reuse almost always means in practice; Link is the
-                                deliberate choice to keep tracking the original, with the
-                                consequence spelled out rather than left implicit. */}
+                            {/* How a dragged workflow is brought in. Link is the default: reuse
+                                should keep the saved workflow as one thing, so an edit to it
+                                reaches everywhere. Copy is the deliberate choice to fork, with
+                                the consequence spelled out rather than left implicit. */}
                             {isLibrary && (
                               <div className="px-1.5 py-1.5 mb-1">
                                 <div className="flex rounded-md border border-gray-200 dark:border-white/10 overflow-hidden">

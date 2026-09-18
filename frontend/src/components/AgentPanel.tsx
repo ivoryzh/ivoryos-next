@@ -15,7 +15,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Bot, Check, ChevronDown, GitCompare, Loader2, RefreshCw, Send, Settings2, Sparkles, Trash2, X,
+  AlertTriangle, Bot, Check, GitCompare, LayoutGrid, Loader2, RefreshCw, Send, Settings2, Sparkles, Trash2, X,
 } from 'lucide-react';
 import { API_BASE } from '@/config';
 import {
@@ -576,26 +576,42 @@ export default function AgentPanel({
         )}
       </div>
 
-      <div className="shrink-0 p-3 border-t border-gray-200 dark:border-white/10 bg-white dark:bg-[#141414]">
-        <div className="relative">
-          <textarea
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onKeyDown={e => {
-              // Enter sends, Shift+Enter is a newline — the same as the legacy panel.
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-            }}
-            rows={3}
-            placeholder="Describe the protocol, or the change you want…"
-            disabled={busy}
-            className="w-full resize-none bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 pr-10 text-xs outline-none focus:border-purple-400 disabled:opacity-60"
-          />
+      <div className="shrink-0 p-3 border-t border-gray-200 dark:border-white/10 bg-white dark:bg-[#141414] space-y-2">
+        {/* The send button used to float inside the textarea, which left it crowding the rounded
+            corner and let a long third line run underneath it. On its own row it has real
+            spacing, and the row is also where the way back to the modules list belongs — the
+            panel replaced that list, so the return trip should start from the panel. */}
+        <textarea
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => {
+            // Enter sends, Shift+Enter is a newline — the same as the legacy panel.
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+          }}
+          rows={3}
+          placeholder="Describe the protocol, or the change you want…"
+          disabled={busy}
+          className="w-full resize-none bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs outline-none focus:border-purple-400 disabled:opacity-60"
+        />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onClose}
+            title="Close the assistant and bring the module list back"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-white/5 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/10 transition-colors"
+          >
+            <LayoutGrid className="w-3.5 h-3.5" />
+            <span>Modules</span>
+          </button>
+          <span className="flex-1 text-[10px] text-gray-400 dark:text-gray-600 truncate">
+            Enter to send · Shift+Enter for a new line
+          </span>
           <button
             onClick={send}
             disabled={busy || !draft.trim()}
-            className="absolute right-2 bottom-2 p-1.5 rounded-lg bg-purple-600 text-white disabled:opacity-40 hover:bg-purple-700"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-[11px] font-bold disabled:opacity-40 hover:bg-purple-700 transition-colors"
           >
             <Send className="w-3.5 h-3.5" />
+            <span>Send</span>
           </button>
         </div>
       </div>

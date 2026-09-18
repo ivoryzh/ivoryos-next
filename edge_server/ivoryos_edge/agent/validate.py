@@ -102,6 +102,10 @@ def _check_params(where, entry, params, issues, known_vars, instrument, method):
             continue
         info = schema_params.get(name)
         if info is None:
+            if entry.get("accepts_kwargs"):
+                # The method takes **kwargs, so arguments outside the listed ones are real and
+                # get forwarded. Nothing here can say whether this particular one is meaningful.
+                continue
             issues.append(_issue(
                 "error", where,
                 f"{instrument}.{method} has no parameter '{name}'.",

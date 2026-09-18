@@ -399,8 +399,21 @@ def inspect_class(cls):
             hints = _resolve_hints(method)
 
             params = {}
+            # A **kwargs method takes arguments this schema cannot enumerate, so anything not
+            # listed is legitimate rather than a typo — recorded here for validation to relax.
+            accepts_kwargs = False
             for param_name, param in sig.parameters.items():
                 if param_name == "self":
+                    continue
+                # *args / **kwargs are not arguments a form can fill. They were being reported
+                # as required parameters named "args" and "kwargs", which is wrong twice over:
+                # they are never required, and passing them by that name is an error — a
+                # `def move(self, *args)` called as move(args=[1, 2]) raises TypeError, and a
+                # `**kwargs` method quietly receives a key literally called "kwargs". A driver
+                # that wraps everything in **kwargs therefore shows no parameters and is called
+                # with none, which is exactly what works.
+                if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                    accepts_kwargs = accepts_kwargs or param.kind is inspect.Parameter.VAR_KEYWORD
                     continue
                 annotation = hints.get(param_name, param.annotation)
                 params[param_name] = extract_type_info(annotation, param.default)
@@ -422,6 +435,7 @@ def inspect_class(cls):
                 "return_type": return_type,
                 "return_info": return_info,
                 "return_paths": return_paths,
+                "accepts_kwargs": accepts_kwargs,
                 "is_coroutine": inspect.iscoroutinefunction(method)
             }
         except Exception as e:

@@ -528,3 +528,63 @@ def test_link_arguments_are_only_checked_when_the_body_can_be_read():
     rather than invent errors."""
     caller = _body([_step("Library Workflows", "Charge vial", {})])
     assert validate_body(caller, _schema(), ["Charge vial"]) == []
+
+
+def test_varargs_are_not_parameters_and_never_required():
+    """`*args` / `**kwargs` were reported as required parameters literally named "args" and
+    "kwargs". They are never required, and passing them by name is an error rather than a
+    no-op: `def move(self, *args)` called as move(args=[1, 2]) raises TypeError, and a
+    **kwargs method silently receives a key called "kwargs"."""
+    from ivoryos_edge.introspection import inspect_device_module
+
+    class Device:
+        def move(self, speed: float, *args, **kwargs): ...
+        def passthrough(self, *args, **kwargs): ...
+        def plain(self, x: int): ...
+
+    schema = inspect_device_module(Device())
+
+    assert list(schema["move"]["parameters"]) == ["speed"]
+    # A driver that wraps everything in **kwargs shows no parameters, and calling it with none
+    # is exactly what works.
+    assert schema["passthrough"]["parameters"] == {}
+    assert schema["move"]["accepts_kwargs"] is True
+    assert schema["plain"]["accepts_kwargs"] is False
+
+
+def test_a_kwargs_method_accepts_arguments_the_schema_cannot_list():
+    """The flip side of dropping **kwargs from the schema: arguments outside the listed ones
+    are real and get forwarded, so they must not be reported as typos."""
+    schema = {
+        "dev": {
+            "flexible": {"description": "", "parameters": {"x": {"type": "int", "required": True}},
+                         "accepts_kwargs": True, "return_type": "None", "return_paths": []},
+            "strict": {"description": "", "parameters": {"x": {"type": "int", "required": True}},
+                       "accepts_kwargs": False, "return_type": "None", "return_paths": []},
+        }
+    }
+    assert validate_body(_body([_step("dev", "flexible", {"x": 1, "anything": "goes"})]), schema) == []
+
+    issues = validate_body(_body([_step("dev", "strict", {"x": 1, "anything": "goes"})]), schema)
+    assert any("has no parameter 'anything'" in i["message"] for i in _errors(issues))
+
+
+def test_a_parameter_with_a_default_is_not_required():
+    """The rule both the client and this validator now use: `required` is precisely "has no
+    default", so a defaulted parameter left out is how you ask for the default."""
+    schema = {
+        "pump": {
+            "dispense": {
+                "description": "",
+                "parameters": {
+                    "volume_ml": {"type": "float", "required": True},
+                    "flow_rate_ml_min": {"type": "float", "required": False, "default": 2.0},
+                },
+                "return_type": "None", "return_paths": [],
+            }
+        }
+    }
+    assert validate_body(_body([_step("pump", "dispense", {"volume_ml": 1.0})]), schema) == []
+    issues = validate_body(_body([_step("pump", "dispense", {})]), schema)
+    assert len(_errors(issues)) == 1
+    assert "volume_ml" in issues[0]["message"]

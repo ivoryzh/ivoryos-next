@@ -673,10 +673,10 @@ export default function DesignerPage() {
     {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
         panes at narrow widths (which just produces overlapping, clipped controls), it holds its
         natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
-    {/* The assistant panel is a fixed 26rem column, so the designer's own minimum has to grow
-        by that much when it is open — otherwise the editor is squeezed below its usable width
-        and the block rows overlap, instead of the page scrolling as it is designed to. */}
-    <div className={`flex h-full ${agentOpen ? 'min-w-[1496px]' : 'min-w-[1080px]'}`}>
+    {/* The assistant takes the toolbox's column rather than adding one, so the minimum only
+        grows by the difference between them (26rem panel vs 18rem toolbox) — not by the panel's
+        full width, which is what it cost when the two were shown side by side. */}
+    <div className={`flex h-full ${agentOpen ? 'min-w-[1208px]' : 'min-w-[1080px]'}`}>
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
@@ -716,6 +716,7 @@ export default function DesignerPage() {
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <WorkflowEditor
           toolboxFooter={<AgentToolboxButton open={agentOpen} onToggle={toggleAgent} />}
+          hideToolbox={agentOpen}
           statusData={statusData}
           prepSequence={prepSequence}
           setPrepSequence={setPrepSequence}

@@ -119,6 +119,11 @@ interface WorkflowEditorProps {
    *  puts the assistant toggle here so the two ways of building a sequence — drag a module
    *  in, or describe what you want — sit in the same column. */
   toolboxFooter?: React.ReactNode;
+  /** Hide the module toolbox entirely. The Designer sets this while the assistant panel is
+   *  open: the panel takes the column the toolbox was in, because picking a module out of a
+   *  list and describing what you want are alternatives, not things you do side by side.
+   *  Reordering and editing blocks on the canvas still work — only the drag *source* goes. */
+  hideToolbox?: boolean;
   /**
    * Latest saved version per workflow name, from `GET /api/workflows`. Drives the "source has been
    * updated" badge on copied groups and pinned links — the notification that replaces the old
@@ -156,6 +161,7 @@ export default function WorkflowEditor({
   header,
   customView,
   toolboxFooter,
+  hideToolbox,
   workflowVersions,
   fetchWorkflowVersion,
   onEditWorkflow,
@@ -1833,7 +1839,7 @@ export default function WorkflowEditor({
       <div className="flex-1 flex overflow-hidden">
         
         {/* Left Sidebar (Toolbox) */}
-        <div className="w-72 bg-white dark:bg-[#1a1a1a] flex flex-col border-r border-gray-200 dark:border-white/10 shrink-0 z-10">
+        <div className={`w-72 bg-white dark:bg-[#1a1a1a] flex-col border-r border-gray-200 dark:border-white/10 shrink-0 z-10 ${hideToolbox ? 'hidden' : 'flex'}`}>
           <div className="h-16 px-4 flex items-center gap-2 border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/10 shrink-0">
              <div className="relative flex-1">
                 <input

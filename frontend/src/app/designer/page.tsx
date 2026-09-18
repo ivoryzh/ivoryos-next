@@ -6,6 +6,7 @@ import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, Layou
 import Sidebar from '@/components/Sidebar';
 import AgentPanel from '@/components/AgentPanel';
 import AgentTab from '@/components/AgentTab';
+import AgentToolboxButton from '@/components/AgentToolboxButton';
 import {
   WorkflowEditor,
   SequenceBlock,
@@ -305,6 +306,13 @@ export default function DesignerPage() {
     // The Library reads this before replacing the canvas, so it has to stay in sync here.
     localStorage.setItem('ivoryos_is_unsaved', String(dirty));
   }, [hasLoaded, sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
+
+  // One toggle, reached from either the toolbox or the right-edge tab.
+  const toggleAgent = () => {
+    const next = !agentOpen;
+    setAgentOpen(next);
+    localStorage.setItem('ivoryos_agent_panel', String(next));
+  };
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -672,14 +680,7 @@ export default function DesignerPage() {
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
-      <AgentTab
-        open={agentOpen}
-        onToggle={() => {
-          const next = !agentOpen;
-          setAgentOpen(next);
-          localStorage.setItem('ivoryos_agent_panel', String(next));
-        }}
-      />
+      <AgentTab open={agentOpen} onToggle={toggleAgent} />
 
       {agentOpen && (
         <AgentPanel
@@ -707,13 +708,14 @@ export default function DesignerPage() {
               localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
             }
           }}
-          onClose={() => { setAgentOpen(false); localStorage.setItem('ivoryos_agent_panel', 'false'); }}
+          onClose={toggleAgent}
         />
       )}
 
       {/* Main Designer Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <WorkflowEditor
+          toolboxFooter={<AgentToolboxButton open={agentOpen} onToggle={toggleAgent} />}
           statusData={statusData}
           prepSequence={prepSequence}
           setPrepSequence={setPrepSequence}

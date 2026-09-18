@@ -115,6 +115,10 @@ interface WorkflowEditorProps {
   setCleanupSequence: (seq: SequenceBlock[]) => void;
   header?: React.ReactNode;
   customView?: React.ReactNode;
+  /** Pinned to the bottom of the module toolbox, below the instrument list. The Designer
+   *  puts the assistant toggle here so the two ways of building a sequence — drag a module
+   *  in, or describe what you want — sit in the same column. */
+  toolboxFooter?: React.ReactNode;
   /**
    * Latest saved version per workflow name, from `GET /api/workflows`. Drives the "source has been
    * updated" badge on copied groups and pinned links — the notification that replaces the old
@@ -151,6 +155,7 @@ export default function WorkflowEditor({
   setCleanupSequence,
   header,
   customView,
+  toolboxFooter,
   workflowVersions,
   fetchWorkflowVersion,
   onEditWorkflow,
@@ -2000,6 +2005,11 @@ export default function WorkflowEditor({
               )}
             </Droppable>
           </div>
+          {toolboxFooter && (
+            <div className="shrink-0 border-t border-gray-200 dark:border-white/10 p-3">
+              {toolboxFooter}
+            </div>
+          )}
         </div>
 
         {/* Sequence Canvas (Center) and Right Sidebar */}

@@ -9,29 +9,12 @@
  * is looking at, which is the one way the MCP route quietly fails.
  */
 
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Sparkles } from 'lucide-react';
-import { API_BASE } from '@/config';
+import { useWaitingProposals } from './useWaitingProposals';
 
 export default function AgentTab({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  const [waiting, setWaiting] = useState(0);
-
-  useEffect(() => {
-    // Only while closed: with the panel open it lists them itself, and two pollers for the
-    // same thing is just noise on the server log.
-    if (open) { setWaiting(0); return; }
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/agent/proposals?status=pending`);
-        const data = await res.json();
-        if (!cancelled) setWaiting((data.proposals || []).length);
-      } catch { /* the designer works offline; a silent tab is better than an error */ }
-    };
-    check();
-    const timer = setInterval(check, 5000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [open]);
+  const waiting = useWaitingProposals(!open);
 
   return (
     <button

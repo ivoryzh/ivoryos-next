@@ -453,6 +453,12 @@ export default function DesignerPage() {
           // Allow dynamic variables (strings starting with #) to pass through here, they are checked in execution/optimizer
           if (typeof val === 'string' && val.startsWith('#')) continue;
 
+          // Same rule as the Edge Designer's copy (AGENTS.md section 3): an optional parameter,
+          // or one with a default, is legitimately absent — the driver's signature supplies it.
+          const optional = (param as any)?.required === false;
+          const defaulted = (param as any)?.default !== undefined && (param as any)?.default !== '';
+          if ((val === undefined || val === '') && (optional || defaulted)) continue;
+
           if (val === undefined || val === '') {
             await notify(`Missing parameter '${key}' in ${block.instrument}.${block.method}`,
                          { title: 'Incomplete step', tone: 'error' });

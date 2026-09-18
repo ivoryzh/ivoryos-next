@@ -116,6 +116,46 @@ class SavedWorkflowVersion(Base):
     author: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
 
+class AgentProposal(Base):
+    """Something an agent wants to do, waiting on a person to say yes.
+
+    An agent translating a protocol is a collaborator, not an operator: everything it produces
+    lands here first and only takes effect when a human accepts it. That is the whole safety
+    story for letting a language model near a deck that moves real liquid — there is exactly one
+    path from "the model suggested it" to "it happened", and a person stands in it.
+
+    Two kinds share the table because they are the same thing from the reviewer's side — one
+    pending list, one accept/reject action:
+      * `workflow` — a proposed body for `name`, reviewed as a diff against what is saved.
+      * `run` — a request to queue `name` for execution, reviewed as "start this on the hardware?".
+    """
+    __tablename__ = "agent_proposals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), default="workflow")
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    # The proposed body (kind='workflow') or the run payload (kind='run').
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    # The agent's own account of what it did and why, shown above the diff. Free text from a
+    # model, so it is displayed as text and never parsed or executed.
+    summary: Mapped[str] = mapped_column(Text, default="")
+    # Which agent, which model — "mcp:claude-desktop", "panel:ollama/llama3.1". Provenance
+    # matters once more than one thing can write here.
+    source: Mapped[str] = mapped_column(String(128), default="")
+    # validate_body's output at the moment it was proposed, so the reviewer sees what the agent
+    # was told. Re-checked on accept, because the deck may have changed in between.
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    # The saved version this was written against. If the head has moved on by the time someone
+    # accepts, the reviewer is looking at a diff from a base that no longer exists.
+    base_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # Set on accept for a workflow proposal (the version it created) or a run request (the run id).
+    result_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decided_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 # Database setup
 DB_FILENAME = "ivoryos_edge.db"
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILENAME}"

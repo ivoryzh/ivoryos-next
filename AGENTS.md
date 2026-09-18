@@ -439,7 +439,43 @@ state correctly clears the badge again instead of staying stuck dirty.
 
 ---
 
-## 14. Build Requirements
+## 14. Agent in the loop (`edge_server/ivoryos_edge/agent/`)
+
+Prose in, reviewable workflow out. Full setup and rationale in `docs/agent_in_the_loop.md`; the
+parts worth knowing before touching any of it:
+
+- **One tool layer, two surfaces.** `/api/agent/*` (`agent/routes.py`) is the whole contract.
+  `agent/mcp_server.py` is a *thin stdio process that calls those endpoints over HTTP* — it
+  holds no logic, so a tool's behaviour is never implemented twice. The Designer's
+  `AgentPanel.tsx` calls the same endpoints. Adding a surface, or switching model, must not
+  mean reimplementing what a tool does.
+- **Nothing an agent posts takes effect.** Every write files an `AgentProposal` (kind
+  `workflow` or `run`) and stops; a person accepts it. Do not add an endpoint that lets an
+  agent save or dispatch directly — the single human gate is the entire safety argument for
+  letting a model near a deck that moves liquid. Accepting re-validates, because the deck can
+  change between a model writing something and a person reading it.
+- **`agent/validate.py` is the load-bearing piece**, not the prompt. It is what makes model
+  output reviewable: unknown instrument/method (answered with the real list), missing or
+  mistyped arguments, `"65 C"` where a float belongs, values outside an enum, `#variables`
+  nothing produces, unbalanced If/While, return bindings naming fields that do not exist.
+  `chat.py` feeds those errors back to the model and retries up to three times — which is why
+  a small local model is usable here at all. Extend the validator when you add a step kind;
+  a gap here shows up as a scientist reviewing a workflow that cannot run.
+- **`unbound_variables` gates run requests.** A saved workflow leaves values open for the
+  spreadsheet or the optimizer; a one-shot run has neither, so a request without them is
+  refused up front rather than approved and then failing mid-reaction.
+- **`describe_deck` is deliberately lossy.** `/api/status`'s schema is right for building forms
+  and far too large for a prompt. Keep what is needed to choose and call a method; drop what is
+  only needed to draw a widget. If you add a field to the schema, decide which of those it is.
+- **`providers.py` is the only module that knows a model exists.** Ollama (default: no key, and
+  protocol text never leaves the building) and any OpenAI-compatible endpoint. No streaming and
+  no tool-calling protocol on purpose — small local models are unreliable at tool calling and
+  fine at emitting one JSON object, and the validate-and-retry loop gets the reliability without
+  depending on a capability the model may not have.
+
+---
+
+## 15. Build Requirements
 
 **Always run `npm run build` in `frontend/`** (and `cloud_frontend/` when applicable) after structural or UI changes, so the static export the Python edge server serves is up to date. Type-check first with `npx tsc --noEmit -p .` in whichever of `frontend/`, `cloud_frontend/`, `packages/shared-ui/` you touched.
 

@@ -727,6 +727,12 @@ def list_workflows():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# The agent tool layer (/api/agent/*). Its write endpoints file proposals for a person to
+# accept rather than saving or running anything themselves — see ivoryos_edge/agent/routes.py.
+from .agent.routes import router as agent_router
+app.include_router(agent_router)
+
+
 @app.get("/api/plugins")
 def list_plugins():
     return {"plugins": getattr(app.state, "plugins", [])}

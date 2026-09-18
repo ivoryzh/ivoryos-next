@@ -27,3 +27,8 @@ test = [
     "pytest-asyncio",
     "httpx"
 ]
+# Only needed to expose the deck to an MCP client such as Claude Desktop
+# (python -m ivoryos_edge.agent.mcp_server). The edge server itself never imports it.
+mcp = [
+    "mcp>=1.2.0"
+]

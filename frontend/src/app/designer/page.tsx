@@ -2,8 +2,9 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree } from 'lucide-react';
+import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree, Sparkles } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import AgentPanel from '@/components/AgentPanel';
 import {
   WorkflowEditor,
   SequenceBlock,
@@ -49,6 +50,9 @@ export default function DesignerPage() {
   });
 
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  // The assistant panel is opt-in and remembered: a lab with no model configured should
+  // never see it, and one that uses it every day should not reopen it every visit.
+  const [agentOpen, setAgentOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
@@ -154,6 +158,7 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
 
     // Load saved sequence if exists
+    setAgentOpen(localStorage.getItem('ivoryos_agent_panel') === 'true');
     const savedSeq = localStorage.getItem('ivoryos_sequence');
     if (savedSeq) {
       try {
@@ -659,7 +664,10 @@ export default function DesignerPage() {
     {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
         panes at narrow widths (which just produces overlapping, clipped controls), it holds its
         natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
-    <div className="flex h-full min-w-[1080px]">
+    {/* The assistant panel is a fixed 26rem column, so the designer's own minimum has to grow
+        by that much when it is open — otherwise the editor is squeezed below its usable width
+        and the block rows overlap, instead of the page scrolling as it is designed to. */}
+    <div className={`flex h-full ${agentOpen ? 'min-w-[1496px]' : 'min-w-[1080px]'}`}>
       {/* Sidebar */}
       <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
@@ -764,6 +772,21 @@ export default function DesignerPage() {
                 </button>
 
                 <button
+                  onClick={() => {
+                    const next = !agentOpen;
+                    setAgentOpen(next);
+                    localStorage.setItem('ivoryos_agent_panel', String(next));
+                  }}
+                  title="Describe a protocol in words and have it drafted against this deck"
+                  className={`flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all border ${agentOpen
+                    ? 'bg-purple-50 border-purple-200 text-purple-700 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300'
+                    : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'}`}
+                >
+                  <Sparkles className="w-4 h-4 text-purple-500" />
+                  <span className="hidden sm:inline">Assistant</span>
+                </button>
+
+                <button
                   onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
@@ -854,6 +877,25 @@ export default function DesignerPage() {
           fetchExpansion={fetchExpansion}
         />
       </div>
+
+      {agentOpen && (
+        <AgentPanel
+          prepSequence={prepSequence}
+          sequence={sequence}
+          cleanupSequence={cleanupSequence}
+          workflowName={currentWorkflowName}
+          instruments={instruments}
+          onApply={(body) => {
+            // Replaces the canvas wholesale, which is why it is only reachable from an explicit
+            // accept and why the diff is offered first: the proposal is always a complete body.
+            setPrepSequence(body.prep);
+            setSequence(body.script);
+            setCleanupSequence(body.cleanup);
+            if (body.name && !currentWorkflowName) setCurrentWorkflowName(body.name);
+          }}
+          onClose={() => { setAgentOpen(false); localStorage.setItem('ivoryos_agent_panel', 'false'); }}
+        />
+      )}
     </div>
     </div>
   );

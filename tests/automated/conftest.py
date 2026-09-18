@@ -89,7 +89,15 @@ async def setup_app_state():
     from ivoryos_edge.server import app, queue_manager
     from ivoryos_edge.models import init_db
     
+    from ivoryos_edge.introspection import inspect_device_module
+
     app.state.instruments = {"dummy": DummyInstrument()}
+    # The real startup_event introspects every instrument into instrument_schemas, and anything
+    # reading the deck rather than driving it — /api/status, the agent tool layer — works from
+    # that, not from the live objects. Without it those read an empty deck.
+    app.state.instrument_schemas = {
+        name: inspect_device_module(instance) for name, instance in app.state.instruments.items()
+    }
     await init_db()
     await queue_manager.init_asyncio()
     yield
@@ -120,3 +128,17 @@ def isolated_workflow_store(tmp_path, monkeypatch):
         yield
     finally:
         engine.dispose()
+
+
+@pytest.fixture
+def api_workflows_dir(tmp_path, monkeypatch):
+    """Point the live endpoints at a scratch directory instead of the package's own workflows/.
+
+    `isolated_workflow_store` above isolates the database, but the directory is the other half
+    of the store and is shared — without this a test that saves a workflow writes a real JSON
+    file into the repository, which then shows up in every later test's listing.
+    """
+    d = tmp_path / "api_workflows"
+    d.mkdir()
+    monkeypatch.setattr("ivoryos_edge.server.WORKFLOWS_DIR", str(d))
+    return str(d)

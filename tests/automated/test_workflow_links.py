@@ -67,15 +67,6 @@ def workflows_dir(tmp_path):
     return str(d)
 
 
-@pytest.fixture
-def api_workflows_dir(tmp_path, monkeypatch):
-    """Point the live endpoints at a scratch directory instead of the package's own workflows/."""
-    d = tmp_path / "api_workflows"
-    d.mkdir()
-    monkeypatch.setattr("ivoryos_edge.server.WORKFLOWS_DIR", str(d))
-    return str(d)
-
-
 # --- naming / path safety -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", ["../escape", "a/b", "a\\b", ".", "..", ".versions", ""])

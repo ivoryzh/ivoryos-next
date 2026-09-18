@@ -78,11 +78,17 @@ for people whose protocols already live in scripts.
 
 **Where:** `ivoryos/parsers/py_to_json.py` in legacy is the reference implementation.
 
-## 8. Design agent
+## 8. Design agent — **built**, see `docs/agent_in_the_loop.md`
 
-Legacy had an LLM panel in the designer sidebar: describe an experiment in prose, get steps
-appended to the canvas. Enter submitted, Shift+Enter added a newline. See the separate
-discussion on API-key cost before rebuilding this as-is.
+Rebuilt rather than ported. Legacy appended steps straight onto the canvas; this files a
+*proposal* the scientist reviews as a diff and accepts, and validates it against the live deck
+first so what they review at least runs. Enter submits and Shift+Enter adds a newline, as
+before.
+
+The API-key cost question is answered two ways: an MCP server (`python -m
+ivoryos_edge.agent.mcp_server`) puts the deck in front of Claude Desktop at no cost and with no
+key, and the in-app panel defaults to a local Ollama. Both drive the same `/api/agent/*` tool
+layer, so adding a provider does not touch what the tools do.
 
 ## 9. Workflow finalize / lock
 

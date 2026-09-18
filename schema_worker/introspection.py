@@ -405,13 +405,16 @@ def inspect_class(cls):
             for param_name, param in sig.parameters.items():
                 if param_name == "self":
                     continue
-                # *args / **kwargs are not arguments a form can fill. They were being reported
-                # as required parameters named "args" and "kwargs", which is wrong twice over:
-                # they are never required, and passing them by that name is an error — a
-                # `def move(self, *args)` called as move(args=[1, 2]) raises TypeError, and a
-                # `**kwargs` method quietly receives a key literally called "kwargs". A driver
-                # that wraps everything in **kwargs therefore shows no parameters and is called
-                # with none, which is exactly what works.
+                # A variadic parameter is never required — that is what * and ** mean, whatever
+                # it happens to be called. `required` here is "has no default", and a variadic
+                # has no default to have, so the old code read it as required and a form then
+                # offered to fill it. Filling it is an error rather than a no-op: a
+                # `def move(self, *positions)` called as move(positions=[1, 2]) raises
+                # TypeError, and a `**options` method quietly receives a key called "options".
+                # Neither is an argument a caller can name, so neither belongs in the schema; a
+                # driver that wraps everything in ** shows no parameters and is called with
+                # none, which is exactly what works. Keyed on kind, never on the name — the
+                # conventional args/kwargs spelling is incidental.
                 if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
                     accepts_kwargs = accepts_kwargs or param.kind is inspect.Parameter.VAR_KEYWORD
                     continue

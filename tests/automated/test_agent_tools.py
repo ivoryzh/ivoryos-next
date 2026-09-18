@@ -530,26 +530,40 @@ def test_link_arguments_are_only_checked_when_the_body_can_be_read():
     assert validate_body(caller, _schema(), ["Charge vial"]) == []
 
 
-def test_varargs_are_not_parameters_and_never_required():
-    """`*args` / `**kwargs` were reported as required parameters literally named "args" and
-    "kwargs". They are never required, and passing them by name is an error rather than a
-    no-op: `def move(self, *args)` called as move(args=[1, 2]) raises TypeError, and a
-    **kwargs method silently receives a key called "kwargs"."""
+def test_variadic_parameters_are_excluded_by_kind_not_by_name():
+    """A variadic is never required — that is what * and ** mean — and it is not an argument a
+    caller can name, so it is not a parameter at all. `required` is "has no default", and a
+    variadic has no default to have, so it used to read as required and a form offered to fill
+    it; filling it raises TypeError for * and lands a junk key for **.
+
+    Deliberately spelled *positions / **options: an implementation that filtered on the names
+    "args" and "kwargs" would pass the conventional case and fail here.
+    """
     from ivoryos_edge.introspection import inspect_device_module
 
     class Device:
-        def move(self, speed: float, *args, **kwargs): ...
-        def passthrough(self, *args, **kwargs): ...
+        def move(self, speed: float, *positions, **options): ...
+        def conventional(self, speed: float, *args, **kwargs): ...
+        def passthrough(self, *whatever, **rest): ...
         def plain(self, x: int): ...
 
     schema = inspect_device_module(Device())
 
     assert list(schema["move"]["parameters"]) == ["speed"]
-    # A driver that wraps everything in **kwargs shows no parameters, and calling it with none
-    # is exactly what works.
+    assert list(schema["conventional"]["parameters"]) == ["speed"]
+    # A driver that wraps everything in ** shows no parameters, and calling it with none is
+    # exactly what works.
     assert schema["passthrough"]["parameters"] == {}
+
     assert schema["move"]["accepts_kwargs"] is True
+    assert schema["passthrough"]["accepts_kwargs"] is True
     assert schema["plain"]["accepts_kwargs"] is False
+
+    # *-only takes no keywords at all, so it must not claim to.
+    class StarOnly:
+        def only_positional(self, *positions): ...
+
+    assert inspect_device_module(StarOnly())["only_positional"]["accepts_kwargs"] is False
 
 
 def test_a_kwargs_method_accepts_arguments_the_schema_cannot_list():

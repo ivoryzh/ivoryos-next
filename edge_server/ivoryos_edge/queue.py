@@ -10,6 +10,73 @@ from sqlalchemy import update, select
 from sqlalchemy.orm import selectinload
 from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
 
+def extract_return_values(return_bindings, return_var, serialized_res, result):
+    """Map a step's declared outputs onto the value the step actually returned.
+
+    Two shapes are supported, in priority order:
+
+    * **Explicit pointers** (`return_bindings`) — ``[{"path": "metrics.purity", "var": "p"}]``,
+      the shape the Designer produces from a method's introspected ``return_paths``. Each named
+      variable is read from *its own* field of a structured (dataclass / Pydantic / dict /
+      fixed-length tuple) result, so a method that returns a rich object can hand one numeric
+      field to the optimizer and still keep the rest addressable. An empty path means the whole
+      result.
+    * **Legacy comma-separated names** (`return_var`) — "a, b" mapped *positionally* onto the
+      result's values/elements. Kept because every sequence saved before pointers existed uses
+      it, and because that positional mapping is exactly what pointers replace: it silently
+      binds the wrong name to the wrong field the moment a driver reorders its return fields.
+
+    Returns an ordered ``{var_name: value}`` dict. A pointer whose path isn't present in the
+    real result is skipped rather than recorded as None, so a partially-shaped result doesn't
+    poison the workflow context (or the optimizer) with placeholder values.
+    """
+    from ivoryos_edge.introspection import resolve_output_path, _MISSING
+
+    values = {}
+
+    if return_bindings:
+        # Accept both the list-of-pointers shape and a plain {path: var} mapping.
+        pairs = (return_bindings.items() if isinstance(return_bindings, dict)
+                 else [(b.get("path", ""), b.get("var")) for b in return_bindings if isinstance(b, dict)])
+        for path, var in pairs:
+            if not var:
+                continue
+            if not path:
+                # The whole result — hand over the live object, not its serialized form, so a
+                # later step can pass it straight back into another driver method (what the
+                # single legacy return variable has always done).
+                values[var] = result
+                continue
+            resolved = resolve_output_path(serialized_res, path)
+            if resolved is _MISSING:
+                # The serialized form is the normal case, but a driver can return an object
+                # that serialize_output left alone (an arbitrary class); fall back to walking
+                # the live result by attribute before giving up on the pointer.
+                resolved = resolve_output_path(result, path)
+            if resolved is not _MISSING:
+                values[var] = resolved
+        if values:
+            return values
+
+    if not return_var:
+        return values
+
+    ret_vars = [v.strip() for v in str(return_var).split(",") if v.strip()]
+    if len(ret_vars) > 1 and isinstance(serialized_res, dict):
+        for k, v in zip(ret_vars, serialized_res.values()):
+            values[k] = v
+    elif len(ret_vars) > 1 and isinstance(result, (tuple, list)):
+        for k, v in zip(ret_vars, result):
+            values[k] = v
+    elif ret_vars:
+        key = ret_vars[0]
+        if isinstance(result, dict) and key in result:
+            values[key] = result[key]
+        else:
+            values[key] = result
+    return values
+
+
 def substitute_workflow_vars(obj, context: Dict[str, Any]):
     """Recursively resolve '#varname' parameter values against the live run's workflow_context.
 
@@ -668,19 +735,13 @@ class WorkflowQueueManager:
                             step.status = "completed"
                             step.outputs = {"result": serialized_res}
                             
-                            if step.parameters and "_return_var" in step.parameters:
-                                ret_vars = [v.strip() for v in step.parameters["_return_var"].split(",") if v.strip()]
-                                if len(ret_vars) == 1:
-                                    workflow_context[ret_vars[0]] = result
-                                elif len(ret_vars) > 1:
-                                    if isinstance(serialized_res, dict):
-                                        for k, v in zip(ret_vars, serialized_res.values()):
-                                            workflow_context[k] = v
-                                    elif isinstance(result, (tuple, list)):
-                                        for k, v in zip(ret_vars, result):
-                                            workflow_context[k] = v
-                                    else:
-                                        workflow_context[ret_vars[0]] = result
+                            if step.parameters and (step.parameters.get("_return_bindings") or step.parameters.get("_return_var")):
+                                workflow_context.update(extract_return_values(
+                                    step.parameters.get("_return_bindings"),
+                                    step.parameters.get("_return_var"),
+                                    serialized_res,
+                                    result,
+                                ))
                                 
                             step.end_time = datetime.utcnow()
                             await session.commit()
@@ -982,7 +1043,7 @@ class WorkflowQueueManager:
                         status="pending"
                     )
                     session.add(db_step)
-                    iteration_steps.append((db_step, tmpl_step.get("returnVar")))
+                    iteration_steps.append((db_step, tmpl_step.get("returnVar"), tmpl_step.get("returnBindings")))
                     step_index += 1
 
                 await session.commit()
@@ -992,7 +1053,7 @@ class WorkflowQueueManager:
                 trial_failed = False
                 objective_values = {}
 
-                for db_step, return_var in iteration_steps:
+                for db_step, return_var, return_bindings in iteration_steps:
                     if self.cancelled:
                         break
                     await self.pause_event.wait()
@@ -1046,30 +1107,16 @@ class WorkflowQueueManager:
                         db_step.status = "completed"
                         db_step.outputs = {"result": serialized_res}
 
-                        if return_var:
-                            ret_vars = [v.strip() for v in return_var.split(",") if v.strip()]
-
-                            if len(ret_vars) > 1 and isinstance(serialized_res, dict):
-                                for k, v in zip(ret_vars, serialized_res.values()):
-                                    try:
-                                        objective_values[k] = float(v)
-                                    except:
-                                        pass
-                            elif len(ret_vars) > 1 and isinstance(result, (tuple, list)):
-                                for k, v in zip(ret_vars, result):
-                                    try:
-                                        objective_values[k] = float(v)
-                                    except:
-                                        pass
-                            else:
-                                var_key = ret_vars[0] if ret_vars else return_var
-                                if isinstance(result, dict) and var_key in result:
-                                    objective_values[var_key] = float(result[var_key])
-                                else:
-                                    try:
-                                        objective_values[var_key] = float(result)
-                                    except:
-                                        pass
+                        if return_bindings or return_var:
+                            # An objective has to be a number; anything a pointer resolves to
+                            # that isn't (a status string, a nested list) is simply not an
+                            # objective and is dropped rather than crashing the trial.
+                            for var_name, value in extract_return_values(
+                                    return_bindings, return_var, serialized_res, result).items():
+                                try:
+                                    objective_values[var_name] = float(value)
+                                except (TypeError, ValueError):
+                                    pass
                     except asyncio.CancelledError:
                         self.current_step_task = None
                         db_step.status = "error"

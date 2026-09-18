@@ -385,6 +385,12 @@ def expand_workflow_blocks(sequence_list, workflows_dir, default_phase="main"):
                         ret_val = b.get("returnVar") or b.get("return")
                         if ret_val:
                             new_args["_return_var"] = ret_val
+                        # Explicit per-field pointers into a structured return value — see
+                        # extract_return_values in queue.py. Carried alongside _return_var, which
+                        # stays as the flat legacy fallback for sequences saved before pointers.
+                        ret_bindings = b.get("returnBindings")
+                        if ret_bindings:
+                            new_args["_return_bindings"] = ret_bindings
                             
                         new_b["params"] = new_args
                         inst_blocks.append(new_b)
@@ -406,6 +412,9 @@ def expand_workflow_blocks(sequence_list, workflows_dir, default_phase="main"):
             ret_val = block.get("returnVar") or block.get("return")
             if ret_val:
                 params["_return_var"] = ret_val
+            ret_bindings = block.get("returnBindings")
+            if ret_bindings:
+                params["_return_bindings"] = ret_bindings
                 
             new_b["params"] = params
             expanded.append(new_b)

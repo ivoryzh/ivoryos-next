@@ -371,6 +371,17 @@ export default function QueuePage() {
                                     delete displayParams._phase;
                                     delete displayParams._parent_workflow;
 
+                                    // Return pointers read better as "name <- field" than as raw
+                                    // JSON, and the flat _return_var list is redundant beside them.
+                                    const bindings = displayParams._return_bindings;
+                                    if (Array.isArray(bindings) && bindings.length > 0) {
+                                        delete displayParams._return_bindings;
+                                        delete displayParams._return_var;
+                                        displayParams.saves = bindings
+                                            .map((b: any) => (b.path ? `${b.var} \u2190 ${b.path}` : b.var))
+                                            .join(', ');
+                                    }
+
                                     elements.push(
                                         <div key={step.id} className={`p-4 rounded-xl border ${
                                             step.status === 'running' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/10 dark:border-indigo-500/30' :

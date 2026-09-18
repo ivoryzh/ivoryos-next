@@ -3,7 +3,7 @@ import { API_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Settings2, Info, Zap, Sun, ChevronDown, Plus, X } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { buildRunName } from '@ivoryos/shared-ui';
+import { buildRunName, getReturnLeaves, readNamedOutput } from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
   baybe: 'BayBE',
@@ -33,6 +33,10 @@ export default function OptimizePage() {
   const [varTypes, setVarTypes] = useState<Record<string, string>>({});
   const [globalValues, setGlobalValues] = useState<Record<string, string>>({});
   const [returns, setReturns] = useState<string[]>([]);
+  // Variables a step saves that aren't numbers (a sample id, a status string). Still usable as
+  // '#variables' by later steps, but an optimizer can't treat them as an objective, so they're
+  // listed separately rather than silently dropped.
+  const [nonNumericReturns, setNonNumericReturns] = useState<string[]>([]);
   const [sequence, setSequence] = useState<any[]>([]);
   const [prepSequence, setPrepSequence] = useState<any[]>([]);
   const [cleanupSequence, setCleanupSequence] = useState<any[]>([]);
@@ -200,8 +204,26 @@ export default function OptimizePage() {
             setGlobalValues(initGVals);
         }
 
-        const retVars = Array.from(new Set(parsedSeq.map((s: any) => s.returnVar).filter(Boolean))) as string[];
-        setReturns(retVars);
+        // One step can now save several variables — one per field of a structured return — so
+        // the objective list is the union of those names, keeping only the numeric ones (the
+        // optimizer has nothing to do with a returned sample id). A block whose schema we no
+        // longer have (an imported/legacy sequence) is assumed numeric, as before.
+        const numericRet: string[] = [];
+        const otherRet: string[] = [];
+        parsedSeq.forEach((block: any) => {
+          const leaves = getReturnLeaves(block.schema);
+          const bindings: { path: string; var: string }[] = block.returnBindings?.length
+            ? block.returnBindings
+            : String(block.returnVar || '').split(',').map((v: string) => v.trim()).filter(Boolean)
+                .map((v: string, i: number) => ({ path: leaves[i]?.path ?? '', var: v }));
+          bindings.forEach(b => {
+            if (!b.var) return;
+            const leaf = leaves.find(l => l.path === b.path);
+            (leaf ? leaf.numeric : true) ? numericRet.push(b.var) : otherRet.push(b.var);
+          });
+        });
+        setReturns(Array.from(new Set(numericRet)));
+        setNonNumericReturns(Array.from(new Set(otherRet)));
       } catch (e) {
         console.error("Failed to load sequence", e);
       }
@@ -332,7 +354,9 @@ export default function OptimizePage() {
             });
         };
         resolveArgs(args, block.schema);
-        return { instrument: block.instrument, method: block.method, params: args, returnVar: block.returnVar };
+        // returnBindings points each objective name at one specific field of the step's return
+        // value; returnVar stays alongside it as the flat legacy list the backend falls back to.
+        return { instrument: block.instrument, method: block.method, params: args, returnVar: block.returnVar, returnBindings: block.returnBindings };
     };
 
     const resolveGlobalBlock = (block: any) => {
@@ -366,7 +390,8 @@ export default function OptimizePage() {
             instrument: block.instrument,
             method: block.method,
             params: args,
-            returnVar: block.returnVar
+            returnVar: block.returnVar,
+            returnBindings: block.returnBindings
         };
     };
 
@@ -519,9 +544,11 @@ export default function OptimizePage() {
         if (step) row[name] = step.parameters[name];
       });
       objectiveNames.forEach((name: string) => {
-        const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === name);
-        const step = tmplIdx >= 0 ? iterSteps[tmplIdx] : null;
-        if (step?.outputs?.result !== undefined) row[name] = step.outputs.result;
+        // readNamedOutput resolves the name through that step's return pointer, so an
+        // objective bound to one field of a structured result seeds with that field's value
+        // rather than with the whole result object.
+        const value = readNamedOutput(name, seqTemplate, iterSteps);
+        if (value !== '' && value !== undefined) row[name] = value;
       });
       if (paramNames.every((n: string) => n in row) && objectiveNames.every((n: string) => n in row)) {
         rows.push(row);
@@ -894,6 +921,12 @@ export default function OptimizePage() {
                     </div>
                   )}
                 </div>
+                {nonNumericReturns.length > 0 && (
+                  <div className="text-xs text-gray-400 dark:text-gray-500 mb-1">
+                    Also saved, but not numeric so not available as an objective:{' '}
+                    <span className="font-mono">{nonNumericReturns.join(', ')}</span>
+                  </div>
+                )}
                 {returns.length === 0 ? (
                     <div className="text-sm text-gray-500">No return variables assigned in sequence.</div>
                 ) : (

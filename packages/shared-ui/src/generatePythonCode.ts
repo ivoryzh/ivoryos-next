@@ -107,8 +107,27 @@ export function generatePythonCode(
       }
 
       const params = Object.entries(block.params).map(([k, v]) => `${k}=${formatValue(v)}`).join(', ');
-      const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
-      body += `${pad}${returnStr}${block.instrument}.${block.method}(${params})\n`;
+      const call = `${block.instrument}.${block.method}(${params})`;
+      const bindings = (block.returnBindings || []).filter((b: any) => b && b.var);
+
+      // With return pointers, the names a step saves are fields of one returned object, not a
+      // tuple to unpack — so write the call to a temp and pull each field out of it by the same
+      // path the run resolves at execution time. `x, y = call` (the legacy shape below) would be
+      // a TypeError against a dataclass or Pydantic result.
+      if (bindings.length === 1 && !bindings[0].path) {
+        body += `${pad}${bindings[0].var} = ${call}\n`;
+      } else if (bindings.length > 0) {
+        body += `${pad}_result = ${call}\n`;
+        bindings.forEach((b: any) => {
+          const accessor = String(b.path).split('.')
+            .map((seg: string) => (/^\d+$/.test(seg) ? `[${seg}]` : `.${seg}`))
+            .join('');
+          body += `${pad}${b.var} = _result${accessor}\n`;
+        });
+      } else {
+        const returnStr = block.returnVar ? `${block.returnVar} = ` : '';
+        body += `${pad}${returnStr}${call}\n`;
+      }
     });
     return body;
   };

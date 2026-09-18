@@ -53,6 +53,9 @@ export default function DesignerPage() {
             method: b.action || b.method || 'unknown',
             params: b.args || b.params || {},
             returnVar: b.return || b.returnVar || '',
+            // Per-field pointers into a structured return value. Absent on legacy/older files,
+            // where the flat `return` list is mapped onto the result positionally instead.
+            returnBindings: b.return_bindings || b.returnBindings || undefined,
             schema: {},
             isExpanded: false,
             isBatchAction: !!b.batch_action
@@ -320,6 +323,7 @@ export default function DesignerPage() {
         args: block.params,
         arg_types: argTypes,
         return: block.returnVar || "",
+        return_bindings: block.returnBindings || undefined,
         batch_action: !!block.isBatchAction,
         consolidate_batch_args: false
       };

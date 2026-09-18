@@ -4,6 +4,11 @@ import React, { useState, useEffect } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Search, Hash, Layers, Copy } from 'lucide-react';
 
+// One named variable bound to one addressable leaf of a step's return value. `path` is the
+// dotted pointer the backend's introspection published in `schema.return_paths`
+// ("metrics.purity", "0" for a tuple element, "" for the whole result).
+export type ReturnBinding = { path: string; var: string };
+
 export type SequenceBlock = {
   id: string;
   instrument: string;
@@ -11,13 +16,66 @@ export type SequenceBlock = {
   schema: any;
   params: Record<string, any>;
   isExpanded?: boolean;
+  // Flat, comma-separated variable names, in leaf order. Still the canonical list every other
+  // page reads (Optimize objectives, Data History columns, codegen), and still what the backend
+  // falls back to positionally — `returnBindings` is what makes each name point at a *specific*
+  // field rather than at whatever came out in that position.
   returnVar?: string;
+  returnBindings?: ReturnBinding[];
   isHidden?: boolean;
   // Only meaningful in the Main Workflow. Default (false/undefined) = "per-sample": when run
   // against a spreadsheet, this step repeats once per row. true = "batch": the step runs once
   // per batch group (a configurable number of consecutive rows, e.g. 4 samples heated together),
   // not once per row — its #vars are read from whichever one row in the group has them filled in.
   isBatchAction?: boolean;
+};
+
+export type ReturnLeaf = { path: string; type: string; numeric: boolean };
+
+const isNumericTypeName = (t: string | undefined): boolean => {
+  const bare = String(t || '').replace(/Optional\[|\]/g, '').trim();
+  return bare === 'int' || bare === 'float';
+};
+
+/** A method's return value flattened into the individual leaves a variable can be bound to.
+ *
+ * A driver method rarely returns one bare number — it returns a dataclass or Pydantic model
+ * holding several numbers plus metadata, and an optimizer can only take numbers. The backend
+ * publishes those leaves as `return_paths` (dotted for nesting, index for a fixed-length tuple,
+ * empty for a scalar, each flagged `numeric`). The fallbacks below derive the same thing from
+ * `return_info`/`return_type` so a sequence saved against an older schema still renders.
+ */
+export const getReturnLeaves = (schema: any): ReturnLeaf[] => {
+  if (!schema) return [];
+  if (Array.isArray(schema.return_paths)) return schema.return_paths as ReturnLeaf[];
+
+  const returnType: string = schema.return_type || 'None';
+  if (returnType === 'None' || returnType === 'NoneType') return [];
+
+  const info = schema.return_info;
+  if (info?.is_object && info.fields) {
+    return Object.keys(info.fields).map(k => ({
+      path: k,
+      type: info.fields[k]?.type || 'Any',
+      numeric: isNumericTypeName(info.fields[k]?.type),
+    }));
+  }
+  const tupleMatch = returnType.match(/tuple\[(.*)\]/i);
+  if (tupleMatch && tupleMatch[1] && !tupleMatch[1].includes('...')) {
+    return tupleMatch[1].split(',').map((t, i) => ({ path: String(i), type: t.trim(), numeric: isNumericTypeName(t) }));
+  }
+  return [{ path: '', type: returnType, numeric: isNumericTypeName(returnType) }];
+};
+
+/** The variable name currently bound to one leaf. Falls back to the flat `returnVar` list by
+ *  position, so a sequence saved before pointers existed still shows its names in the right
+ *  boxes (and keeps them there until the user edits one). */
+export const getBoundVar = (block: { returnVar?: string; returnBindings?: ReturnBinding[] }, leaf: ReturnLeaf, leaves: ReturnLeaf[]): string => {
+  const explicit = block.returnBindings?.find(b => b.path === leaf.path);
+  if (explicit) return explicit.var || '';
+  if (block.returnBindings?.length) return '';
+  const parts = String(block.returnVar || '').split(',').map(s => s.trim());
+  return parts[leaves.findIndex(l => l.path === leaf.path)] || '';
 };
 
 interface WorkflowEditorProps {
@@ -247,6 +305,23 @@ export default function WorkflowEditor({
     updateBlock(listId, blockId, block => ({ ...block, returnVar: value }));
   };
 
+  // Binds one variable name to one return leaf. Writes both shapes: `returnBindings` (the
+  // pointer the backend resolves by path) and the derived flat `returnVar` in leaf order, which
+  // everything downstream — Optimize's objective list, Data History's columns, codegen — still
+  // reads as the list of names this step produces.
+  const handleReturnBindingChange = (blockId: string, leaves: ReturnLeaf[], path: string, value: string, listId: string) => {
+    updateBlock(listId, blockId, block => {
+      const bindings = leaves
+        .map(leaf => ({ path: leaf.path, var: (leaf.path === path ? value : getBoundVar(block, leaf, leaves)).trim() }))
+        .filter(b => b.var);
+      return {
+        ...block,
+        returnBindings: bindings,
+        returnVar: bindings.map(b => b.var).join(', '),
+      };
+    });
+  };
+
   const toggleExpand = (blockId: string, listId: string) => {
     updateBlock(listId, blockId, block => ({ ...block, isExpanded: !block.isExpanded }));
   };
@@ -451,6 +526,14 @@ export default function WorkflowEditor({
                     ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds' && p !== 'prompt' && p !== 'variable_name' && p !== 'message')
                     : allParams;
                   const hasParams = visibleParams.length > 0;
+
+                  // Everything this step's return value can be pointed at. A structured result
+                  // (dataclass/Pydantic model, or anything nested) gets its own Outputs panel
+                  // in the expanded body rather than a row of unlabeled boxes in the header.
+                  const returnLeaves = (isFlowBlock || listId === 'prep' || listId === 'cleanup')
+                    ? []
+                    : getReturnLeaves(block.schema);
+                  const usesOutputPanel = returnLeaves.length > 2 || returnLeaves.some(l => l.path.includes('.'));
                   
                   const checkRequiredParams = (schemaObj: any, prefix: string = '') => {
                       for (const p of Object.keys(schemaObj)) {
@@ -545,8 +628,8 @@ export default function WorkflowEditor({
                                   {/* Top Row: Info & Controls */}
                                   <div 
                                     {...provided.dragHandleProps}
-                                    onClick={() => !isFlowBlock && hasParams && toggleExpand(block.id, listId)}
-                                    className={`px-3 py-1.5 flex items-center justify-between cursor-grab active:cursor-grabbing ${!isFlowBlock && hasParams ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
+                                    onClick={() => !isFlowBlock && (hasParams || usesOutputPanel) && toggleExpand(block.id, listId)}
+                                    className={`px-3 py-1.5 flex items-center justify-between cursor-grab active:cursor-grabbing ${!isFlowBlock && (hasParams || usesOutputPanel) ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
                                   >
                                     <div className="flex items-center min-w-0 flex-1">
                                       <div className={`flex items-center space-x-2 ${!isFlowBlock && !hasParams ? 'ml-1' : ''}`}>
@@ -613,57 +696,57 @@ export default function WorkflowEditor({
                                     <div className="flex items-center space-x-2 shrink-0 ml-4">
                                       {/* Return Variable Logic */}
                                       {(() => {
-                                        const returnType = block.schema?.return_type || 'None';
-                                        const returnInfo = block.schema?.return_info;
-                                        const isNone = returnType === 'None' || returnType === 'NoneType';
-                                        const isTuple = returnType.toLowerCase().startsWith('tuple[');
-                                        const isObject = returnInfo?.is_object;
+                                        if (isFlowBlock || listId === 'prep' || listId === 'cleanup') return null;
                                         const hasLegacyReturn = Boolean(block.returnVar);
+                                        if (returnLeaves.length === 0 && !hasLegacyReturn) return null;
 
-                                        let numReturns = 1;
-                                        let returnLabels: string[] = [];
-
-                                        if (isTuple) {
-                                          const inner = returnType.match(/tuple\[(.*)\]/i);
-                                          if (inner && inner[1]) {
-                                            numReturns = inner[1].split(',').length;
-                                          }
-                                        } else if (isObject && returnInfo.fields) {
-                                          returnLabels = Object.keys(returnInfo.fields);
-                                          numReturns = returnLabels.length;
-                                        } else if (hasLegacyReturn && isNone) {
-                                          numReturns = Math.max(1, (block.returnVar || '').split(',').length);
+                                        // A structured return has more fields than fit in this
+                                        // row — it gets the Outputs panel in the expanded body
+                                        // instead, and the header just summarizes what's bound.
+                                        if (usesOutputPanel) {
+                                          const bound = returnLeaves.map(l => getBoundVar(block, l, returnLeaves)).filter(Boolean);
+                                          return (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => { e.stopPropagation(); toggleExpand(block.id, listId); }}
+                                              title={`This step returns ${returnLeaves.length} fields. Name the ones you want to keep — only numbers can be used as an optimization objective.`}
+                                              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] font-bold transition-colors mr-2 ${
+                                                bound.length
+                                                  ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-500/10 dark:border-blue-500/30 dark:text-blue-300'
+                                                  : 'bg-white border-gray-200 text-gray-500 hover:text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-400 dark:hover:text-gray-200'
+                                              }`}
+                                            >
+                                              <span>Save</span>
+                                              <span className="font-mono font-normal max-w-[10rem] truncate">
+                                                {bound.length ? bound.join(', ') : `${returnLeaves.length} outputs`}
+                                              </span>
+                                            </button>
+                                          );
                                         }
 
-                                        if (isFlowBlock || listId === 'prep' || listId === 'cleanup') return null;
-                                        if (isNone && !hasLegacyReturn) return null;
+                                        // Scalar / short-tuple return: the names stay inline.
+                                        const inlineLeaves: ReturnLeaf[] = returnLeaves.length
+                                          ? returnLeaves
+                                          : (block.returnVar || '').split(',').map((_, i) => ({ path: String(i), type: 'Any', numeric: false }));
                                         return (
                                           <div className="flex items-center space-x-2 mr-2">
                                             <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">Save</span>
                                             <div className="flex space-x-1 items-center">
-                                              {Array.from({ length: numReturns }).map((_, i) => {
-                                                const parts = (block.returnVar || '').split(',').map(s => s.trim());
-                                                return (
-                                                  <div key={i} className="flex items-center space-x-1">
-                                                    {returnLabels[i] && (
-                                                        <span className="text-[10px] text-gray-400 font-mono">{returnLabels[i]}:</span>
-                                                    )}
-                                                    <input
-                                                      type="text"
-                                                      value={parts[i] || ''}
-                                                      placeholder={`var_${i+1}`}
-                                                      onClick={(e) => e.stopPropagation()}
-                                                      onChange={(e) => {
-                                                        const newParts = [...parts];
-                                                        while(newParts.length < numReturns) newParts.push('');
-                                                        newParts[i] = e.target.value;
-                                                        handleReturnVarChange(block.id, newParts.join(', '), listId);
-                                                      }}
-                                                      className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
-                                                    />
-                                                  </div>
-                                                );
-                                              })}
+                                              {inlineLeaves.map((leaf, i) => (
+                                                <div key={leaf.path || i} className="flex items-center space-x-1">
+                                                  {inlineLeaves.length > 1 && (
+                                                    <span className="text-[10px] text-gray-400 font-mono">{leaf.path}:</span>
+                                                  )}
+                                                  <input
+                                                    type="text"
+                                                    value={getBoundVar(block, leaf, inlineLeaves)}
+                                                    placeholder={`var_${i + 1}`}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    onChange={(e) => handleReturnBindingChange(block.id, inlineLeaves, leaf.path, e.target.value, listId)}
+                                                    className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                                                  />
+                                                </div>
+                                              ))}
                                             </div>
                                           </div>
                                         );
@@ -787,6 +870,57 @@ export default function WorkflowEditor({
                                         </div>
                                         );
                                       })()}
+
+                                      {/* Outputs: one variable per field of a structured return.
+                                          The whole point of naming fields individually is that a
+                                          rich result object can't go into an optimizer as-is —
+                                          only its numeric leaves can, and which ones matter is
+                                          the user's call, not something we can guess. */}
+                                      {usesOutputPanel && (
+                                        <div className="p-2 border border-gray-200 dark:border-white/10 rounded-lg bg-white dark:bg-[#1a1a1a]">
+                                          <div className="flex items-baseline gap-2 px-1 pb-1.5">
+                                            <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Outputs</span>
+                                            <span className="text-[10px] text-gray-400 dark:text-gray-500">
+                                              returns <span className="font-mono">{block.schema?.return_type}</span> — name a field to keep it; leave the rest blank
+                                            </span>
+                                          </div>
+                                          <div className="flex flex-wrap gap-x-2 gap-y-1.5">
+                                            {returnLeaves.map(leaf => (
+                                              <div
+                                                key={leaf.path}
+                                                className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1"
+                                              >
+                                                <label className="text-[10px] text-gray-500 dark:text-gray-400 font-mono flex items-center whitespace-nowrap">
+                                                  <span>{leaf.path}</span>
+                                                  {leaf.numeric ? (
+                                                    <span
+                                                      title="A number — this one can be used as an optimization objective."
+                                                      className="ml-1 px-1 rounded bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-400 text-[9px] font-bold uppercase cursor-help"
+                                                    >
+                                                      {leaf.type}
+                                                    </span>
+                                                  ) : (
+                                                    <span
+                                                      title={`${leaf.type} — can be saved as a variable for later steps, but can't be an optimization objective.`}
+                                                      className="ml-1 px-1 rounded bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-500 text-[9px] font-bold uppercase cursor-help"
+                                                    >
+                                                      {leaf.type}
+                                                    </span>
+                                                  )}
+                                                </label>
+                                                <input
+                                                  type="text"
+                                                  value={getBoundVar(block, leaf, returnLeaves)}
+                                                  placeholder="variable name"
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  onChange={(e) => handleReturnBindingChange(block.id, returnLeaves, leaf.path, e.target.value, listId)}
+                                                  className="w-28 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700"
+                                                />
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
                                     </div>
                                   )}
                               </div>

@@ -117,7 +117,10 @@ export default function LibraryPage() {
           method: action.action,
           schema: schema,
           params: action.args || {},
-          returnVar: action.return || ""
+          returnVar: action.return || "",
+          // Per-field pointers into a structured return value; absent on workflows saved before
+          // pointers existed, which fall back to mapping `return` onto the result positionally.
+          returnBindings: action.return_bindings || undefined
         };
       });
 

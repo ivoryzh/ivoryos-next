@@ -244,11 +244,32 @@ Two independent copies of the same idea exist, and it's worth understanding the 
 
 Both center on `extract_type_info(annotation, default)`, which recognizes: plain classes (`float`, `int`, a dataclass — reported by clean `__name__`, not Python's `<class 'float'>` repr, which broke a real frontend check for `NoneType` return types before both copies were fixed the same way), `Enum` (→ a dropdown of `.value`s), `Literal[...]` (→ a dropdown of the literal values), `bool` (→ `["True", "False"]`), and dataclasses/Pydantic `BaseModel`s (→ `is_object: true` with a recursively-extracted `fields` dict, so a nested-object parameter renders as a nested form instead of a raw JSON textbox). `cast_value`/`cast_arguments` (edge_server only — schema_worker never executes anything) are the inverse operation at call time, and have to agree with whatever `extract_type_info` reported for the same annotation, since they're never invoked on the same object in the same request — a casting rule added to one without checking the other silently produces a runtime `TypeError` that a signature/schema mismatch, not a symptom, actually caused.
 
-**Where the two copies currently disagree (schema_worker is ahead; edge_server, the one real devices actually use, is not)** — both are real, fixable gaps in `edge_server/ivoryos_edge/introspection.py`, not intentional differences:
-1. **`Optional[X]` / `Union[X, None]` unwrapping.** `schema_worker/introspection.py` unwraps a `Union` with exactly one non-`None` arm and re-extracts on the inner type, so `Optional[MyEnum]` still gets its dropdown `options` and `Optional[MyDataclass]` still gets its expanded `fields`. `edge_server`'s copy has no such unwrapping — an `Optional`-wrapped enum or dataclass parameter degrades to a bare free-text box on every real instrument connected to Core today.
-2. **PEP 563 string annotations** (`from __future__ import annotations`, or any `annotations = "..."` future import — increasingly the default in newer driver code). Under PEP 563, `param.annotation`/`sig.return_annotation` are plain **strings**, not the real type objects — so every `isinstance`/`issubclass` check in `extract_type_info` (the Enum check, the dataclass check, the bool check) silently fails and every such parameter degrades to a free-text box, with no error anywhere to point at why. `schema_worker/introspection.py`'s `inspect_class` resolves this first via `typing.get_type_hints(method)` (falling back to the raw, possibly-string annotation only if resolution itself throws, e.g. an unresolvable forward reference) before calling `extract_type_info`. `edge_server`'s `inspect_device_module` does not — a driver written with `from __future__ import annotations` loses every dropdown/nested-object field in its real, live schema.
+**The two copies are now in sync** on the two things they used to disagree about, both closed in `edge_server/ivoryos_edge/introspection.py` (the copy real devices actually use) by porting `schema_worker`'s version:
 
-If you're asked to touch instrument schema extraction, porting these two fixes from `schema_worker/introspection.py` into `edge_server/ivoryos_edge/introspection.py`'s `inspect_device_module`/`extract_type_info` is probably the highest-leverage thing to do — it fixes a real, live gap for actual connected instruments, not just the less-exercised Hub path.
+1. **`Optional[X]` / `Union[X, None]` unwrapping** — a `Union` with exactly one non-`None` arm re-extracts on the inner type, so `Optional[MyEnum]` keeps its dropdown `options`, `Optional[MyDataclass]` keeps its expanded `fields`, and `-> Optional[MyResult]` keeps its return pointers.
+2. **PEP 563 string annotations** (`from __future__ import annotations`) — `inspect_device_module` resolves `typing.get_type_hints(method)` first, falling back to the raw (possibly string) annotation only if resolution throws. Without it every `isinstance`/`issubclass` check silently fails and each parameter degrades to a free-text box with nothing to point at why. Dataclass *fields* get the same treatment via `_resolve_field_type`.
+
+Both copies also cap object recursion (`MAX_OBJECT_DEPTH`) and break annotation cycles, so a self-referencing model (`parent: Optional[Node]`) no longer recurses until the stack blows.
+
+### Return values: `return_paths` and return pointers
+
+`extract_type_info` marks a leaf `numeric: true` for `int`/`float` (never `bool`), and `build_return_paths(annotation)` flattens a *return* annotation into the ordered list of leaves a variable can be bound to, published per method as `return_paths`:
+
+```json
+[{"path": "composition.yield_percent", "type": "float", "numeric": true},
+ {"path": "method", "type": "str", "numeric": false}]
+```
+
+Dotted for nested dataclass/Pydantic fields, `"0"`/`"1"` for a fixed-length tuple (`Tuple[X, ...]` is variadic and stays one opaque leaf), `""` for a scalar — meaning "the result itself" — and `[]` for `-> None`.
+
+This exists because a driver method rarely returns one number: it returns a rich object, and an optimizer can only take numbers. So a step binds **one variable per field** rather than one variable per call:
+
+- The Designer writes `returnBindings: [{path, var}]` on each block (`WorkflowEditor`'s Outputs panel, shown in the expanded block whenever a return has >2 leaves or any nested one). `returnVar` stays alongside it as the flat comma-separated list of the same names in leaf order — still what Optimize's objective list, Data History's columns and codegen read, so nothing downstream had to learn a new shape.
+- The backend resolves each pointer against the *serialized* result in `queue.py`'s `extract_return_values` (`_return_bindings` for live runs, `returnBindings` in an Optimization `sequence_template`), falling back to the legacy **positional** mapping when a sequence has no bindings. That positional mapping is precisely what pointers replace — it binds the wrong name to the wrong field the moment a driver reorders its return fields.
+- A pointer whose path isn't in the actual result is skipped, not recorded as `None`; an objective value that isn't a number is dropped rather than failing the trial. The Optimize page only offers **numeric** leaves as objectives and lists the rest as "also saved, but not numeric".
+- Reading a named output back out of a finished run (Data History columns/CSV, Optimize's seed-from-history) goes through `readNamedOutput` in `packages/shared-ui/src/returnValues.ts` — one implementation for all three, since each needs the same "resolve this name through that step's pointer" logic.
+
+`example/lab_drivers.py`'s `HPLC.analyze() -> HPLCReport` is the demo deck's worked example of this shape (nested numeric fields plus non-numeric metadata).
 
 ---
 

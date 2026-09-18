@@ -4,6 +4,7 @@ import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import { readNamedOutput } from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned. When that value is a plain scalar — the overwhelmingly common case, since that's the
@@ -139,11 +140,8 @@ export default function DataPage() {
               });
               // The objective's value is whatever step in the template was configured with that
               // returnVar — match by template position since steps themselves don't store returnVar.
-              const objectiveValues = objectiveNames.map((name: string) => {
-                  const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === name);
-                  const step = tmplIdx >= 0 ? iterSteps[tmplIdx] : null;
-                  return step?.outputs?.result !== undefined ? step.outputs.result : '';
-              });
+              const objectiveValues = objectiveNames.map((name: string) =>
+                  readNamedOutput(name, seqTemplate, iterSteps));
 
               rows.push({
                   row: i + 1,
@@ -167,7 +165,12 @@ export default function DataPage() {
           // record of which step is "the" output, so they fall back to input-only columns below
           // (their outputs are still visible per-row in the UI, and via Export Log).
           const seqTemplate = r.parameters?.sequence_template || [];
-          const returnVars = seqTemplate.filter((t: any) => t.returnVar).map((t: any) => t.returnVar);
+          // One step can save several named outputs (one per field of a structured return), so
+          // each becomes its own column rather than the whole "a, b" list becoming one.
+          const returnVars = seqTemplate.flatMap((t: any) =>
+              t.returnBindings?.length
+                  ? t.returnBindings.map((b: any) => b.var).filter(Boolean)
+                  : String(t.returnVar || '').split(',').map((v: string) => v.trim()).filter(Boolean));
           const seqLength = seqTemplate.length || (rowCount > 0 && r.steps?.length ? Math.floor(r.steps.length / rowCount) : 0);
           vars = [...inputVars, ...returnVars];
 
@@ -181,11 +184,7 @@ export default function DataPage() {
               const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
               // Match each returnVar to the step at the same position in the per-row template —
               // rowSteps mirrors seqTemplate's order since every row repeats the same block sequence.
-              const outputVals = returnVars.map((rv: string) => {
-                  const tmplIdx = seqTemplate.findIndex((t: any) => t.returnVar === rv);
-                  const step = tmplIdx >= 0 ? rowSteps[tmplIdx] : null;
-                  return step?.outputs?.result !== undefined ? step.outputs.result : '';
-              });
+              const outputVals = returnVars.map((rv: string) => readNamedOutput(rv, seqTemplate, rowSteps));
               const dataStr = [...inputVals, ...outputVals].join(',');
 
               rows.push({
@@ -633,6 +632,17 @@ export default function DataPage() {
                                     const paramsWithoutPhase = { ...(step.parameters || {}) };
                                     const phase = paramsWithoutPhase._phase;
                                     delete paramsWithoutPhase._phase;
+
+                                    // Return pointers read better as "name <- field" than as raw
+                                    // JSON, and the flat _return_var list is redundant beside them.
+                                    const bindings = paramsWithoutPhase._return_bindings;
+                                    if (Array.isArray(bindings) && bindings.length > 0) {
+                                        delete paramsWithoutPhase._return_bindings;
+                                        delete paramsWithoutPhase._return_var;
+                                        paramsWithoutPhase.saves = bindings
+                                            .map((b: any) => (b.path ? `${b.var} \u2190 ${b.path}` : b.var))
+                                            .join(', ');
+                                    }
                                     
                                     const prevPhase = idx > 0 ? selectedRun.steps[idx - 1].parameters?._phase : null;
                                     const showPhaseDivider = phase && phase !== prevPhase;

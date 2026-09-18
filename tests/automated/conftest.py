@@ -1,7 +1,24 @@
 import pytest
 import asyncio
+import dataclasses
 from httpx import AsyncClient, ASGITransport
 from ivoryos_edge.server import app
+
+
+@dataclasses.dataclass
+class AssayMetrics:
+    purity: float
+    peaks: int
+
+
+@dataclasses.dataclass
+class AssayResult:
+    """A deliberately non-scalar result: one method call produces several numbers plus
+    non-numeric metadata, which is the shape a return pointer has to address."""
+    yield_pct: float
+    metrics: AssayMetrics
+    sample_id: str
+
 
 class DummyInstrument:
     def __init__(self):
@@ -28,6 +45,16 @@ class DummyInstrument:
         ALL-mode one (must wait for the slower one too)."""
         self.counter_b += 0.5
         return self.counter_b
+
+    def assay_method(self) -> AssayResult:
+        """Returns a structured result whose numeric fields sit at different depths, so a test
+        can bind an objective to a nested pointer rather than the whole object."""
+        self.counter += 1
+        return AssayResult(
+            yield_pct=float(self.counter),
+            metrics=AssayMetrics(purity=0.5 * self.counter, peaks=self.counter),
+            sample_id=f"S{self.counter}",
+        )
 
     def echo_method(self, value: str = ""):
         """Returns whatever it's given — no side effects, no sleep. Lets a test assert on the

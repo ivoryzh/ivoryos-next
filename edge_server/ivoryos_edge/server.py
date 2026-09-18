@@ -601,7 +601,11 @@ async def run_and_track_task(task_id: str, method, args):
             result = await loop.run_in_executor(None, lambda: method(**args))
             
         print(f"Task {task_id} completed successfully.")
-        task_results[task_id] = {"status": "completed", "result": result}
+        # Serialized like a workflow step's output. A driver that returns a dataclass or an enum
+        # would otherwise either fail to encode on the way out or reach the Instruments page as
+        # something it cannot display — the manual path deserves the same treatment as a run.
+        from ivoryos_edge.introspection import serialize_result
+        task_results[task_id] = {"status": "completed", "result": serialize_result(result)}
         return result
     except asyncio.CancelledError:
         print(f"Task {task_id} was cancelled!")

@@ -8,6 +8,7 @@ import inspect
 
 from sqlalchemy import update, select
 from sqlalchemy.orm import selectinload
+from ivoryos_edge.introspection import serialize_result
 from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
 
 def extract_return_values(return_bindings, return_var, serialized_res, result):
@@ -726,28 +727,7 @@ class WorkflowQueueManager:
                             result = await self.current_step_task
                             self.current_step_task = None
                                 
-                            def serialize_output(res):
-                                import dataclasses
-                                if dataclasses.is_dataclass(res):
-                                    return dataclasses.asdict(res)
-                                try:
-                                    from pydantic import BaseModel
-                                    if isinstance(res, BaseModel):
-                                        return res.model_dump() if hasattr(res, "model_dump") else res.dict()
-                                except ImportError:
-                                    pass
-                                if hasattr(res, '_asdict'):
-                                    return res._asdict()
-                                import enum
-                                if isinstance(res, enum.Enum):
-                                    return res.value
-                                if isinstance(res, dict):
-                                    return {k: serialize_output(v) for k, v in res.items()}
-                                if isinstance(res, list) or isinstance(res, tuple):
-                                    return [serialize_output(v) for v in res]
-                                return res
-
-                            serialized_res = serialize_output(result)
+                            serialized_res = serialize_result(result)
                             step.status = "completed"
                             step.outputs = {"result": serialized_res}
                             
@@ -1098,28 +1078,7 @@ class WorkflowQueueManager:
                         result = await self.current_step_task
                         self.current_step_task = None
 
-                        def serialize_output(res):
-                            import dataclasses
-                            if dataclasses.is_dataclass(res):
-                                return dataclasses.asdict(res)
-                            try:
-                                from pydantic import BaseModel
-                                if isinstance(res, BaseModel):
-                                    return res.model_dump() if hasattr(res, "model_dump") else res.dict()
-                            except ImportError:
-                                pass
-                            if hasattr(res, '_asdict'):
-                                return res._asdict()
-                            import enum
-                            if isinstance(res, enum.Enum):
-                                return res.value
-                            if isinstance(res, dict):
-                                return {k: serialize_output(v) for k, v in res.items()}
-                            if isinstance(res, list) or isinstance(res, tuple):
-                                return [serialize_output(v) for v in res]
-                            return res
-
-                        serialized_res = serialize_output(result)
+                        serialized_res = serialize_result(result)
                         db_step.status = "completed"
                         db_step.outputs = {"result": serialized_res}
 

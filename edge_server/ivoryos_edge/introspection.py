@@ -557,3 +557,37 @@ def cast_arguments(method, args):
         if k not in casted_args and not k.startswith('_'):
             casted_args[k] = v
     return casted_args
+
+
+def serialize_result(value):
+    """Turn whatever a driver method returned into something JSON can carry.
+
+    A driver returns Python objects — a dataclass, a Pydantic model, an Enum, a namedtuple — and
+    every path that records or reports a result needs the same conversion. Keeping one copy
+    matters because the alternative was two inline copies in the queue and none at all on the
+    manual-execute path, which is why running a method by hand from the Instruments page
+    reported nothing back.
+
+    Unknown objects are returned unchanged rather than forced: the caller may still be able to
+    encode them, and mangling a value into its repr would lose more than it saves.
+    """
+    import dataclasses
+
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: serialize_result(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    try:
+        from pydantic import BaseModel
+        if isinstance(value, BaseModel):
+            return value.model_dump() if hasattr(value, "model_dump") else value.dict()
+    except ImportError:
+        pass
+    if hasattr(value, "_asdict"):
+        return value._asdict()
+    import enum
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {k: serialize_result(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [serialize_result(v) for v in value]
+    return value

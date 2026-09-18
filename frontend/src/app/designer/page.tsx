@@ -2,7 +2,7 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree, Sparkles } from 'lucide-react';
+import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, ListTree } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import AgentPanel from '@/components/AgentPanel';
 import AgentTab from '@/components/AgentTab';
@@ -809,21 +809,6 @@ export default function DesignerPage() {
                 >
                   <ListTree className="w-4 h-4 text-emerald-500" />
                   <span className="hidden sm:inline">Preview</span>
-                </button>
-
-                <button
-                  onClick={() => {
-                    const next = !agentOpen;
-                    setAgentOpen(next);
-                    localStorage.setItem('ivoryos_agent_panel', String(next));
-                  }}
-                  title="Describe a protocol in words and have it drafted against this deck"
-                  className={`flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all border ${agentOpen
-                    ? 'bg-purple-50 border-purple-200 text-purple-700 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300'
-                    : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'}`}
-                >
-                  <Sparkles className="w-4 h-4 text-purple-500" />
-                  <span className="hidden sm:inline">Assistant</span>
                 </button>
 
                 <button

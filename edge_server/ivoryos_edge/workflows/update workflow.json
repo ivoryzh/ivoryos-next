@@ -1,0 +1,41 @@
+{
+    "name": "update workflow",
+    "description": "",
+    "prep": [],
+    "script": [
+        {
+            "id": 1,
+            "uuid": 941765598,
+            "instrument": "Library Workflows",
+            "action": "math",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "ref": {
+                "name": "math",
+                "version": 6,
+                "body_hash": "a543454649afe0ed3da2f6b183d4b9ff81e31e16a2cd1496262f09aeefef3c56",
+                "mode": "pinned"
+            }
+        },
+        {
+            "id": 2,
+            "uuid": 818251702,
+            "instrument": "async_pump",
+            "action": "async_long_task",
+            "args": {},
+            "arg_types": {
+                "duration": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "cleanup": [],
+    "version": 4,
+    "body_hash": "c88c2bf6a3913436914ffcd4d66f5621066314765782be1fe0d6ec0ed6149e5e",
+    "updated_at": 1789517122.9453988
+}

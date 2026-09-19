@@ -1,0 +1,65 @@
+{
+    "name": "another method that calls math",
+    "description": "",
+    "prep": [],
+    "script": [
+        {
+            "id": 1,
+            "uuid": 388731922,
+            "instrument": "Library Workflows",
+            "action": "math",
+            "args": {},
+            "arg_types": {
+                "another": "int",
+                "rate": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "ref": {
+                "name": "math",
+                "version": 7,
+                "body_hash": "821ecdfce204bd51b2bee470e42cf86913fd23edf0b12ef12bfdcb93c4611f8e",
+                "mode": "pinned"
+            }
+        },
+        {
+            "id": 2,
+            "uuid": 558563881,
+            "instrument": "Library Workflows",
+            "action": "math",
+            "args": {},
+            "arg_types": {
+                "another": "int",
+                "rate": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "ref": {
+                "name": "math",
+                "version": 7,
+                "body_hash": "821ecdfce204bd51b2bee470e42cf86913fd23edf0b12ef12bfdcb93c4611f8e",
+                "mode": "pinned"
+            }
+        },
+        {
+            "id": 3,
+            "uuid": 572650107,
+            "instrument": "math_driver",
+            "action": "evaluate_function",
+            "args": {},
+            "arg_types": {
+                "x": "float",
+                "y": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        }
+    ],
+    "cleanup": [],
+    "version": 3,
+    "body_hash": "e5fe9d057915bacfd867640a027d05658755b373ef0c333047364106a9105848",
+    "updated_at": 1789688232.9165998
+}

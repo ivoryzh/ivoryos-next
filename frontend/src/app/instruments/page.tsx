@@ -1,9 +1,10 @@
 "use client";
 import { API_BASE } from '@/config';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Sun, Moon, Info, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import { ResultView, confirmDialog } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
 type LogEntry = {
@@ -20,6 +21,16 @@ export default function InstrumentsPage() {
   const [logs, setLogs] = useState<any[]>([]);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [activeTab, setActiveTab] = useState<string>('');
+  // The log used to be a fixed 160px strip, which is fine for "Executed successfully" and far too
+  // short for a structured result — the thing you ran the method to read scrolled inside a box two
+  // lines tall. Drag its top edge; the size is remembered.
+  const [logHeight, setLogHeight] = useState(176);
+  const logHeightRef = useRef(logHeight);
+  logHeightRef.current = logHeight;
+  const dragFrom = useRef<{ y: number; h: number } | null>(null);
+  // Which required fields a method is missing, keyed 'instrument.method' -> dotted param paths.
+  // Populated on a blocked Execute and cleared per field as it is filled.
+  const [missingArgs, setMissingArgs] = useState<Record<string, string[]>>({});
   const [methodSearch, setMethodSearch] = useState('');
   // Manual instrument actions bypass the queue and drive hardware directly. If a workflow is
   // mid-run, firing one can collide with whatever the run is doing — legacy IvoryOS made you
@@ -67,6 +78,17 @@ export default function InstrumentsPage() {
 
   const handleInputChange = (instrument: string, method: string, param: string, value: any) => {
     const key = `${instrument}.${method}`;
+    // Filling a field answers its complaint; leaving the marker up until the next Execute makes
+    // the form feel like it is arguing with you.
+    setMissingArgs(prev => {
+      const forKey = prev[key];
+      if (!forKey || !forKey.includes(param)) return prev;
+      const next = forKey.filter(p => p !== param);
+      if (next.length) return { ...prev, [key]: next };
+      const rest = { ...prev };
+      delete rest[key];
+      return rest;
+    });
     setFormValues(prev => {
       const existing = prev[key] || {};
       // A dotted path (e.g. 'config.mode') means this belongs to a nested object parameter —
@@ -86,31 +108,75 @@ export default function InstrumentsPage() {
     });
   };
 
+  /** The bits of an introspected parameter this form needs; the schema carries more. */
+  type ParamSchema = {
+    required?: boolean;
+    default?: unknown;
+    is_object?: boolean;
+    fields?: Record<string, ParamSchema>;
+  };
+
   const handleExecute = async (instrument: string, method: string) => {
     const key = `${instrument}.${method}`;
     const methodSchema = statusData?.instruments?.[instrument]?.[method] || { parameters: {} };
     const rawArgs = formValues[key] || {};
     
-    // Fill defaults and validate
-    const argsToSubmit: Record<string, any> = {};
-    for (const [paramName, pData] of Object.entries(methodSchema.parameters)) {
-       let val = rawArgs[paramName];
-       if (val === undefined || val === '') {
-           if ((pData as any).default !== undefined) {
-               val = (pData as any).default;
-           } else {
-               alert(`Missing parameter '${paramName}'`);
-               return;
-           }
-       }
-       argsToSubmit[paramName] = val;
+    // Fill defaults and collect *every* missing required field, not just the first. Reporting
+    // them one at a time turns a four-field form into four rejected attempts.
+    const argsToSubmit: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const walk = (schemaParams: Record<string, ParamSchema>, values: Record<string, unknown> | undefined, prefix: string, sink: Record<string, unknown>) => {
+      for (const [paramName, pData] of Object.entries(schemaParams || {})) {
+        const path = prefix ? `${prefix}.${paramName}` : paramName;
+        let val: unknown = values?.[paramName];
+
+        if (pData?.is_object && pData?.fields) {
+          const nested: Record<string, unknown> = {};
+          walk(pData.fields, val as Record<string, unknown> | undefined, path, nested);
+          sink[paramName] = nested;
+          continue;
+        }
+
+        if (val === undefined || val === '') {
+          if (pData?.default !== undefined) {
+            val = pData.default;
+          } else if (pData?.required) {
+            missing.push(path);
+            continue;
+          } else {
+            continue;
+          }
+        }
+        sink[paramName] = val;
+      }
+    };
+
+    walk(methodSchema.parameters, rawArgs, '', argsToSubmit);
+
+    if (missing.length > 0) {
+      // Marked on the fields themselves rather than announced. alert() is a silent no-op in the
+      // desktop app's webview, so this check was invisible there and a browser popup everywhere
+      // else — neither of which shows you *which* box to go fill in.
+      setMissingArgs(prev => ({ ...prev, [key]: missing }));
+      return;
     }
+    setMissingArgs(prev => {
+      if (!prev[key]) return prev;
+      const rest = { ...prev };
+      delete rest[key];
+      return rest;
+    });
 
     if (busyState.running || busyState.paused) {
       const state = busyState.running ? 'running a workflow' : 'paused mid-workflow';
-      if (!confirm(`The platform is currently ${state}. Running "${key}" by hand now could conflict with it.\n\nOverride and run it anyway?`)) {
-        return;
-      }
+      // confirmDialog, not confirm(): the native one returns false immediately in the webview, so
+      // this override could never be granted there — the run was simply dropped.
+      const proceed = await confirmDialog(
+        `The platform is currently ${state}. Running "${key}" by hand now could conflict with it.`,
+        { title: 'Override and run anyway?', confirmLabel: 'Run anyway', tone: 'danger' },
+      );
+      if (!proceed) return;
     }
 
     setExecuting(prev => ({ ...prev, [key]: true }));
@@ -178,6 +244,37 @@ export default function InstrumentsPage() {
     }
   };
 
+  const clampLogHeight = (h: number) =>
+    Math.min(Math.max(h, 96), typeof window === 'undefined' ? 600 : window.innerHeight * 0.75);
+
+  useEffect(() => {
+    const saved = Number(localStorage.getItem('ivoryos_log_height'));
+    if (saved) setLogHeight(clampLogHeight(saved));
+  }, []);
+
+  // Listeners on window, not the handle: a fast drag outruns the 6px grip and the resize would
+  // stop dead the moment the pointer left it.
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragFrom.current) return;
+      e.preventDefault();
+      setLogHeight(clampLogHeight(dragFrom.current.h + (dragFrom.current.y - e.clientY)));
+    };
+    const onUp = () => {
+      if (!dragFrom.current) return;
+      dragFrom.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      localStorage.setItem('ivoryos_log_height', String(logHeightRef.current));
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
   if (!statusData) return <div className="p-8 text-gray-900 dark:text-white bg-gray-50 dark:bg-[#0a0a0a] min-h-screen">Loading instruments...</div>;
 
   const instruments = statusData.instruments || {};
@@ -210,29 +307,36 @@ export default function InstrumentsPage() {
           </div>
         </header>
 
-        <div className="p-8 space-y-6 overflow-y-auto pb-48">
+        <div className="flex-1 flex min-h-0">
           {Object.entries(instruments).length === 0 ? (
-            <div className="text-gray-500 dark:text-gray-400">No instruments detected. Ensure they are initialized before calling ivoryos_edge.run().</div>
+            <div className="p-8 text-gray-500 dark:text-gray-400">No instruments detected. Ensure they are initialized before calling ivoryos_edge.run().</div>
           ) : (
             <>
-              {/* Tabs */}
-              <div className="flex space-x-2 border-b border-gray-200 dark:border-white/10 mb-6 overflow-x-auto">
+              {/* A rail, not a tab strip. Instruments are a list that grows with the lab, and a
+                  horizontal strip either wraps or scrolls sideways once there are a dozen of them.
+                  Vertical is also where the Designer already puts them, so the two pages agree on
+                  where you go to pick a device. */}
+              <nav className="w-52 shrink-0 border-r border-gray-200 dark:border-white/10 overflow-y-auto bg-white/60 dark:bg-white/[0.02] py-3">
                 {Object.keys(instruments).map(instName => (
                   <button
                     key={instName}
                     onClick={() => setActiveTab(instName)}
-                    className={`px-4 py-2 font-medium text-sm transition-colors border-b-2 whitespace-nowrap capitalize ${
+                    className={`w-full flex items-center justify-between gap-2 text-left px-4 py-2 text-sm transition-colors capitalize border-l-2 ${
                       activeTab === instName
-                        ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-                        : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+                        ? 'border-indigo-500 bg-indigo-50 text-indigo-700 font-semibold dark:bg-indigo-500/10 dark:text-indigo-300'
+                        : 'border-transparent text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200'
                     }`}
                   >
-                    {instName.replace(/_/g, ' ')}
+                    <span className="truncate">{instName.replace(/_/g, ' ')}</span>
+                    <span className="shrink-0 text-[10px] font-normal text-gray-400 dark:text-gray-600">
+                      {Object.keys(instruments[instName] || {}).length}
+                    </span>
                   </button>
                 ))}
-              </div>
+              </nav>
 
-              {/* Active Tab Content */}
+              <div className="flex-1 min-w-0 overflow-y-auto p-8 space-y-6">
+              {/* Active instrument */}
               {activeTab && instruments[activeTab] && (() => {
                 const query = methodSearch.trim().toLowerCase();
                 const visibleMethods = Object.entries(instruments[activeTab]).filter(([methodName, methodData]: [string, any]) =>
@@ -284,18 +388,22 @@ export default function InstrumentsPage() {
                               }
 
                               const displayType = (pData.type || '').replace(/<class '([^']+)'>/, '$1').replace('typing.', '');
+                              const isMissing = (missingArgs[key] || []).includes(paramPath);
+                              const fieldBorder = isMissing
+                                ? 'border-red-400 dark:border-red-500/60 focus:border-red-500'
+                                : 'border-gray-300 dark:border-white/10 focus:border-indigo-500';
                               const currentValue = paramPath.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, formValues[key]);
 
                               return (
                                 <div key={paramPath} className="space-y-1">
-                                  <label className="text-[11px] text-gray-600 dark:text-gray-400 capitalize flex items-start font-medium mb-1">
+                                  <label className={`text-[11px] capitalize flex items-start font-medium mb-1 ${isMissing ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400'}`}>
                                     <span className="break-all">{paramLabel}</span>
                                     {pData.required && <span className="text-red-500/80 dark:text-red-400/70 ml-1 text-sm leading-none shrink-0">*</span>}
                                   </label>
                                   {displayType.includes('bool') ? (
                                     <select
                                       value={currentValue !== undefined ? currentValue.toString() : (pData.default !== undefined ? pData.default.toString() : '')}
-                                      className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors text-gray-900 dark:text-white"
+                                      className={`w-full bg-gray-50 dark:bg-black/40 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none transition-colors text-gray-900 dark:text-white ${fieldBorder}`}
                                       onChange={(e) => handleInputChange(instName, methodName, paramPath, e.target.value === 'true')}
                                     >
                                       <option value="">Select boolean...</option>
@@ -311,7 +419,7 @@ export default function InstrumentsPage() {
                                         // suggestions instead of leaving the operator to guess the spelling.
                                         list={pData.options ? `inst-opts-${key}-${paramPath}` : undefined}
                                         value={currentValue !== undefined ? currentValue : (pData.default !== undefined ? pData.default : '')}
-                                        className="w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors text-gray-900 dark:text-white"
+                                        className={`w-full bg-gray-50 dark:bg-black/40 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none transition-colors text-gray-900 dark:text-white ${fieldBorder}`}
                                         placeholder={displayType}
                                         onChange={(e) => {
                                           let val: any = e.target.value;
@@ -330,6 +438,9 @@ export default function InstrumentsPage() {
                                       )}
                                     </>
                                   )}
+                                  {isMissing && (
+                                    <p className="text-[10px] font-medium text-red-600 dark:text-red-400">Required</p>
+                                  )}
                                 </div>
                               );
                             };
@@ -339,6 +450,13 @@ export default function InstrumentsPage() {
                         </div>
 
                         <div className="mt-auto">
+                          {(missingArgs[key] || []).length > 0 && (
+                            <p className="mb-2 text-[11px] text-red-600 dark:text-red-400">
+                              Fill in {(missingArgs[key] || []).length === 1
+                                ? 'the required field'
+                                : `${(missingArgs[key] || []).length} required fields`} above.
+                            </p>
+                          )}
                           <button 
                             onClick={() => handleExecute(instName, methodName)}
                             disabled={executing[key]}
@@ -357,12 +475,38 @@ export default function InstrumentsPage() {
                 </div>
                 );
               })()}
+              </div>
             </>
           )}
         </div>
 
-        {/* Global Task / Log Bar at Bottom */}
-        <div className="absolute bottom-0 left-0 right-0 h-40 bg-white/95 dark:bg-black/90 border-t border-gray-200 dark:border-white/10 backdrop-blur-2xl flex flex-col z-50 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] dark:shadow-none">
+        {/* Action log. A flex sibling rather than an absolutely-positioned overlay, so resizing it
+            gives the content above the space back instead of hiding underneath it. */}
+        <div
+          style={{ height: logHeight }}
+          className="shrink-0 bg-white/95 dark:bg-black/90 border-t border-gray-200 dark:border-white/10 backdrop-blur-2xl flex flex-col z-50 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] dark:shadow-none"
+        >
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            title="Drag to resize the log"
+            onMouseDown={e => {
+              e.preventDefault();
+              dragFrom.current = { y: e.clientY, h: logHeightRef.current };
+              // Set on body, not the handle: without this the drag selects text across the page
+              // and the cursor flickers back to default whenever it leaves the grip.
+              document.body.style.cursor = 'ns-resize';
+              document.body.style.userSelect = 'none';
+            }}
+            onDoubleClick={() => {
+              const next = clampLogHeight(logHeight > 200 ? 176 : Math.round(window.innerHeight * 0.5));
+              setLogHeight(next);
+              localStorage.setItem('ivoryos_log_height', String(next));
+            }}
+            className="group h-1.5 -mt-1.5 shrink-0 cursor-ns-resize flex items-center justify-center"
+          >
+            <span className="h-0.5 w-10 rounded-full bg-gray-300 dark:bg-white/20 group-hover:bg-indigo-400 transition-colors" />
+          </div>
           <header className="h-10 shrink-0 border-b border-gray-200 dark:border-white/5 flex items-center justify-between px-4 bg-white/80 dark:bg-black/20 backdrop-blur-md">
             <h3 className="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest">Action Log</h3>
             <button onClick={() => setLogs([])} className="text-[10px] font-semibold text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-white uppercase tracking-wider">Clear</button>
@@ -384,7 +528,10 @@ export default function InstrumentsPage() {
                       {log.status === 'error' ? 'Error' : log.status === 'started' ? 'Running' : 'Success'}
                     </span>
                   </div>
-                  <div className="w-full pl-[52px] pr-4 break-words leading-tight text-gray-600 dark:text-gray-400 text-[11px]">
+                  {/* Capped, not full-bleed. On a wide screen a key/value row stretched the
+                      whole window, so the label and its value ended up a screen apart with a
+                      hand-span of dotted leader between them. */}
+                  <div className="w-full max-w-2xl pl-[52px] pr-4 break-words leading-tight text-gray-600 dark:text-gray-400 text-[11px]">
                     {log.result?.task_id && (
                       <span className="text-[9px] text-gray-400 dark:text-gray-600 block mb-1">Task ID: {log.result.task_id}</span>
                     )}
@@ -401,9 +548,7 @@ export default function InstrumentsPage() {
                           ? 'Task queued in background...'
                           : log.result?.result === undefined || log.result?.result === null
                             ? 'Executed successfully (no value returned).'
-                            : typeof log.result.result === 'object'
-                              ? <code className="whitespace-pre-wrap break-all">{JSON.stringify(log.result.result, null, 1)}</code>
-                              : String(log.result.result)}
+                            : <ResultView value={log.result.result} />}
                       </span>
                     )}
                   </div>

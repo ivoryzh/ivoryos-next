@@ -31,8 +31,30 @@
     {
       "name": "cloud-frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "cloud_frontend", "run", "dev", "--", "-p", "3002"],
+      "runtimeArgs": [
+        "--prefix",
+        "cloud_frontend",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3002"
+      ],
       "port": 3002
+    },
+    {
+      "name": "hub",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "C:/Users/User/landing-page-supabase",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3111"
+      ],
+      "port": 3111
     }
   ]
 }

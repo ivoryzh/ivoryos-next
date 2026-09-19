@@ -677,7 +677,6 @@ export default function ExecutionPage() {
       <div className="flex-1 flex flex-col relative z-0">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <RunTabs active="configure" />
-          <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Spreadsheet Editor</h2>
           {variables.length > 0 && (
             <span className="text-xs font-semibold text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-white/5 px-2 py-0.5 rounded-full">
               {rows.length} {rows.length === 1 ? 'entry' : 'entries'}

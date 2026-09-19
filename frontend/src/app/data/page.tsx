@@ -4,24 +4,22 @@ import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { readNamedOutput } from '@ivoryos/shared-ui';
+import { readNamedOutput, ResultView } from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned. When that value is a plain scalar — the overwhelmingly common case, since that's the
 // only thing an optimizer can ever act on — show it bare instead of as a one-key JSON object.
 // A dataclass/dict/list result (multiple fields, or a non-scalar 'result') still gets the full dump.
-const formatStepOutput = (outputs: any): string => {
-  if (outputs === null || outputs === undefined) return '';
+// Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
+// returned, so unwrap that one key before handing the value to ResultView — otherwise every result
+// renders under a pointless "Result" heading.
+const stepResultValue = (outputs: unknown): unknown => {
+  if (outputs === null || outputs === undefined) return outputs;
   if (typeof outputs === 'object' && !Array.isArray(outputs)) {
-    const keys = Object.keys(outputs);
-    if (keys.length === 1 && keys[0] === 'result') {
-      const val = outputs.result;
-      if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
-        return String(val);
-      }
-    }
+    const keys = Object.keys(outputs as Record<string, unknown>);
+    if (keys.length === 1 && keys[0] === 'result') return (outputs as Record<string, unknown>).result;
   }
-  return JSON.stringify(outputs, null, 2);
+  return outputs;
 };
 
 // The optimizer backends return each plot as a Plotly HTML fragment generated with
@@ -64,51 +62,98 @@ const stepLabel = (step: TimelineStep) =>
 
 const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; iterationLabel?: string }) => {
   const [hovered, setHovered] = useState<number | null>(null);
+  const [hoveredIteration, setHoveredIteration] = useState<number | null>(null);
+  // Which iteration the step track is showing. null = the whole run.
+  const [zoom, setZoom] = useState<number | null>(null);
 
   const timed = steps.filter(s => s.start_time);
-  if (timed.length === 0) return null;
 
-  const starts = timed.map(s => new Date(s.start_time!).getTime());
-  const ends = timed.map(s => new Date(s.end_time || s.start_time!).getTime());
-  const minStart = Math.min(...starts);
-  const maxEnd = Math.max(...ends);
+  const startOf = (s: TimelineStep) => new Date(s.start_time!).getTime();
+  const endOf = (s: TimelineStep) => new Date(s.end_time || s.start_time!).getTime();
+
+  const unit = iterationLabel || 'Iteration';
+  const iterationNumbers = [...new Set(timed.map(s => s.iteration).filter(v => v !== undefined))].sort(
+    (a, b) => (a as number) - (b as number),
+  ) as number[];
+  const hasIterations = iterationNumbers.length > 1;
+
+  // One band per repetition of the sequence, which is the unit a repeated run is actually read
+  // in: "trial 7 was the slow one" is the question, not "the 41st bar was the slow one".
+  const bands = iterationNumbers.map(n => {
+    const own = timed.filter(s => s.iteration === n);
+    return {
+      n,
+      steps: own,
+      start: Math.min(...own.map(startOf)),
+      end: Math.max(...own.map(endOf)),
+      errors: own.filter(s => s.status === 'error').length,
+    };
+  });
+
+  // Zooming filters the step track *and* rescales it, so one trial out of fifty fills the width
+  // instead of staying the two-pixel sliver it was in the full run.
+  const view = zoom === null ? timed : timed.filter(s => s.iteration === zoom);
+  const viewSteps = view.length > 0 ? view : timed;
+
+  const starts = viewSteps.map(startOf);
+  const ends = viewSteps.map(endOf);
+  const minStart = starts.length ? Math.min(...starts) : 0;
+  const maxEnd = ends.length ? Math.max(...ends) : 1;
   const totalMs = Math.max(maxEnd - minStart, 1);
 
-  // Where the time actually went, which is the question the chart is meant to answer and could
-  // not: a run of thirty slivers shows that something was slow without saying what.
+  // The full run's own extent, which the iteration ribbon is always laid out against — the
+  // ribbon must not move when you zoom, or clicking through trials becomes a guessing game.
+  const runStart = timed.length ? Math.min(...timed.map(startOf)) : 0;
+  const runEnd = timed.length ? Math.max(...timed.map(endOf)) : 1;
+  const runMs = Math.max(runEnd - runStart, 1);
+
+  // Steps are drawn when they can be told apart: a single sequence, or one iteration zoomed in.
+  // Zoomed out over fifty trials the per-step bars were a grey smear that answered nothing, so
+  // the bands stand in for them until you pick one.
+  const showSteps = !hasIterations || zoom !== null;
+
+  // Where the time went, over whatever is currently in view.
   const byLabel = new Map<string, number>();
-  timed.forEach((step, i) => {
+  viewSteps.forEach((step, i) => {
     byLabel.set(stepLabel(step), (byLabel.get(stepLabel(step)) || 0) + (ends[i] - starts[i]));
   });
   const slowest = [...byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
 
-  // Iteration boundaries, drawn only while they are still distinguishable. A hundred-row
-  // spreadsheet would otherwise be a wall of tick marks; the count still reaches the reader
-  // through the hover readout and the caption.
-  const iterations = [...new Set(timed.map(s => s.iteration).filter(v => v !== undefined))] as number[];
-  const showBoundaries = iterations.length > 1 && iterations.length <= 40;
-  const unit = iterationLabel || 'Iteration';
+  if (timed.length === 0) return null;
 
-  const active = hovered !== null ? timed[hovered] : null;
+  const active = hovered !== null ? viewSteps[hovered] : null;
+  const activeBand = hoveredIteration !== null ? bands.find(b => b.n === hoveredIteration) : null;
+  const slowestBand = bands.length > 1
+    ? bands.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a))
+    : null;
 
   return (
     <div className="mb-6">
       <div className="flex items-baseline justify-between mb-2 gap-3">
-        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Timeline</h3>
+        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider shrink-0">Timeline</h3>
         {/* A fixed readout rather than a native title: a 0.6%-wide bar is close to
             unhoverable, and the browser tooltip needs a hover to be held still on top of it
             before it appears at all — so the information was effectively unreachable. */}
         <div className="text-[11px] font-mono truncate text-right flex-1 min-w-0">
-          {active ? (
+          {activeBand ? (
+            <span className="text-gray-700 dark:text-gray-200">
+              <span className="text-indigo-600 dark:text-indigo-400 font-bold">{unit} {activeBand.n}</span>
+              <span className="text-gray-400">
+                {' · '}{((activeBand.end - activeBand.start) / 1000).toFixed(2)}s
+                {' · '}{activeBand.steps.length} step{activeBand.steps.length === 1 ? '' : 's'}
+                {' · +'}{((activeBand.start - runStart) / 1000).toFixed(1)}s
+              </span>
+              {activeBand.errors > 0 && <span className="text-red-500">{' · '}{activeBand.errors} failed</span>}
+            </span>
+          ) : active ? (
             <span className="text-gray-700 dark:text-gray-200">
               {active.iteration !== undefined && (
                 <span className="text-indigo-600 dark:text-indigo-400 font-bold">{unit} {active.iteration} · </span>
               )}
               {stepLabel(active)}
               <span className="text-gray-400">
-                {' · '}{((new Date(active.end_time || active.start_time!).getTime()
-                        - new Date(active.start_time!).getTime()) / 1000).toFixed(2)}s
-                {' · +'}{((new Date(active.start_time!).getTime() - minStart) / 1000).toFixed(1)}s
+                {' · '}{((endOf(active) - startOf(active)) / 1000).toFixed(2)}s
+                {' · +'}{((startOf(active) - minStart) / 1000).toFixed(1)}s
               </span>
               {active.status !== 'completed' && (
                 <span className={active.status === 'error' ? ' text-red-500' : ' text-indigo-500'}>
@@ -117,71 +162,122 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
               )}
             </span>
           ) : (
-            <span className="text-gray-400 dark:text-gray-600">hover a bar for details</span>
+            <span className="text-gray-400 dark:text-gray-600">
+              {hasIterations
+                ? `click a ${unit.toLowerCase()} to see its steps`
+                : 'hover a bar for details'}
+            </span>
           )}
         </div>
       </div>
 
-      {/* Hover is resolved against the whole track rather than per bar. One slow step squeezes
-          the rest to a few pixels each — in a typical run a 4s hold sits beside six sub-50ms
-          calls — so a per-bar hover target makes exactly the steps you want to inspect the ones
-          you cannot hit. Picking the step nearest the cursor's position in time makes every bar
-          reachable regardless of how thin it was drawn. */}
-      <div
-        className="relative h-8 rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden cursor-crosshair"
-        onMouseLeave={() => setHovered(null)}
-        onMouseMove={e => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          if (rect.width === 0) return;
-          const at = minStart + ((e.clientX - rect.left) / rect.width) * totalMs;
-          let best = 0;
-          let bestDistance = Infinity;
-          for (let i = 0; i < timed.length; i++) {
-            // Zero when the cursor is inside the step's own span, so a real hit always wins.
-            const distance = at < starts[i] ? starts[i] - at : at > ends[i] ? at - ends[i] : 0;
-            if (distance < bestDistance) { bestDistance = distance; best = i; }
-          }
-          setHovered(best);
-        }}
-      >
-        {showBoundaries && iterations.slice(1).map(iteration => {
-          const first = timed.findIndex(s => s.iteration === iteration);
-          if (first < 0) return null;
-          return (
-            <div
-              key={`b-${iteration}`}
-              className="absolute top-0 h-full w-px bg-gray-300 dark:bg-white/20 z-10"
-              style={{ left: `${((starts[first] - minStart) / totalMs) * 100}%` }}
-            />
-          );
-        })}
-        {timed.map((step, idx) => {
-          const leftPct = ((starts[idx] - minStart) / totalMs) * 100;
-          // A near-instant step would otherwise round to an invisible sliver — floor its width
-          // so every logged action stays hoverable, not just the slow ones.
-          const widthPct = Math.max(((ends[idx] - starts[idx]) / totalMs) * 100, 0.6);
-          return (
-            <div
-              key={idx}
-              className={`absolute top-0 h-full pointer-events-none ${STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${
-                hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
-              }`}
-              style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-            />
-          );
-        })}
-      </div>
+      {hasIterations && (
+        <>
+          {/* The outer bracket: every repetition, labelled and to scale, so you can see which
+              stretch of the run is which before deciding where to look. */}
+          <div className="relative h-7 mb-1.5">
+            {bands.map(band => {
+              const leftPct = ((band.start - runStart) / runMs) * 100;
+              const widthPct = Math.max(((band.end - band.start) / runMs) * 100, 0.8);
+              const selected = zoom === band.n;
+              return (
+                <button
+                  key={band.n}
+                  type="button"
+                  onClick={() => setZoom(selected ? null : band.n)}
+                  onMouseEnter={() => setHoveredIteration(band.n)}
+                  onMouseLeave={() => setHoveredIteration(null)}
+                  title={`${unit} ${band.n} — ${((band.end - band.start) / 1000).toFixed(2)}s, ${band.steps.length} step${band.steps.length === 1 ? '' : 's'}`}
+                  className={`absolute top-0 h-full rounded-md border text-[10px] font-bold overflow-hidden transition-colors ${
+                    selected
+                      ? 'bg-indigo-500 border-indigo-600 text-white z-20'
+                      : band.errors > 0
+                        ? 'bg-red-100 border-red-300 text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:border-red-500/40 dark:text-red-300'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-500/15 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-500/25'
+                  } ${hoveredIteration === band.n && !selected ? 'ring-1 ring-inset ring-indigo-400' : ''}`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                >
+                  {/* Only when it fits. A hundred-row run is a ribbon of unlabelled blocks, and
+                      the readout above names whichever one you are pointing at. */}
+                  {widthPct > 4 ? band.n : ''}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+            <span>
+              {bands.length} {unit.toLowerCase()}{bands.length === 1 ? '' : 's'}
+              {slowestBand && <> · slowest {unit.toLowerCase()} {slowestBand.n} at {((slowestBand.end - slowestBand.start) / 1000).toFixed(1)}s</>}
+            </span>
+            {zoom !== null && (
+              <button
+                type="button"
+                onClick={() => { setZoom(null); setHovered(null); }}
+                className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+              >
+                ← whole run
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {showSteps ? (
+        /* Hover is resolved against the whole track rather than per bar. One slow step squeezes
+           the rest to a few pixels each — in a typical run a 4s hold sits beside six sub-50ms
+           calls — so a per-bar hover target makes exactly the steps you want to inspect the ones
+           you cannot hit. Picking the step nearest the cursor's position in time makes every bar
+           reachable regardless of how thin it was drawn. */
+        <div
+          className="relative h-8 rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden cursor-crosshair"
+          onMouseLeave={() => setHovered(null)}
+          onMouseMove={e => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            if (rect.width === 0) return;
+            const at = minStart + ((e.clientX - rect.left) / rect.width) * totalMs;
+            let best = 0;
+            let bestDistance = Infinity;
+            for (let i = 0; i < viewSteps.length; i++) {
+              // Zero when the cursor is inside the step's own span, so a real hit always wins.
+              const distance = at < starts[i] ? starts[i] - at : at > ends[i] ? at - ends[i] : 0;
+              if (distance < bestDistance) { bestDistance = distance; best = i; }
+            }
+            setHovered(best);
+          }}
+        >
+          {viewSteps.map((step, idx) => {
+            const leftPct = ((starts[idx] - minStart) / totalMs) * 100;
+            // A near-instant step would otherwise round to an invisible sliver — floor its width
+            // so every logged action stays hoverable, not just the slow ones.
+            const widthPct = Math.max(((ends[idx] - starts[idx]) / totalMs) * 100, 0.6);
+            return (
+              <div
+                key={idx}
+                className={`absolute top-0 h-full pointer-events-none ${STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${
+                  hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
+                }`}
+                style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <p className="h-8 flex items-center justify-center rounded-lg bg-gray-50 dark:bg-white/[0.03] text-[11px] text-gray-400 dark:text-gray-500">
+          Pick a {unit.toLowerCase()} above to see its steps
+        </p>
+      )}
 
       <div className="flex justify-between text-[10px] text-gray-400 mt-1 gap-2">
         <span>{new Date(minStart).toLocaleTimeString()}</span>
         <span className="text-center">
-          {((maxEnd - minStart) / 1000).toFixed(1)}s total &middot; {timed.length} step{timed.length === 1 ? '' : 's'}
-          {iterations.length > 1 && <> &middot; {iterations.length} {unit.toLowerCase()}s</>}
+          {((maxEnd - minStart) / 1000).toFixed(1)}s
+          {zoom !== null ? ` in ${unit.toLowerCase()} ${zoom}` : ' total'}
+          {' · '}{viewSteps.length} step{viewSteps.length === 1 ? '' : 's'}
         </span>
         <span>{new Date(maxEnd).toLocaleTimeString()}</span>
       </div>
 
-      {slowest.length > 1 && (
+      {showSteps && slowest.length > 1 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[10px] text-gray-500 dark:text-gray-400">
           <span className="uppercase font-bold tracking-wider text-gray-400">Most time</span>
           {slowest.map(([label, ms]) => (
@@ -808,9 +904,15 @@ export default function DataPage() {
                                                         {(hasResult || step.error) && (
                                                             <div className={`min-w-0 ${!hasParams ? 'col-span-2' : 'col-span-2 md:col-span-1'}`}>
                                                                 <div className="text-[10px] uppercase font-bold text-gray-400 mb-1">Result / Output</div>
-                                                                <pre className={`text-xs p-2 rounded border overflow-hidden max-w-full whitespace-pre-wrap break-all ${step.error ? 'bg-red-50 dark:bg-red-900/10 border-red-100 dark:border-red-500/20 text-red-600 dark:text-red-400' : 'bg-gray-50 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-600 dark:text-gray-300'}`} style={{overflowWrap: 'anywhere'}}>
-                                                                    {step.error || formatStepOutput(step.outputs)}
-                                                                </pre>
+                                                                {step.error ? (
+                                                                  <pre className="text-xs p-2 rounded border overflow-hidden max-w-full whitespace-pre-wrap break-all bg-red-50 dark:bg-red-900/10 border-red-100 dark:border-red-500/20 text-red-600 dark:text-red-400" style={{overflowWrap: 'anywhere'}}>
+                                                                    {step.error}
+                                                                  </pre>
+                                                                ) : (
+                                                                  <div className="text-xs p-2 rounded border overflow-hidden max-w-full bg-gray-50 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-600 dark:text-gray-300">
+                                                                    <ResultView value={stepResultValue(step.outputs)} />
+                                                                  </div>
+                                                                )}
                                                             </div>
                                                         )}
                                                     </div>
@@ -876,9 +978,15 @@ export default function DataPage() {
                                                               <span className={`px-2 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold shrink-0 ml-2 ${step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-100 text-gray-500'}`}>{step.status}</span>
                                                            </div>
                                                            {(step.result || step.error) && (
-                                                              <pre className={`mt-2 p-2 rounded text-xs overflow-hidden w-full max-w-full whitespace-pre-wrap break-all ${step.error ? 'bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 border border-red-100 dark:border-red-500/20' : 'bg-gray-50 dark:bg-white/[0.02] text-gray-600 dark:text-gray-300 border border-gray-100 dark:border-white/5'}`} style={{overflowWrap: 'anywhere'}}>
-                                                                  {step.error || formatStepOutput(step.result)}
-                                                              </pre>
+                                                              step.error ? (
+                                                                <pre className="mt-2 p-2 rounded text-xs overflow-hidden w-full max-w-full whitespace-pre-wrap break-all bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 border border-red-100 dark:border-red-500/20" style={{overflowWrap: 'anywhere'}}>
+                                                                  {step.error}
+                                                                </pre>
+                                                              ) : (
+                                                                <div className="mt-2 p-2 rounded text-xs overflow-hidden w-full max-w-full bg-gray-50 dark:bg-white/[0.02] text-gray-600 dark:text-gray-300 border border-gray-100 dark:border-white/5">
+                                                                  <ResultView value={stepResultValue(step.result)} />
+                                                                </div>
+                                                              )
                                                            )}
                                                       </div>
                                                   ))}

@@ -1,9 +1,11 @@
 {
+    "name": "math",
+    "description": "",
     "prep": [],
     "script": [
         {
             "id": 1,
-            "uuid": 894426751,
+            "uuid": 687305211,
             "instrument": "math_driver",
             "action": "evaluate_function",
             "args": {
@@ -11,13 +13,169 @@
                 "y": 1
             },
             "arg_types": {
-                "x": "<class 'float'>",
-                "y": "<class 'float'>"
+                "x": "float",
+                "y": "float"
             },
             "return": "objective",
             "batch_action": false,
             "consolidate_batch_args": false
+        },
+        {
+            "id": 2,
+            "uuid": 469135418,
+            "instrument": "my_pump",
+            "action": "long_running_task",
+            "args": {
+                "duration": 2
+            },
+            "arg_types": {
+                "duration": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 3,
+            "uuid": 781047075,
+            "instrument": "my_pump",
+            "action": "start_pump",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 4,
+            "uuid": 747431548,
+            "instrument": "my_pump",
+            "action": "stop_pump",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false
+        },
+        {
+            "id": 5,
+            "uuid": 712927769,
+            "instrument": "another_pump",
+            "action": "long_running_task",
+            "args": {
+                "duration": "#another"
+            },
+            "arg_types": {
+                "duration": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "copied_from": {
+                "name": "name stree test",
+                "version": 1
+            }
+        },
+        {
+            "id": 6,
+            "uuid": 238104532,
+            "instrument": "my_pump",
+            "action": "set_flow_rate",
+            "args": {
+                "rate": "#rate"
+            },
+            "arg_types": {
+                "rate": "float"
+            },
+            "return": "test",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "copied_from": {
+                "name": "name stree test",
+                "version": 1
+            }
+        },
+        {
+            "id": 7,
+            "uuid": 995608070,
+            "instrument": "my_pump",
+            "action": "stop_pump",
+            "args": {},
+            "arg_types": {},
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "copied_from": {
+                "name": "name stree test",
+                "version": 1
+            }
+        },
+        {
+            "id": 8,
+            "uuid": 172544328,
+            "instrument": "my_pump",
+            "action": "long_running_task",
+            "args": {
+                "duration": "#rate"
+            },
+            "arg_types": {
+                "duration": "int"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "copied_from": {
+                "name": "name stree test",
+                "version": 1
+            }
+        },
+        {
+            "id": 9,
+            "uuid": 11882666,
+            "instrument": "my_pump",
+            "action": "very_long_module_method_name_to_test_truncation_issues_on_frontend",
+            "args": {
+                "super_long_parameter_name_that_should_wrap": "default_val"
+            },
+            "arg_types": {
+                "super_long_parameter_name_that_should_wrap": "str"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "copied_from": {
+                "name": "name stree test",
+                "version": 1
+            }
+        },
+        {
+            "id": 10,
+            "uuid": 105706679,
+            "instrument": "my_pump",
+            "action": "complex_initialization_sequence",
+            "args": {
+                "enable_safety_checks": true,
+                "retries": 3,
+                "timeout_seconds": 60
+            },
+            "arg_types": {
+                "target_temperature": "float",
+                "solvent_name": "str",
+                "enable_safety_checks": "bool",
+                "retries": "int",
+                "timeout_seconds": "float"
+            },
+            "return": "",
+            "batch_action": false,
+            "consolidate_batch_args": false,
+            "copied_from": {
+                "name": "name stree test",
+                "version": 1
+            }
         }
     ],
-    "cleanup": []
+    "cleanup": [],
+    "version": 7,
+    "body_hash": "821ecdfce204bd51b2bee470e42cf86913fd23edf0b12ef12bfdcb93c4611f8e",
+    "updated_at": 1789517934.3969672
 }

@@ -29,6 +29,49 @@ type WorkflowItem = {
 const MAX_TAGS = 24;
 const MAX_TAG_LENGTH = 40;
 
+/**
+ * A card's link relationships, on exactly one line, with the full list on hover.
+ *
+ * These lists grow — a workflow used by four others wrapped to three lines, pushing that card's
+ * dates and buttons down so it no longer lined up with the cards beside it. What you scan a card
+ * for is *whether* it has dependents and how many; the names are worth a hover, not three lines
+ * of every card forever. One name is still shown outright, since at that point the name is
+ * shorter than the count would be.
+ */
+function LinkLine({ names, tone, lead, tooltipTitle }: {
+  names: string[];
+  tone: 'warn' | 'muted';
+  lead: string;
+  tooltipTitle: string;
+}) {
+  const isWarn = tone === 'warn';
+  return (
+    <div
+      className={`group/links relative mt-2 flex items-center gap-1.5 text-[11px] ${
+        isWarn
+          ? 'mt-3 rounded-lg px-2 py-1.5 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/40'
+          : 'text-gray-500 dark:text-gray-400'
+      }`}
+    >
+      {isWarn && <Link2 className="w-3.5 h-3.5 shrink-0" />}
+      {/* The consequence ("editing changes them too") lives in the tooltip, not here: spelled out
+          inline it was the part that overflowed, so the warning was the first thing to be cut. The
+          emerald box already says "this has consequences"; the tooltip says which. */}
+      <span className="min-w-0 flex-1 truncate">
+        {lead} <strong>{names.length === 1 ? names[0] : `${names.length} workflows`}</strong>
+      </span>
+      {/* Above rather than below: these sit low on the card, and a tooltip opening downward fell
+          outside it and got clipped by the grid. */}
+      <div className="hidden group-hover/links:block absolute left-0 bottom-full mb-1.5 z-50 w-max max-w-[240px] p-2.5 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-[11px] shadow-xl pointer-events-none">
+        <p className="font-semibold mb-1 opacity-70">{tooltipTitle}</p>
+        <ul className="space-y-0.5">
+          {names.map(n => <li key={n} className="break-words">{n}</li>)}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 type VersionEntry = {
   version: number;
   updated_at: number;
@@ -432,17 +475,20 @@ export default function LibraryPage() {
                             time and change with it. Copies never appear here, because an inlined
                             copy holds no reference for anything to propagate through. */}
                         {(workflow.linked_by?.length ?? 0) > 0 && (
-                          <div className="mt-3 flex items-start gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/40 rounded-lg px-2 py-1.5">
-                            <Link2 className="w-3.5 h-3.5 shrink-0 mt-px" />
-                            <span className="min-w-0">
-                              Used by <strong>{workflow.linked_by!.join(', ')}</strong> — editing this changes {workflow.linked_by!.length > 1 ? 'them' : 'it'} too.
-                            </span>
-                          </div>
+                          <LinkLine
+                            tone="warn"
+                            names={workflow.linked_by!}
+                            lead="Used by"
+                            tooltipTitle={`Editing this changes ${workflow.linked_by!.length > 1 ? 'them' : 'it'} too:`}
+                          />
                         )}
                         {(workflow.links?.length ?? 0) > 0 && (
-                          <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-                            Links to {workflow.links!.join(', ')}
-                          </p>
+                          <LinkLine
+                            tone="muted"
+                            names={workflow.links!}
+                            lead="Links to"
+                            tooltipTitle="Resolves at run time to:"
+                          />
                         )}
                         {/* Labels, not controls. Filtering lives in one place — the chip bar above
                             the list — and a second set of clickable chips on every card only made

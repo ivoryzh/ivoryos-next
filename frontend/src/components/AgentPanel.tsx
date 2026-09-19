@@ -15,7 +15,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Bot, Check, GitCompare, LayoutGrid, Loader2, RefreshCw, Send, Settings2, Sparkles, Trash2, X,
+  AlertTriangle, Bot, Check, GitCompare, LayoutGrid, Loader2, MessageSquarePlus, RefreshCw, Send, Settings2, Sparkles, Trash2, X,
 } from 'lucide-react';
 import { API_BASE } from '@/config';
 import {
@@ -57,6 +57,10 @@ type Props = {
   onClose: () => void;
 };
 
+const CHAT_STORAGE_KEY = 'ivoryos_agent_chat';
+// Enough to keep the thread readable without letting one long session fill the origin's quota.
+const MAX_STORED_TURNS = 40;
+
 const severityStyles: Record<Issue['severity'], string> = {
   error: 'text-red-700 bg-red-50 border-red-200 dark:text-red-300 dark:bg-red-900/20 dark:border-red-500/30',
   warning: 'text-amber-700 bg-amber-50 border-amber-200 dark:text-amber-300 dark:bg-amber-900/20 dark:border-amber-500/30',
@@ -67,6 +71,9 @@ export default function AgentPanel({
   prepSequence, sequence, cleanupSequence, workflowName, onApply, instruments, onClose,
 }: Props) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  // Whether the saved conversation has been read back yet. The persist effect below must not run
+  // before it has, or the empty initial state overwrites the transcript on every page load.
+  const [turnsLoaded, setTurnsLoaded] = useState(false);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   // What the loop is doing right now, newest last. A local model spends tens of seconds
@@ -89,6 +96,42 @@ export default function AgentPanel({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [turns, busy]);
+
+  // The conversation survives a reload, a navigation to another page and back, and closing the
+  // panel — losing the thread to any of those made the assistant feel like a one-shot box rather
+  // than something you work with. "New chat" is the only thing that clears it.
+  //
+  // Proposals are deliberately not stored. They are server state with a status that moves under
+  // us, so a restored Accept button could act on something already accepted elsewhere; anything
+  // still pending comes back through the inbox, which asks the server. What persists is the
+  // transcript.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(CHAT_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setTurns(parsed);
+      }
+    } catch { /* corrupt or unavailable storage just means starting fresh */ }
+    setTurnsLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!turnsLoaded) return;
+    try {
+      const slim = turns.slice(-MAX_STORED_TURNS).map(t =>
+        t.role === 'assistant'
+          ? { role: t.role, content: t.content, questions: t.questions, ok: t.ok }
+          : { role: t.role, content: t.content });
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(slim));
+    } catch { /* over quota or blocked: the panel still works, it just forgets */ }
+  }, [turns, turnsLoaded]);
+
+  const startNewChat = () => {
+    setTurns([]);
+    setProgress([]);
+    try { localStorage.removeItem(CHAT_STORAGE_KEY); } catch { /* nothing to clean up */ }
+  };
 
   const loadSettings = useCallback(async () => {
     try {
@@ -394,6 +437,14 @@ export default function AgentPanel({
           <button onClick={() => setSettingsOpen(v => !v)} title="Model settings"
             className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:bg-white/10">
             <Settings2 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={startNewChat}
+            disabled={busy || turns.length === 0}
+            title="Start a new conversation"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <MessageSquarePlus className="w-4 h-4" />
           </button>
           <button onClick={onClose} title="Close"
             className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:bg-white/10">

@@ -191,9 +191,16 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
   const mainSteps = result?.sequence || [];
   const batchStepCount = mainSteps.filter(isBatchStep).length;
   const perSampleCount = mainSteps.length - batchStepCount;
-  // Worth showing whenever the main phase repeats per row at all — the batch/per-sample split is
-  // exactly as confusing when every step is per-sample and the count silently multiplies.
-  const showBatchSection = !!result && mainSteps.length > 0 && (!!spreadsheet || batchStepCount > 0);
+  // Only when at least one step actually runs once per batch. With none, grouping changes
+  // nothing — every step fires once per row whatever the batch size — so the section was
+  // explaining a distinction that did not exist, at the cost of listing every step a second time.
+  const showBatchSection = !!result && mainSteps.length > 0 && batchStepCount > 0;
+
+  // How often a main-phase step actually fires. This is the thing the preview exists to tell
+  // you and it used to live only inside the batch section, which meant it was missing entirely
+  // for a plain per-row run and duplicated the step list when it wasn't.
+  const repeatsPerRun = !!spreadsheet || rows > 1;
+  const perSampleReps = batchStepCount > 0 ? Math.min(batchSize, rows) : rows;
 
   const cost = result ? spreadsheetCost(mainSteps, rows, batchSize) : null;
   const totalCalls = result && cost
@@ -263,9 +270,19 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
             </span>
             {spreadsheet && totalCalls !== null && cost && (
               <span className="text-gray-600 dark:text-gray-300">
-                {rows} rows × batch {batchSize} ={' '}
-                <strong className="text-gray-900 dark:text-white">{cost.groups}</strong>{' '}
-                groups, <strong className="text-gray-900 dark:text-white">{totalCalls}</strong> calls
+                {batchStepCount > 0 ? (
+                  <>
+                    {rows} rows × batch {batchSize} ={' '}
+                    <strong className="text-gray-900 dark:text-white">{cost.groups}</strong>{' '}
+                    groups, <strong className="text-gray-900 dark:text-white">{totalCalls}</strong> calls
+                  </>
+                ) : (
+                  <>
+                    {rows} rows ×{' '}
+                    <strong className="text-gray-900 dark:text-white">{result.counts.sequence}</strong>{' '}
+                    steps = <strong className="text-gray-900 dark:text-white">{totalCalls}</strong> calls
+                  </>
+                )}
               </span>
             )}
             {result.resolved_links.length > 0 && (
@@ -350,42 +367,25 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
                   </p>
                 )}
 
-                <div className="p-3 space-y-2">
+                {/* Just the split. What each step does, and how often, is the job of the phase
+                    list below — this section answers only "how do my rows get carved up?".
+                    Listing the steps here as well made the same run appear twice. */}
+                <div className="p-3 flex flex-wrap gap-2">
                   {groups.map(group => (
-                    <div key={group.index} className="rounded-lg border border-teal-200/70 dark:border-teal-800/30 bg-white dark:bg-black/20 overflow-hidden">
-                      <div className="px-2.5 py-1.5 bg-teal-50 dark:bg-teal-900/20 flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-bold text-teal-800 dark:text-teal-300">
-                          Batch {group.index}
-                          <span className="font-medium text-teal-600/80 dark:text-teal-400/80">
-                            {' '}· rows {group.firstRow}–{group.lastRow}
-                          </span>
+                    <div
+                      key={group.index}
+                      className="rounded-lg border border-teal-200/70 dark:border-teal-800/30 bg-white dark:bg-black/20 px-2.5 py-1.5"
+                    >
+                      <span className="text-[11px] font-bold text-teal-800 dark:text-teal-300">
+                        Batch {group.index}
+                        <span className="font-medium text-teal-600/80 dark:text-teal-400/80">
+                          {/* A remainder group of one is common (5 rows at batch 2) and "rows 5–5"
+                              reads like a typo. */}
+                          {group.firstRow === group.lastRow
+                            ? ` · row ${group.firstRow}`
+                            : ` · rows ${group.firstRow}–${group.lastRow}`}
                         </span>
-                        <span className="text-[10px] text-gray-500 dark:text-gray-400">{group.calls} calls</span>
-                      </div>
-                      <div className="divide-y divide-gray-100 dark:divide-white/5">
-                        {mainSteps.map((step, i) => {
-                          const batch = isBatchStep(step);
-                          return (
-                            <div key={i} className="px-2.5 py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[11px] text-gray-700 dark:text-gray-200 min-w-0 truncate">
-                                <span className="text-gray-400 dark:text-gray-500 capitalize">
-                                  {String(step.instrument || '').replace(/_/g, ' ')}.
-                                </span>
-                                <span className="font-medium">{step.method}</span>
-                              </span>
-                              {batch ? (
-                                <span className="shrink-0 inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300 dark:bg-teal-500/20 dark:text-teal-300 dark:border-teal-700/40">
-                                  <Layers className="w-2.5 h-2.5" /> once for this batch
-                                </span>
-                              ) : (
-                                <span className="shrink-0 text-[10px] font-semibold text-gray-500 dark:text-gray-400">
-                                  × {group.rowCount} (one per row)
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -429,10 +429,18 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
                               <span className="text-xs font-medium text-gray-800 dark:text-gray-100 capitalize">
                                 {String(step.method || '').replace(/_/g, ' ')}
                               </span>
-                              {key === 'sequence' && isBatchStep(step) && (
-                                <span className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200 dark:bg-teal-500/20 dark:text-teal-300 dark:border-teal-700/40">
-                                  <Layers className="w-2.5 h-2.5" /> Batch
-                                </span>
+                              {/* Only the main phase repeats — prep and cleanup bookend the run
+                                  once each, so annotating them would be noise. */}
+                              {key === 'sequence' && repeatsPerRun && (
+                                isBatchStep(step) ? (
+                                  <span className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200 dark:bg-teal-500/20 dark:text-teal-300 dark:border-teal-700/40">
+                                    <Layers className="w-2.5 h-2.5" /> once per batch
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-semibold text-gray-400 dark:text-gray-500">
+                                    × {perSampleReps} each
+                                  </span>
+                                )
                               )}
                             </div>
                             {params.length > 0 && (

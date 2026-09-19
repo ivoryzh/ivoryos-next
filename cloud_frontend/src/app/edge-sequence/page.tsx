@@ -2,7 +2,7 @@
 
 
 import { useState, useEffect, useRef } from 'react';
-import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu } from 'lucide-react';
+import { Play, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import {
   WorkflowEditor,
@@ -293,12 +293,21 @@ export default function DesignerPage() {
     else document.documentElement.classList.remove('dark');
   };
 
-  const clearCanvas = async () => {
-    if (await confirmDialog("Every block on the canvas will be removed. This cannot be undone.", {
-      title: 'Clear the canvas?',
-      confirmLabel: 'Clear',
-      tone: 'danger',
-    })) {
+  // Mirrors the Designer's startNewWorkflow (frontend/src/app/designer/page.tsx). Was "Clear"
+  // with a red trash icon, which read as destroying something rather than starting the next
+  // thing — the behaviour was already "empty canvas, no name". Prompts only when there is
+  // something to lose, and says whether that something is unsaved.
+  const startNewWorkflow = async () => {
+    const hasContent = prepSequence.length + sequence.length + cleanupSequence.length > 0;
+    if (!hasContent || await confirmDialog(
+      isUnsaved
+        ? "The canvas has unsaved changes. Starting a new sequence discards them."
+        : "This clears the canvas and starts an untitled sequence.",
+      {
+        title: 'Start a new sequence?',
+        confirmLabel: 'New sequence',
+        tone: isUnsaved ? 'danger' : 'default',
+      })) {
         setSequence([]);
         setPrepSequence([]);
         setCleanupSequence([]);
@@ -542,23 +551,6 @@ export default function DesignerPage() {
                       <span>Offline Mode</span>
                     </span>
                   )}
-                  <div className="flex items-center space-x-1.5 pl-2 border-l border-gray-200 dark:border-white/10">
-                    <button
-                      onClick={saveWorkflow}
-                      disabled={sequence.length === 0}
-                      title="Save"
-                      className="flex items-center justify-center p-1.5 rounded transition-all bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={clearCanvas}
-                      title="Clear"
-                      className="flex items-center justify-center p-1.5 rounded transition-all bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
                 </div>
                 <input
                   type="text"
@@ -569,6 +561,28 @@ export default function DesignerPage() {
                 />
               </div>
               <div className="flex items-center space-x-2">
+
+                {/* Save and New belong with the other actions, not beside a two-line name block
+                    where they sit vertically offset from every other control. Same arrangement as
+                    the edge Designer's header. */}
+                <button
+                  onClick={startNewWorkflow}
+                  title="Start a new, empty sequence"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+                >
+                  <FilePlus2 className="w-4 h-4 text-gray-400" />
+                  <span className="hidden sm:inline">New</span>
+                </button>
+
+                <button
+                  onClick={saveWorkflow}
+                  disabled={sequence.length === 0}
+                  title="Save this sequence to the library"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Save className="w-4 h-4" />
+                  <span className="hidden sm:inline">Save</span>
+                </button>
 
                 <div className="relative group">
                   <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">

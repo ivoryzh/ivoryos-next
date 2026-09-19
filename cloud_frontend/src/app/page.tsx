@@ -1,10 +1,38 @@
 "use client";
 
 import { useState, useEffect, useCallback } from 'react';
-import { Play, Trash2, Cloud, AlertTriangle, RefreshCw, Download, Save } from 'lucide-react';
+import { Play, AlertTriangle, RefreshCw, Download, Save, FilePlus2 } from 'lucide-react';
 import { useNodesState, useEdgesState, addEdge, Connection, Edge, Node } from '@xyflow/react';
 import CloudWorkflowEditor from '@/components/CloudWorkflowEditor';
 import { LIBRARY_INSTRUMENT, scanDynamicParams } from '@ivoryos/shared-ui';
+import { validateGraph } from '@/lib/dag';
+
+// A param written "#name" is a placeholder filled in at run time — the same convention the edge
+// Designer uses (scanDynamicParams). Parallel branches on this canvas are usually one protocol
+// repeated over different inputs, so those values belong to the run rather than baked into the
+// graph, and the same graph can be re-run with different ones.
+const DYNAMIC_PREFIX = '#';
+const isDynamic = (v: unknown) => typeof v === 'string' && v.trim().startsWith(DYNAMIC_PREFIX);
+
+/** Every distinct #name on the canvas, with the nodes referencing it. */
+function collectDynamicParams(nodes: any[]): Record<string, string[]> {
+  const found: Record<string, string[]> = {};
+  for (const n of nodes) {
+    const params = n?.data?.block?.params || {};
+    for (const v of Object.values(params)) {
+      if (!isDynamic(v)) continue;
+      const name = String(v).trim().slice(1);
+      if (!name) continue; // a bare '#' is reported separately
+      if (!found[name]) found[name] = [];
+      if (!found[name].includes(n.id)) found[name].push(n.id);
+    }
+  }
+  return found;
+}
+
+const hasBareHash = (nodes: any[]) => nodes.some(n =>
+  Object.values(n?.data?.block?.params || {})
+    .some(v => typeof v === 'string' && v.trim() === DYNAMIC_PREFIX));
 
 export default function CloudDesignerPage() {
   const [statusData, setStatusData] = useState<any>({ instruments: {} });
@@ -55,8 +83,28 @@ export default function CloudDesignerPage() {
     }
   }, [nodes, edges, currentWorkflowName, currentWorkflowDescription]);
   
-  const [isOffline, setIsOffline] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [health, setHealth] = useState<any>(null);
+  // Values typed for each #name before a run. Kept out of the graph so the canvas stays reusable.
+  const [dynamicValues, setDynamicValues] = useState<Record<string, string>>({});
+
+  // Polled alongside the device list. "0 Edges Online" used to be the only signal, and it looked
+  // identical whether the backend was down or the lab was simply idle — this is what separates
+  // those. Deliberately tolerant of its own failure: if /api/health itself can't be reached, the
+  // badge says so rather than silently keeping a stale green state.
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch('/api/health');
+        setHealth(await res.json());
+      } catch {
+        setHealth({ ok: false, problems: ['Cannot reach the Cloud app itself.'], devices: { total: 0, online: 0 } });
+      }
+    };
+    check();
+    const interval = setInterval(check, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => setEdges((eds) => addEdge(params, eds)),
@@ -127,10 +175,8 @@ export default function CloudDesignerPage() {
         }
       }
       setStatusData({ instruments: aggregated.instruments });
-      setIsOffline(false);
     } catch (e) {
       console.error("Cloud orchestrator offline or unavailable", e);
-      setIsOffline(true);
     }
   };
 
@@ -191,27 +237,30 @@ export default function CloudDesignerPage() {
     }));
   }, [taskStatuses, setNodes]);
 
-  const clearCanvas = () => {
-    if (confirm("Are you sure you want to clear the cloud canvas?")) {
-        setNodes([{
-            id: 'start_node',
-            type: 'customCloudNode',
-            position: { x: 250, y: 100 },
-            data: { 
-                targetDeviceId: "",
-                block: {
-                    id: 'start_block',
-                    instrument: 'Flow Control',
-                    method: 'Start',
-                    schema: { parameters: {} },
-                    params: {}
-                }
+  // Mirrors the Designer's startNewWorkflow: "Clear" with a trash icon read as destroying
+  // something, when the behaviour is really "empty canvas, start the next one". Only asks when
+  // there is something to lose — a canvas holding just the seeded Start node is already empty.
+  const startNewWorkflow = () => {
+    const hasContent = nodes.some(n => n.id !== 'start_node') || edges.length > 0;
+    if (hasContent && !confirm("This clears the canvas and starts an untitled workflow.")) return;
+    setNodes([{
+        id: 'start_node',
+        type: 'customCloudNode',
+        position: { x: 250, y: 100 },
+        data: {
+            targetDeviceId: "",
+            block: {
+                id: 'start_block',
+                instrument: 'Flow Control',
+                method: 'Start',
+                schema: { parameters: {} },
+                params: {}
             }
-        }]);
-        setEdges([]);
-        setCurrentWorkflowName("");
-        setCurrentWorkflowDescription("");
-    }
+        }
+    }]);
+    setEdges([]);
+    setCurrentWorkflowName("");
+    setCurrentWorkflowDescription("");
   };
 
   const exportJSON = () => {
@@ -261,17 +310,59 @@ export default function CloudDesignerPage() {
   const runDistributedWorkflow = async () => {
     if (nodes.length === 0) return;
 
-    const unassignedNodes = nodes.filter(n => !n.data.targetDeviceId && (n.data as any).block?.instrument !== 'Flow Control');
-    if (unassignedNodes.length > 0) {
-      alert("Please assign a target device for all instrument nodes.");
+    // Same check the run route applies, run here only so the answer is immediate and names every
+    // problem at once. The server repeats it and is the real gate — this canvas is not the only
+    // way a graph reaches that route (Library, localStorage, a direct POST), so a client-side
+    // check alone would enforce nothing.
+    const problems = validateGraph(nodes, edges);
+    if (problems.length > 0) {
+      alert(problems.map(p => p.message).join('\n\n'));
+      return;
+    }
+
+    if (hasBareHash(nodes)) {
+      alert("'#' needs a variable name after it (e.g. '#temperature').");
+      return;
+    }
+
+    // Running with placeholders unfilled would dispatch the literal string "#temperature" to an
+    // instrument, which is not a value. Blocked rather than attempted — the same gate the
+    // Designer applies before its Configure step.
+    const missing = Object.keys(collectDynamicParams(nodes))
+      .filter(k => !String(dynamicValues[k] ?? '').trim());
+    if (missing.length > 0) {
+      // The per-node Configure panel that supplies these (a spreadsheet of rows, or a Bayesian
+      // parameter space handed to the edge's own optimizer) is not built yet, so say that rather
+      // than asking for input with nowhere to type it.
+      alert(
+        `This workflow has unfilled placeholders: ${missing.map(m => '#' + m).join(', ')}.\n\n`
+        + 'Per-node configuration is not built yet. Replace them with literal values to run it for now.',
+      );
       return;
     }
 
     setIsExecuting(true);
     try {
+      // Substituted into the dispatched copy only — the canvas keeps its #placeholders, which is
+      // what makes the same graph re-runnable over a different set of inputs.
+      const resolvedNodes = nodes.map(n => {
+        const block = (n.data as any)?.block;
+        const params = block?.params || {};
+        const next: Record<string, any> = {};
+        let changed = false;
+        for (const [k, v] of Object.entries(params)) {
+          if (isDynamic(v)) {
+            const key = String(v).trim().slice(1);
+            if (dynamicValues[key] !== undefined) { next[k] = dynamicValues[key]; changed = true; continue; }
+          }
+          next[k] = v;
+        }
+        return changed ? { ...n, data: { ...n.data, block: { ...block, params: next } } } : n;
+      });
+
       const payload = {
         name: currentWorkflowName || 'Distributed Run',
-        nodes,
+        nodes: resolvedNodes,
         edges
       };
 
@@ -301,6 +392,7 @@ export default function CloudDesignerPage() {
         <CloudWorkflowEditor
           cloudDevices={cloudDevices}
           statusData={statusData}
+          health={health}
           nodes={nodes}
           setNodes={setNodes}
           edges={edges}
@@ -311,10 +403,6 @@ export default function CloudDesignerPage() {
           header={
             <header className="glass-header flex items-center justify-between px-6 z-10 shrink-0">
               <div className="flex items-center space-x-4">
-                <div className="flex items-center justify-center p-2 rounded-lg" style={{ background: 'rgba(59, 130, 246, 0.2)' }}>
-                  <Cloud className="w-6 h-6 text-blue-400" />
-                </div>
-                
                 <div className="flex flex-col justify-center">
                   <input
                     type="text"
@@ -333,15 +421,6 @@ export default function CloudDesignerPage() {
                     style={{ minWidth: '300px', fontSize: '0.75rem', opacity: 0.7 }}
                   />
                 </div>
-                <span className="badge badge-online space-x-1">
-                  <span>{cloudDevices.length} Edge{cloudDevices.length !== 1 ? 's' : ''} Online</span>
-                </span>
-                {isOffline && (
-                  <span className="badge badge-warning space-x-1">
-                    <AlertTriangle className="w-3 h-3" />
-                    <span>Schema Engine Offline</span>
-                  </span>
-                )}
               </div>
               <div className="flex items-center space-x-3">
                 <button 
@@ -360,15 +439,17 @@ export default function CloudDesignerPage() {
                   <span>Export</span>
                 </button>
 
-                <button 
-                  onClick={clearCanvas}
-                  className="btn-danger flex items-center space-x-2 px-4 py-2 rounded font-medium"
+                <button
+                  onClick={startNewWorkflow}
+                  title="Start a new, empty workflow"
+                  className="btn-primary flex items-center space-x-2 px-4 py-2 rounded font-medium"
                 >
-                  <Trash2 className="w-4 h-4" />
-                  <span>Clear</span>
+                  <FilePlus2 className="w-4 h-4" />
+                  <span>New</span>
                 </button>
                 
-                <button 
+
+                <button
                   onClick={runDistributedWorkflow}
                   disabled={nodes.length === 0}
                   className="btn-primary flex items-center space-x-2 px-6 py-2 rounded font-bold"

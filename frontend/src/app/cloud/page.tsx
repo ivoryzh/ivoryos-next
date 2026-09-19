@@ -7,9 +7,17 @@ import Sidebar from '@/components/Sidebar';
 
 export default function CloudSettingsPage() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const [token, setToken] = useState('');
+  const [paired, setPaired] = useState(false);
+  const [pairedAs, setPairedAs] = useState<{ clientId: string; broker: string } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState('');
+  // Pairing replaces carrying the token here by hand. On a LAN the Cloud URL must be supplied
+  // (Cloud sits at an arbitrary local address); a hosted deployment is at a fixed URL this device
+  // already knows, so there the code is the only input. The token field below stays as a manual
+  // fallback for a device that can reach the broker but not Cloud's HTTP port.
+  const [pairCode, setPairCode] = useState('');
+  const [cloudUrl, setCloudUrl] = useState('');
+  const [isPairing, setIsPairing] = useState(false);
   // 'idle' means "not attempted this session" — distinct from 'disconnected', which means the
   // edge server itself confirmed there's no active broker connection (e.g. token was cleared).
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected' | 'error' | 'disconnected'>('idle');
@@ -24,7 +32,8 @@ export default function CloudSettingsPage() {
     fetch(`${API_BASE}/api/cloud-settings`)
       .then(res => res.json())
       .then(data => {
-        if (data.token !== undefined) setToken(data.token);
+        setPaired(!!data.paired);
+        setPairedAs(data.client_id ? { clientId: data.client_id, broker: data.broker || '' } : null);
         if (data.connection_state) setConnectionState(data.connection_state);
         if (data.connection_error) setError(data.connection_error);
       })
@@ -46,35 +55,34 @@ export default function CloudSettingsPage() {
   // ~5s — see setup_broker's is_connected() poll) and its response IS the real outcome, so there's
   // no separate "click save, then hope" step — a bad cert or wrong endpoint comes back as an
   // explicit error here, not silence.
-  const saveSettings = async () => {
-    setIsSaving(true);
-    setConnectionState('connecting');
+  const pairWithCode = async () => {
     setError('');
-
+    setIsPairing(true);
+    setConnectionState('connecting');
     try {
-      const res = await fetch(`${API_BASE}/api/cloud-settings`, {
+      const res = await fetch(`${API_BASE}/api/cloud-settings/pair`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
+        body: JSON.stringify({ code: pairCode, cloud_url: cloudUrl }),
       });
       const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Pairing failed.');
 
-      if (res.ok) {
-        setConnectionState(data.connection_state || 'error');
-        // 'disconnected' is a valid, non-error outcome (e.g. the token field was left empty) —
-        // only 'error' actually means the connection attempt failed.
-        if (data.connection_state === 'error') {
-          setError(data.connection_error || 'Failed to connect — check the token and try again.');
-        }
+      // The edge server applies the redeemed token through the same path a pasted one uses, so
+      // the result it reports back is the real broker connection state, not just "code accepted".
+      setPaired(true);
+      setPairedAs(data.client_id ? { clientId: data.client_id, broker: data.broker || '' } : null);
+      setConnectionState(data.connection_state || 'connected');
+      if (data.connection_state === 'error') {
+        setError(data.connection_error || 'Paired, but the broker connection failed.');
       } else {
-        setConnectionState('error');
-        setError(data.error || 'Failed to save settings.');
+        setPairCode('');
       }
-    } catch (err: any) {
+    } catch (e: any) {
       setConnectionState('error');
-      setError(err.message || 'Network error.');
+      setError(e.message);
     } finally {
-      setIsSaving(false);
+      setIsPairing(false);
     }
   };
 
@@ -90,7 +98,8 @@ export default function CloudSettingsPage() {
       });
 
       if (res.ok) {
-        setToken("");
+        setPaired(false);
+        setPairedAs(null);
         setConnectionState('disconnected');
       } else {
         const data = await res.json();
@@ -146,20 +155,61 @@ export default function CloudSettingsPage() {
             )}
 
             <div className="space-y-6">
-              <div>
+              <div className="p-5 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-500/30">
                 <label className="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-300">
-                  Connection Token
+                  Pair with Cloud
                 </label>
-                <textarea 
-                  value={token}
-                  onChange={e => setToken(e.target.value)}
-                  placeholder="Paste your Base64 Connection Token here..."
-                  rows={6}
-                  className="w-full px-4 py-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-sm font-mono"
-                />
-                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  This secure token configures your edge device's connection to the Cloud message broker. It supports both local MQTT testing and AWS IoT Core.
+                <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+                  Generate a code in Cloud under <strong>Settings &rarr; Pair a Device</strong>, then enter it here.
+                  This device fetches its own credentials — nothing needs to be copied between machines.
                 </p>
+                <div className="grid grid-cols-3 gap-3">
+                  <input
+                    value={pairCode}
+                    onChange={e => setPairCode(e.target.value)}
+                    placeholder="7K4M-9QX2"
+                    className="px-4 py-2.5 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono tracking-widest uppercase"
+                  />
+                  <input
+                    value={cloudUrl}
+                    onChange={e => setCloudUrl(e.target.value)}
+                    placeholder="Cloud URL (LAN only)"
+                    className="col-span-2 px-4 py-2.5 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                  />
+                </div>
+                <button
+                  onClick={pairWithCode}
+                  disabled={isPairing || !pairCode.trim()}
+                  className="mt-3 px-6 py-2.5 rounded-lg font-bold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors disabled:opacity-50"
+                >
+                  {isPairing ? 'Pairing…' : 'Pair'}
+                </button>
+                <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
+                  Leave the URL blank on a hosted Cloud — this device already knows it. On a LAN, use the address Cloud shows beside the code.
+                </p>
+              </div>
+
+              {/* No token field. It used to both accept and *display* CLOUD_TOKEN, which on AWS
+                  wraps this device's private key — so opening this page put a private key in the
+                  DOM. Pairing replaces the paste path, and CLOUD_TOKEN in .env remains the
+                  headless route for image- or config-managed deployments. */}
+              <div className="p-4 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10">
+                {paired && pairedAs ? (
+                  <div className="text-sm">
+                    <span className="text-gray-500 dark:text-gray-400">Paired as </span>
+                    <span className="font-mono font-semibold text-gray-800 dark:text-gray-200">{pairedAs.clientId}</span>
+                    {pairedAs.broker && (
+                      <>
+                        <span className="text-gray-500 dark:text-gray-400"> via </span>
+                        <span className="font-mono text-gray-700 dark:text-gray-300">{pairedAs.broker}</span>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-sm text-gray-500 dark:text-gray-400">
+                    Not paired with any Cloud yet.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -175,18 +225,10 @@ export default function CloudSettingsPage() {
               <div className="flex items-center space-x-3">
                 <button 
                   onClick={disconnectCloud}
-                  disabled={isSaving || !token}
+                  disabled={isSaving || !paired}
                   className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors disabled:opacity-50"
                 >
                   <span>Disconnect</span>
-                </button>
-                <button 
-                  onClick={saveSettings}
-                  disabled={isSaving}
-                  className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-sm shadow-indigo-500/20 disabled:opacity-50"
-                >
-                  <Save className="w-4 h-4 shrink-0" />
-                  <span>{isSaving ? 'Connecting…' : 'Save & Validate'}</span>
                 </button>
               </div>
             </div>

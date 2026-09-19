@@ -45,17 +45,78 @@ global_client_id = None
 # in setup_broker() only ever reached a server-side print(), invisible to the frontend entirely.
 cloud_connection_state = "disconnected"  # "disconnected" | "connecting" | "connected" | "error"
 cloud_connection_error = None
+# Where we are paired, for the Cloud Connect page. Derived from the token at connect time so the
+# UI can say something useful without ever being handed the token itself.
+cloud_broker_url = None
 
 class CloudSettingsRequest(BaseModel):
     token: str
 
+# The Cloud URL only has to be supplied on a LAN, where Cloud lives at some arbitrary local
+# address. A hosted deployment is at a fixed, known URL, so the device ships with it and the
+# person types only the pairing code. IVORYOS_CLOUD_URL overrides it for staging or self-hosting.
+DEFAULT_CLOUD_URL = os.getenv("IVORYOS_CLOUD_URL", "https://cloud.ivoryos.app")
+
+class CloudPairRequest(BaseModel):
+    code: str
+    cloud_url: str = ""
+
 @app.get("/api/cloud-settings")
 def get_cloud_settings():
+    """Deliberately does NOT return CLOUD_TOKEN.
+
+    It used to, and the Cloud Connect page rendered it in a textarea — which on AWS meant this
+    device's **private key** was displayed to anyone who opened that page, and sat in the DOM and
+    in the browser's memory for as long as it was open. The page only ever needed to know whether
+    the device is paired and where, so that is all it gets now. The token remains settable (POST
+    below, or the CLOUD_TOKEN env var for headless provisioning) — it is just no longer readable
+    back out over HTTP.
+    """
     return {
-        "token": CLOUD_TOKEN,
+        "paired": bool(CLOUD_TOKEN),
+        "client_id": global_client_id,
+        "broker": cloud_broker_url,
         "connection_state": cloud_connection_state,
         "connection_error": cloud_connection_error,
     }
+
+@app.post("/api/cloud-settings/pair")
+async def pair_with_cloud(req: CloudPairRequest):
+    """Exchange a pairing code for this device's connection token, then connect.
+
+    Redemption happens here, server-side, rather than from the browser: it keeps the token (which
+    on AWS contains this device's private key) out of the page and off any clipboard, and avoids
+    needing CORS on Cloud. What replaced carrying a base64 blob between two machines by hand is
+    one short code typed into this form.
+    """
+    cloud_url = (req.cloud_url or DEFAULT_CLOUD_URL).strip().rstrip("/")
+    if not cloud_url:
+        return JSONResponse(status_code=400, content={"error": "A Cloud URL is required."})
+    if not req.code.strip():
+        return JSONResponse(status_code=400, content={"error": "A pairing code is required."})
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{cloud_url}/api/pair/redeem", json={"code": req.code})
+        data = resp.json()
+    except Exception as e:
+        # Reaching Cloud over HTTP is the one new prerequisite pairing introduces, and on a LAN a
+        # wrong address is the likeliest mistake — so say which address failed.
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"Could not reach Cloud at {cloud_url}: {e}"},
+        )
+
+    if resp.status_code != 200 or not data.get("token"):
+        return JSONResponse(
+            status_code=resp.status_code if resp.status_code != 200 else 502,
+            content={"error": data.get("error") or "Pairing failed."},
+        )
+
+    # Reuse the existing token path verbatim — pairing only changes how the token is *obtained*,
+    # never what it is or how it is applied, so there is one code path for connecting.
+    return await update_cloud_settings(CloudSettingsRequest(token=data["token"]))
+
 
 @app.post("/api/cloud-settings")
 async def update_cloud_settings(req: CloudSettingsRequest):
@@ -95,7 +156,53 @@ async def update_cloud_settings(req: CloudSettingsRequest):
 
 from .broker import LocalMQTTBroker, AWSIoTBroker
 
+async def handle_sequence_push(payload: dict):
+    """Apply a workflow pushed down from Cloud, then echo it back as the acknowledgement.
+
+    Deliberately goes through wf.save_version, the same path a local save uses, so a pushed
+    workflow gets versioning, hashing and validation identical to one authored at the bench —
+    a push is not a privileged back door that can write a body the local Designer would reject.
+
+    The echo is the ack: republishing on this device's own retained sequences/{name} topic is
+    already how Cloud learns about any workflow here, so a successful push simply looks like a
+    normal update arriving. Cloud matches the returned body_hash to close out the push; if the
+    echo never comes, the push stays unacknowledged rather than being assumed to have worked.
+    """
+    name = payload.get("name")
+    body = payload.get("body")
+    if not name or not isinstance(body, dict):
+        print(f"Ignoring malformed sequence push: {payload!r}")
+        return
+    try:
+        wf.validate_name(name)
+        saved, version, _created = wf.save_version(
+            WORKFLOWS_DIR, name, body,
+            note=payload.get("note") or "Pushed from Cloud",
+            author=payload.get("author") or "cloud",
+        )
+    except Exception as e:
+        # No result topic: an unacknowledged push is reported by Cloud as "never echoed", which
+        # covers this case and the dropped-message case with one mechanism instead of two.
+        print(f"Refusing pushed workflow '{name}': {e}")
+        return
+
+    print(f"Applied pushed workflow '{name}' (version {version})")
+    if global_broker and global_topic_prefix and global_client_id:
+        try:
+            global_broker.publish(
+                f"{global_topic_prefix}/{global_client_id}/sequences/{name}", saved,
+                retain=True, qos=1,
+            )
+        except Exception as e:
+            print(f"Applied '{name}' but failed to echo it back: {e}")
+
+
 async def handle_broker_message(topic: str, payload: dict):
+    # Both cloud->edge topics land here; the last segment says which.
+    if topic.rsplit("/", 1)[-1] == "sequences-push":
+        await handle_sequence_push(payload)
+        return
+
     print(f"Received cloud task from topic {topic}: {payload}")
     block = payload.get("block")
     runId = payload.get("runId")
@@ -165,21 +272,36 @@ async def status_loop(broker, topic_prefix, client_id):
     small on purpose: at a 5s interval this is what actually gets billed per-message on AWS IoT,
     and 'online' is also covered by the LWT for the ungraceful-disconnect case (see setup_broker).
 
-    Also periodically re-publishes schema/sequences (every 12th tick, ~60s) — NOT just once on
-    connect the way setup_broker's initial calls do. Those initial calls are one-shot QoS-1
-    publishes with no retry; a real, reproduced bug was AWS IoT's connection needing a few rapid
-    client-initiated reconnects to settle right after startup (root cause of *that* churn still
-    open), which raced the one-shot schema/sequences publish and silently dropped it — status
-    itself never showed a symptom because it's QoS-0 and re-sent every 5s regardless, so it just
-    self-healed on the next tick. Confirmed directly: 284 'status' messages arrived at the
-    daemon during testing, zero 'schema' or 'sequences' ones, from the exact same connection.
-    Folding schema/sequences into this already-repeating loop gives them the same self-healing
-    property instead of trying to fix the one-shot call to race-proof itself."""
+    Also re-publishes schema/sequences on a decaying schedule after each (re)connect — NOT just
+    once the way setup_broker's initial calls do, and no longer forever either.
+
+    Why it repeats at all: those initial calls are one-shot QoS-1 publishes with no retry, and a
+    real, reproduced bug was AWS IoT's connection needing a few rapid client-initiated reconnects
+    to settle right after startup (root cause of *that* churn still open), which raced the
+    one-shot schema/sequences publish and silently dropped it — status itself never showed a
+    symptom because it's QoS-0 and re-sent every 5s regardless, so it just self-healed on the next
+    tick. Confirmed directly: 284 'status' messages arrived at the daemon during testing, zero
+    'schema' or 'sequences' ones, from the exact same connection.
+
+    Why it now stops: that failure is a *connect-time race*, so repeating past the settling window
+    buys nothing and is not free. Measured on a 7-instrument device with 11 saved workflows, the
+    old every-60s republish shipped 36KB (1 schema + 11 retained sequence bodies) every minute
+    forever — 50MB and ~20k messages per device per day, none of it changed since the last one,
+    beside a `status` payload deliberately kept tiny for exactly that metering reason.
+
+    So: republish at ~5s, 10s, 20s, 40s, 80s and 160s after connect, then stop until the next
+    reconnect. That covers the racy window several times over with the same self-healing property,
+    and drops steady-state traffic to zero. Nothing is lost on the Cloud side either: these are
+    retained publishes, so a subscriber that appears later still receives the latest body
+    immediately, and a save publishes its own sequence straight away (see the save route)."""
+    # Tick indices (5s apart) at which to re-publish: 1, 2, 4, 8, 16, 32 -> ~5s..160s after
+    # connect. A set, not a modulus, is what makes this terminate.
+    RESYNC_TICKS = {1, 2, 4, 8, 16, 32}
     tick = 0
     while True:
         try:
             broker.publish(f"{topic_prefix}/{client_id}/status", {"online": True, "ts": time.time()}, retain=True, qos=0)
-            if tick % 12 == 0:
+            if tick in RESYNC_TICKS:
                 publish_schema(broker, topic_prefix, client_id)
                 publish_sequences(broker, topic_prefix, client_id)
         except Exception as e:
@@ -188,7 +310,7 @@ async def status_loop(broker, topic_prefix, client_id):
         await asyncio.sleep(5)
 
 async def setup_broker():
-    global global_broker, cloud_connection_state, cloud_connection_error
+    global global_broker, cloud_connection_state, cloud_connection_error, cloud_broker_url
     if global_broker:
         global_broker.disconnect()
         global_broker = None
@@ -196,6 +318,7 @@ async def setup_broker():
     if not CLOUD_TOKEN:
         cloud_connection_state = "disconnected"
         cloud_connection_error = None
+        cloud_broker_url = None
         return
 
     cloud_connection_state = "connecting"
@@ -221,6 +344,8 @@ async def setup_broker():
         global global_topic_prefix, global_client_id
         global_topic_prefix = topic_prefix
         global_client_id = client_id
+
+        cloud_broker_url = f"{'mqtts' if protocol == 'aws_iot' else 'mqtt'}://{endpoint}:{port}"
 
         if protocol == "mqtt":
             global_broker = LocalMQTTBroker(client_id, endpoint, port)
@@ -265,6 +390,15 @@ async def setup_broker():
                 raise TimeoutError("Timed out waiting to connect — check the endpoint and, for AWS IoT, that the certificate is registered and its policy allows this Thing to connect.")
 
             global_broker.subscribe(f"{topic_prefix}/{client_id}/execute")
+            # Cloud -> Edge workflow write-through. Without this the Cloud sequence editor could
+            # only ever write to Cloud's own database: the device never learned about a workflow
+            # authored there, so running it failed in expand_workflow_blocks (which resolves
+            # against WORKFLOWS_DIR), and editing an existing one was silently reverted the next
+            # time this device republished its own copy over the same {device_id, name} key.
+            # The device still owns the durable copy — a push is a request to write, applied
+            # through the same save path as a local save, and only real once this device echoes
+            # it back on its own sequences/{name} topic.
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/sequences-push")
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the
@@ -944,6 +1078,22 @@ def remove_workflow(name: str, force: bool = False):
                 409,
             )
         wf.delete_workflow(WORKFLOWS_DIR, name)
+
+        # Clear the retained topic too, or Cloud never learns about the deletion. Retained
+        # messages outlive the publisher by design — that is the whole reason sync-on-reconnect
+        # needs no handshake — so a workflow deleted here kept being re-imported into Cloud on
+        # every daemon start, forever, from a body still sitting on the broker. Observed with two
+        # workflows that were gone from both this disk and this database while Cloud went on
+        # listing them. An empty retained payload is MQTT's way of deleting a retained message.
+        if global_broker and global_topic_prefix and global_client_id:
+            try:
+                global_broker.client.publish(
+                    f"{global_topic_prefix}/{global_client_id}/sequences/{name}",
+                    payload=b"", qos=1, retain=True,
+                )
+            except Exception as e:
+                print(f"Deleted '{name}' but failed to clear its retained topic: {e}")
+
         return {"status": "deleted", "name": name, "was_linked_by": linked_by}
     except wf.WorkflowNotFound as e:
         return _workflow_error(e, 404)

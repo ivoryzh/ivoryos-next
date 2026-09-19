@@ -40,3 +40,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# LAN-mode store (src/lib/store/sqlite.js). Per-machine runtime state — device rows, run history
+# — rebuilt from the broker's retained topics on the next daemon start, so there is nothing here
+# worth committing.
+ivoryos_cloud.db
+ivoryos_cloud.db-wal
+ivoryos_cloud.db-shm

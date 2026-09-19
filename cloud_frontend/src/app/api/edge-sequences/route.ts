@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase';
+import { getStore } from '@/lib/store';
+
+export const dynamic = 'force-dynamic';
 
 // edge_sequences is written by two producers: daemon.js (mirroring whatever each device's local
 // Designer already saved, via MQTT) and this route (a sequence authored/edited directly in the
@@ -8,16 +10,12 @@ import { supabaseAdmin } from '@/lib/supabase';
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const deviceId = searchParams.get('device_id');
-
-  let query = supabaseAdmin.from('edge_sequences').select('device_id, name, description, body, updated_at, created_at');
-  if (deviceId) query = query.eq('device_id', deviceId);
-
-  const { data, error } = await query.order('updated_at', { ascending: false });
-  if (error) {
-    console.error('Failed to fetch edge sequences from Supabase:', error.message);
+  try {
+    return NextResponse.json(await getStore().listSequences(deviceId || undefined));
+  } catch (error: any) {
+    console.error('Failed to fetch edge sequences:', error.message);
     return NextResponse.json([]);
   }
-  return NextResponse.json(data);
 }
 
 export async function POST(req: Request) {
@@ -28,17 +26,33 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'device_id and name are required.' }, { status: 400 });
   }
 
-  const { error } = await supabaseAdmin.from('edge_sequences').upsert({
-    device_id: deviceId,
-    name,
-    description: body.description || '',
-    body: body.body || {},
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'device_id,name' });
+  try {
+    const store = getStore();
+    await store.upsertSequence({
+      device_id: deviceId,
+      name,
+      description: body.description || '',
+      body: body.body || {},
+    });
 
-  if (error) {
-    console.error('Failed to save edge sequence to Supabase:', error.message);
+    // Writing Cloud's own copy is not enough, and used to be all this did. The device resolves a
+    // workflow against its local WORKFLOWS_DIR, so a sequence that existed only here could never
+    // actually run — and worse, editing an existing one was silently reverted the next time the
+    // device republished its own copy over the same {device_id, name} key.
+    //
+    // So queue it for the daemon to push down (this route holds no broker connection). The device
+    // remains the owner: it applies the push through its normal save path and echoes the result
+    // back, and only that echo marks the push acknowledged.
+    await store.enqueueSequencePush({
+      device_id: deviceId,
+      name,
+      body: body.body || {},
+      body_hash: body.body?.body_hash || '',
+    });
+
+    return NextResponse.json({ status: 'success', push: 'queued' });
+  } catch (error: any) {
+    console.error('Failed to save edge sequence:', error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  return NextResponse.json({ status: 'success' });
 }

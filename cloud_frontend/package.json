@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "daemon": "node daemon.js",
+    "daemon": "node --disable-warning=ExperimentalWarning daemon.js",
+    "test": "node --test src/lib/*.test.js",
     "lint": "eslint"
   },
   "dependencies": {

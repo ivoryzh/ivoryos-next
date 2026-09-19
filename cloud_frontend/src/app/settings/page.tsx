@@ -1,58 +1,104 @@
 "use client";
-import { Settings2, Key, Copy, CheckCircle2 } from 'lucide-react';
-import { useState } from 'react';
+import { Settings2, Key, Radio } from 'lucide-react';
+import { useState, useEffect } from 'react';
 export default function SettingsPage() {
-  const [brokerType, setBrokerType] = useState<'local' | 'aws'>('local');
-  const [endpoint, setEndpoint] = useState('localhost');
-  const [clientId, setClientId] = useState('edge-device-01');
-  const [generatedToken, setGeneratedToken] = useState('');
-  const [copied, setCopied] = useState(false);
-  const [isProvisioning, setIsProvisioning] = useState(false);
-  const [provisionError, setProvisionError] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [isPairing, setIsPairing] = useState(false);
+  const [pairError, setPairError] = useState('');
+  const [pairing, setPairing] = useState<{ code: string; expiresAt: string } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [cloudOrigin, setCloudOrigin] = useState('');
 
-  const handleGenerateToken = async () => {
-    setProvisionError('');
-    setGeneratedToken('');
+  // Shown alongside the code: on a LAN the device also needs this Cloud's address, and it is the
+  // one value the person cannot guess. In an AWS deployment the edge already ships with the
+  // production URL, so there it is only reassurance.
+  useEffect(() => { setCloudOrigin(window.location.origin); }, []);
 
-    if (brokerType === 'local') {
-      // No real credentials needed for local/dev MQTT — this can stay a pure client-side encode.
-      const config = {
-        protocol: 'mqtt',
-        endpoint,
-        port: 1883,
-        client_id: clientId,
-        topic_prefix: "ivoryos/edge",
-      };
-      setGeneratedToken(btoa(JSON.stringify(config)));
-      setCopied(false);
-      return;
-    }
+  // Shown next to the name field so a collision is visible before you type one, rather than
+  // after two devices start fighting over the same MQTT client id.
+  const [devices, setDevices] = useState<any[]>([]);
+  useEffect(() => {
+    const load = () => fetch('/api/devices').then(r => r.json()).then(d => setDevices(Array.isArray(d) ? d : [])).catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+  const nameTaken = !!clientId.trim() && devices.some((d: any) => String(d.id) === clientId.trim());
 
-    // AWS IoT mode actually mints a real Thing + certificate via the server (see
-    // src/lib/aws-iot.ts) — there's no way to fabricate a working cert client-side, which is
-    // exactly what the old placeholder version of this button used to do.
-    setIsProvisioning(true);
+  // Derived during render from a ticking clock rather than stored: one source of truth for the
+  // remaining time, and no state write on mount.
+  useEffect(() => {
+    if (!pairing) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [pairing]);
+  const secondsLeft = pairing
+    ? Math.max(0, Math.round((new Date(pairing.expiresAt).getTime() - now) / 1000))
+    : 0;
+
+  const createPairingCode = async () => {
+    setPairError('');
+    setPairing(null);
+    setIsPairing(true);
     try {
-      const res = await fetch('/api/devices/provision', {
+      const res = await fetch('/api/pair/new', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: clientId }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to provision device.');
-      setGeneratedToken(data.token);
-      setCopied(false);
-    } catch (err: any) {
-      setProvisionError(err.message || 'Failed to provision device.');
+      if (!res.ok) throw new Error(data.error || 'Failed to create a pairing code.');
+      setPairing({ code: data.code, expiresAt: data.expiresAt });
+    } catch (e: any) {
+      setPairError(e.message);
     } finally {
-      setIsProvisioning(false);
+      setIsPairing(false);
     }
   };
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(generatedToken);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  // --- Cloud broker: which host THIS cloud connects to ---------------------------------------
+  // Distinct from the Edge Token Generator below, which configures the broker an *edge device*
+  // dials. Saving here only records the intent; the daemon is a separate process that picks the
+  // change up within ~3s and reconnects, so the live state comes from /api/health rather than
+  // from whether the save succeeded.
+  const [brokerHost, setBrokerHost] = useState('');
+  const [brokerPort, setBrokerPort] = useState(1883);
+  const [brokerSaving, setBrokerSaving] = useState(false);
+  const [brokerError, setBrokerError] = useState('');
+  const [brokerFallback, setBrokerFallback] = useState('');
+  const [health, setHealth] = useState<any>(null);
+
+  useEffect(() => {
+    fetch('/api/broker-config').then(r => r.json()).then(cfg => {
+      if (cfg.host) setBrokerHost(cfg.host);
+      if (cfg.port) setBrokerPort(cfg.port);
+      setBrokerFallback(cfg.fallbackUrl || '');
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const check = () => fetch('/api/health').then(r => r.json()).then(setHealth).catch(() => {});
+    check();
+    const t = setInterval(check, 3000);
+    return () => clearInterval(t);
+  }, []);
+
+  const saveBroker = async () => {
+    setBrokerError('');
+    setBrokerSaving(true);
+    try {
+      const res = await fetch('/api/broker-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: brokerHost, port: Number(brokerPort) }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save broker config.');
+    } catch (e: any) {
+      setBrokerError(e.message);
+    } finally {
+      setBrokerSaving(false);
+    }
   };
 
   return (
@@ -90,93 +136,134 @@ export default function SettingsPage() {
           
           <section>
             <h2 className="text-xl font-semibold mb-4 border-b pb-2 flex items-center gap-2" style={{ borderColor: 'var(--panel-border)' }}>
-              <Key className="w-5 h-5 text-blue-400" />
-              Edge Token Generator
+              <Radio className="w-5 h-5 text-blue-400" />
+              Cloud Broker
             </h2>
-            <div className="space-y-6">
-               <div className="flex flex-col space-y-4 p-6 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
-                  <p className="text-sm text-gray-400">Generate a secure Base64 connection token to deploy a new Edge Server. Paste the resulting token into the Edge Server's "Cloud Connect" dashboard.</p>
-                  
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Broker Type</label>
-                      <select 
-                        value={brokerType} 
-                        onChange={(e) => setBrokerType(e.target.value as 'local' | 'aws')}
-                        className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500"
+            <div className="flex flex-col space-y-4 p-6 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
+              <p className="text-sm text-gray-400">
+                The MQTT broker this Cloud connects to. On a LAN this is the machine running mosquitto — 127.0.0.1 if it is this one.
+                The daemon applies a change within a few seconds; no restart needed.
+              </p>
+
+              <div className="grid grid-cols-3 gap-4">
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium mb-1">Host</label>
+                  <input
+                    type="text"
+                    value={brokerHost}
+                    onChange={(e) => setBrokerHost(e.target.value)}
+                    placeholder={brokerFallback ? brokerFallback.replace(/^mqtts?:\/\//, '').split(':')[0] : '127.0.0.1'}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Port</label>
+                  <input
+                    type="number"
+                    value={brokerPort}
+                    onChange={(e) => setBrokerPort(Number(e.target.value))}
+                    placeholder="1883"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button onClick={saveBroker} disabled={brokerSaving || !brokerHost} className="btn-primary px-4 py-2 rounded font-medium">
+                  {brokerSaving ? 'Saving…' : 'Connect'}
+                </button>
+                {/* Live state, not save state — a saved host that refuses connections must not look like success. */}
+                {health && (
+                  <span className={`text-sm ${health.daemon?.brokerConnected ? 'text-green-500' : 'text-orange-400'}`}>
+                    {health.daemon?.brokerConnected
+                      ? `Connected to ${health.daemon.brokerUrl}`
+                      : (health.daemon?.running ? 'Daemon running, broker not connected' : 'Daemon not running')}
+                  </span>
+                )}
+              </div>
+
+              {brokerError && <p className="text-sm text-red-400">{brokerError}</p>}
+              {!brokerHost && brokerFallback && (
+                <p className="text-xs text-gray-500">Unset — falling back to {brokerFallback} from the environment.</p>
+              )}
+            </div>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mb-4 border-b pb-2 flex items-center gap-2" style={{ borderColor: 'var(--panel-border)' }}>
+              <Key className="w-5 h-5 text-blue-400" />
+              Pair a Device
+            </h2>
+            <div className="flex flex-col space-y-4 p-6 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
+              <p className="text-sm text-gray-400">
+                Generate a short code, then enter it on the edge server&apos;s <strong>Cloud Connect</strong> page.
+                The device fetches its own credentials — nothing needs to be copied between machines.
+              </p>
+
+              {/* Existing devices, so a name collision is visible before it is typed. */}
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-gray-500">Registered devices</span>
+                {devices.length === 0 ? (
+                  <span className="text-sm text-gray-500">None yet.</span>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {devices.map((d: any) => (
+                      <span
+                        key={d.id}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono"
+                        style={{ background: 'var(--panel-bg)', border: '1px solid var(--panel-border)' }}
+                        title={d.last_seen ? `last seen ${new Date(d.last_seen).toLocaleString()}` : 'never connected'}
                       >
-                        <option value="local">Local MQTT (Testing)</option>
-                        <option value="aws">AWS IoT Core (Production)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Device Name</label>
-                      <input
-                        type="text"
-                        value={clientId}
-                        onChange={(e) => setClientId(e.target.value)}
-                        className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500"
-                      />
-                      {brokerType === 'aws' && (
-                        <p className="text-xs text-gray-500 mt-1">A label — the real AWS IoT Thing name gets a random suffix appended for uniqueness.</p>
-                      )}
-                    </div>
-                    {brokerType === 'local' ? (
-                      <div className="col-span-2">
-                        <label className="block text-sm font-medium mb-1">Endpoint URL</label>
-                        <input
-                          type="text"
-                          value={endpoint}
-                          onChange={(e) => setEndpoint(e.target.value)}
-                          placeholder="localhost"
-                          className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
-                    ) : (
-                      <div className="col-span-2 flex items-center text-xs text-gray-500">
-                        Endpoint and certificate are provisioned automatically from this Cloud instance's own AWS IoT account — nothing to fill in.
-                      </div>
-                    )}
+                        <span className={`w-1.5 h-1.5 rounded-full ${String(d.status) === 'online' ? 'bg-green-500' : 'bg-gray-500'}`} />
+                        {d.id}
+                      </span>
+                    ))}
                   </div>
+                )}
+              </div>
 
-                  {provisionError && (
-                    <div className="text-sm text-red-400 bg-red-950/30 border border-red-500/30 rounded-md px-3 py-2">
-                      {provisionError}
-                    </div>
-                  )}
+              <div className="grid grid-cols-3 gap-4 items-end">
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium mb-1">Device Name</label>
+                  <input
+                    type="text"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                    placeholder="name this device"
+                  />
+                </div>
+                <button
+                  onClick={createPairingCode}
+                  disabled={isPairing || !clientId.trim() || nameTaken}
+                  className="btn-primary px-4 py-2 rounded font-medium"
+                >
+                  {isPairing ? 'Generating…' : 'Generate Code'}
+                </button>
+              </div>
 
-                  <button
-                    onClick={handleGenerateToken}
-                    disabled={isProvisioning}
-                    className="self-start px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-md text-sm font-medium transition-colors"
-                  >
-                    {isProvisioning ? 'Provisioning device in AWS IoT…' : 'Generate Token'}
-                  </button>
+              {nameTaken && (
+                <p className="text-sm text-orange-400">
+                  <strong>{clientId.trim()}</strong> is already registered. A device name is its MQTT client id —
+                  two devices sharing one disconnect each other in a loop, so pick another.
+                </p>
+              )}
 
-                  {generatedToken && (
-                    <div className="mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                      <label className="block text-sm font-medium text-green-400 mb-2">Connection Token Generated!</label>
-                      <div className="relative">
-                        <textarea 
-                          readOnly 
-                          value={generatedToken}
-                          rows={4}
-                          className="w-full p-3 pr-12 rounded bg-black/40 border border-green-500/30 text-xs font-mono text-gray-300 resize-none focus:outline-none"
-                        />
-                        <button 
-                          onClick={copyToClipboard}
-                          className="absolute right-2 top-2 p-2 bg-black/60 hover:bg-gray-800 rounded text-gray-300 transition-colors"
-                          title="Copy to clipboard"
-                        >
-                          {copied ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                        </button>
-                      </div>
-                      <p className="text-xs text-yellow-500/80 mt-2">
-                        * Copy this Base64 string and paste it into the local Edge UI.
-                      </p>
-                    </div>
-                  )}
-               </div>
+              {pairError && <p className="text-sm text-red-400">{pairError}</p>}
+
+              {pairing && (
+                <div className="flex flex-col items-center gap-2 py-4 rounded-lg" style={{ background: 'var(--panel-bg)', border: '1px solid var(--panel-border)' }}>
+                  <span className="text-4xl font-mono font-bold tracking-[0.25em] text-blue-400">{pairing.code}</span>
+                  {/* A code that has silently expired while you walked to the other machine is the
+                      obvious failure here, so the remaining time is shown rather than implied. */}
+                  <span className={`text-xs ${secondsLeft > 0 ? 'text-gray-500' : 'text-red-400'}`}>
+                    {secondsLeft > 0
+                      ? `Expires in ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')} · single use`
+                      : 'Expired — generate a new one'}
+                  </span>
+                  <span className="text-xs text-gray-500">
+                    Enter on the edge server at <strong>Cloud Connect</strong>
+                    {cloudOrigin ? <> · this Cloud is <strong>{cloudOrigin}</strong></> : null}
+                  </span>
+                </div>
+              )}
             </div>
           </section>
   

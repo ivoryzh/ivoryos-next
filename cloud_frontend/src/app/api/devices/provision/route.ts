@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { provisionDevice } from '@/lib/aws-iot';
-import { supabaseAdmin } from '@/lib/supabase';
+import { getStore } from '@/lib/store';
 
 // Automates what was previously a manual "go create a Thing in the AWS console" step — see
 // AGENTS.md's Cloud section. Creates the AWS IoT identity for a new device and hands back a
@@ -14,13 +14,10 @@ export async function POST(req: Request) {
 
         const { thingName, token } = await provisionDevice(label);
 
-        const { error } = await supabaseAdmin.from('devices').upsert({
-            id: thingName,
-            name: label,
-            status: 'offline',
-        }, { onConflict: 'id' });
-        if (error) {
-            console.error('Provisioned AWS IoT Thing but failed to create its Supabase row:', error.message);
+        try {
+            await getStore().upsertDevicePlaceholder(thingName, label);
+        } catch (e: any) {
+            console.error('Provisioned AWS IoT Thing but failed to create its device row:', e.message);
             // Not fatal — the device will still appear once it connects and the daemon upserts it.
         }
 

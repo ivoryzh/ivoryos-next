@@ -1,23 +1,21 @@
 import { NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase';
+import { getStore } from '@/lib/store';
 
-// Devices now come from Supabase (written by daemon.js as it consumes each device's retained
-// MQTT status/schema topics) rather than orchestrator.ts's in-memory Map, which nothing writes to
-// anymore now that the HTTP heartbeat polling endpoint is gone — see AGENTS.md's Cloud section.
+export const dynamic = 'force-dynamic';
+
+// Devices come from the store (written by daemon.js as it consumes each device's retained MQTT
+// status/schema topics) — SQLite on a LAN, Supabase in the hosted product.
 export async function GET() {
-  const { data, error } = await supabaseAdmin
-    .from('devices')
-    .select('id, name, status, last_seen, schema')
-    .order('last_seen', { ascending: false });
-
-  if (error) {
+  try {
+    const devices = await getStore().listDevices();
+    return NextResponse.json(devices);
+  } catch (error: any) {
     // Every caller of this route (the orchestrator canvas especially) assumes the response is
-    // always an array — that was true of the old in-memory getDevices() this replaced, which
-    // could never fail. Keep that contract even on failure (e.g. Supabase not configured yet)
-    // rather than returning an error object a `.map()` call downstream can't handle; log
-    // server-side instead of changing the response shape.
-    console.error('Failed to fetch devices from Supabase:', error.message);
+    // always an array, so keep that contract even on failure rather than returning an error
+    // object a `.map()` downstream can't handle. The reason a failure happened is not lost: it
+    // is reported properly by /api/health, which is what the header badge reads. Returning []
+    // here *and* having no health check was what made a broken backend look like an empty lab.
+    console.error('Failed to fetch devices:', error.message);
     return NextResponse.json([]);
   }
-  return NextResponse.json(data);
 }

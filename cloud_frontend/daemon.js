@@ -1,13 +1,20 @@
-// The one process that actually holds the AWS IoT / MQTT connection. Next.js API routes are
-// request-scoped and shouldn't own a long-lived broker connection, so this is a standalone Node
-// process: `node daemon.js`, run once per Cloud deployment, separate from `next start`.
+// The one process that actually holds the MQTT connection. Next.js API routes are request-scoped
+// and shouldn't own a long-lived broker connection, so this is a standalone Node process:
+// `npm run daemon`, run once per deployment, separate from `next dev` / `next start`.
 //
-// It only consumes the retained status/schema/sequences topics each Edge device publishes (see
-// edge_server/ivoryos_edge/server.py's status_loop/publish_schema/publish_sequences) and writes
-// them into this project's own Supabase database — a separate Supabase project from the Hub's,
-// by design. It does NOT yet publish `execute` tasks back to devices; that's the dispatch half of
-// the Cloud orchestrator (src/lib/orchestrator.ts) and still needs to be wired to this same
-// connection — tracked separately, not done here.
+// It runs in either of two shapes, chosen by src/lib/store (see that module for the rules):
+//
+//   local — a lab on a LAN: SQLite file + a local mosquitto. No accounts, no keys, no internet.
+//   cloud — the hosted product: Supabase + AWS IoT Core (or any remote broker), mutual TLS.
+//
+// Nothing below this comment branches on the mode: the store and the broker options are resolved
+// once, and the dispatch loop is identical either way.
+//
+// It consumes the retained status/schema/sequences topics each Edge device publishes (see
+// edge_server/ivoryos_edge/server.py's status_loop/publish_schema/publish_sequences), and owns
+// the other direction too: dispatching `execute` tasks and walking each run's graph forward as
+// they report back (see the Dispatch section further down).
+//
 // Unlike Next.js (which auto-loads .env.local for the app), a plain `node daemon.js` process
 // starts with none of that — without this, every var below would be undefined even with a fully
 // filled-in .env.local sitting right next to this file.
@@ -15,26 +22,31 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env.local') }
 
 const mqtt = require('mqtt');
 const fs = require('fs');
-const { createClient } = require('@supabase/supabase-js');
+// The scheduling rules — what depends on what, when a task is released, when a run is finished —
+// are shared verbatim with the Next.js run route rather than reimplemented here. Plain CommonJS
+// precisely so this build-step-free process can require it; see that module's header for why the
+// two copies that used to exist disagreed.
+const { TERMINAL_TASK_STATUSES, computeAdvance } = require('./src/lib/dag.js');
+const { getStore, resolveBrokerUrl } = require('./src/lib/store');
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.error('[Daemon] SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set. Refusing to start with no persistence target.');
+let store;
+try {
+    store = getStore();
+} catch (e) {
+    console.error(`[Daemon] ${e.message}`);
     process.exit(1);
 }
-// Service-role key: full read/write, bypasses Row Level Security. Safe ONLY here — this script
-// never runs in a browser context and must never be bundled into the Next.js app.
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const MODE = store.mode;
+console.log(`[Daemon] mode: ${MODE}  store: ${store.backend} (${store.location})`);
 
 const TOPIC_PREFIX = process.env.MQTT_TOPIC_PREFIX || 'ivoryos/edge';
 
-// Local broker for dev (mqtt://host:port with no client cert), or AWS IoT Core (mutual TLS) in
-// production — same client_id-per-device-per-connection model the edge server itself uses.
+// Local broker for LAN/dev (mqtt://host:port, no client cert), or AWS IoT Core (mutual TLS) in
+// cloud deployments — same client_id-per-device-per-connection model the edge server itself uses.
 function buildMqttOptions() {
     if (process.env.AWS_IOT_ENDPOINT) {
         return {
-            url: `mqtts://${process.env.AWS_IOT_ENDPOINT}:8883`,
+            url: resolveBrokerUrl(),
             options: {
                 clientId: process.env.MQTT_CLIENT_ID || `ivoryos-cloud-daemon-${Date.now()}`,
                 ca: fs.readFileSync(process.env.AWS_IOT_CA_PATH),
@@ -44,13 +56,16 @@ function buildMqttOptions() {
         };
     }
     return {
-        url: process.env.MQTT_BROKER_URL || 'mqtt://127.0.0.1:1883',
+        url: resolveBrokerUrl(),
         options: { clientId: process.env.MQTT_CLIENT_ID || `ivoryos-cloud-daemon-${Date.now()}` }
     };
 }
 
 const { url, options } = buildMqttOptions();
 const client = mqtt.connect(url, options);
+// Declared here, not beside watchBrokerConfig below: writeHeartbeat() runs at startup and reads
+// it, and a `let` further down would still be in its temporal dead zone at that point.
+let currentBrokerUrl = url;
 
 client.on('connect', () => {
     console.log(`[Daemon] Connected to ${url}`);
@@ -61,17 +76,34 @@ client.on('connect', () => {
     // Retained messages replay immediately on subscribe — this is the entire "catch up on
     // reconnect" mechanism, for both this daemon restarting AND an edge device reconnecting.
     // No polling, no explicit sync request needed on either side.
+    writeHeartbeat();
 });
 
 client.on('error', (err) => console.error('[Daemon] MQTT error:', err.message));
 client.on('reconnect', () => console.log('[Daemon] Reconnecting...'));
-client.on('close', () => console.log('[Daemon] Connection closed.'));
-client.on('offline', () => console.log('[Daemon] Offline (no connection).'));
+client.on('close', () => { console.log('[Daemon] Connection closed.'); writeHeartbeat(); });
+client.on('offline', () => { console.log('[Daemon] Offline (no connection).'); writeHeartbeat(); });
 
 client.on('message', async (topic, message) => {
     const parts = topic.split('/'); // ivoryos/edge/{deviceId}/(status|schema|sequences/{name})
     const deviceId = parts[2];
     const kind = parts[3];
+
+    // An empty retained payload is MQTT's tombstone: it is how a publisher deletes a retained
+    // message. Must be handled before JSON.parse, which would otherwise reject it as bad JSON and
+    // leave the deleted workflow in Cloud forever — which is exactly what used to happen.
+    if (message.length === 0) {
+        if (kind === 'sequences') {
+            const name = parts[4];
+            try {
+                const removed = await store.deleteSequence(deviceId, name);
+                if (removed) console.log(`[Daemon] Sequence ${deviceId}/${name} deleted on the device, removed from Cloud.`);
+            } catch (e) {
+                console.error(`[Daemon] Failed to remove deleted sequence ${deviceId}/${name}:`, e.message);
+            }
+        }
+        return;
+    }
 
     let payload;
     try {
@@ -83,30 +115,30 @@ client.on('message', async (topic, message) => {
 
     try {
         if (kind === 'status') {
-            const { error } = await supabase.from('devices').upsert({
-                id: deviceId,
-                status: payload.online ? 'online' : 'offline',
-                last_seen: new Date().toISOString(),
-            }, { onConflict: 'id' });
-            if (error) console.error(`[Daemon] Failed to upsert device status for ${deviceId}:`, error.message);
+            await store.upsertDeviceStatus(deviceId, payload.online ? 'online' : 'offline');
         } else if (kind === 'schema') {
-            const { error } = await supabase.from('devices').upsert({
-                id: deviceId,
-                schema: payload,
-                last_seen: new Date().toISOString(),
-            }, { onConflict: 'id' });
-            if (error) console.error(`[Daemon] Failed to upsert device schema for ${deviceId}:`, error.message);
+            await store.upsertDeviceSchema(deviceId, payload);
+            const count = Object.keys((payload && payload.instruments) || {}).length;
+            console.log(`[Daemon] ${deviceId} schema synced (${count} instruments)`);
         } else if (kind === 'sequences') {
             const name = parts[4];
-            const { error } = await supabase.from('edge_sequences').upsert({
-                device_id: deviceId,
-                name,
-                description: payload.description || '',
-                body: payload,
-                updated_at: new Date().toISOString(),
-            }, { onConflict: 'device_id,name' });
-            if (error) console.error(`[Daemon] Failed to upsert sequence ${deviceId}/${name}:`, error.message);
-            else console.log(`[Daemon] Synced sequence ${deviceId}/${name}`);
+            await store.upsertSequence({
+                device_id: deviceId, name, description: payload.description || '', body: payload,
+            });
+            // The device echoing a sequence back IS the acknowledgement of a push we sent — the
+            // device owns the durable copy, so a push is only real once its own retained topic
+            // carries it.
+            //
+            // Correlated on the step content, NOT on body_hash: the device recomputes the hash
+            // from the canonical body when it saves, so the hash Cloud sent is essentially never
+            // the hash that comes back, and matching on it left every push unacknowledged forever
+            // (observed: a push whose file had demonstrably landed on the device still read
+            // 'sent'). Comparing the steps also keeps the property that mattered — a concurrent
+            // bench edit that won echoes *different* content and so does not falsely ack.
+            const acked = await ackIfEchoMatches(deviceId, name, payload);
+            console.log(acked
+                ? `[Daemon] Push ${deviceId}/${name} acknowledged by the device.`
+                : `[Daemon] Synced sequence ${deviceId}/${name}`);
         } else if (kind === 'task-status') {
             await handleTaskStatus(payload);
         }
@@ -115,15 +147,33 @@ client.on('message', async (topic, message) => {
     }
 });
 
+// --- Liveness -----------------------------------------------------------------------------
+// /api/health reads this. It lives in the store rather than a pid file because the Next app and
+// the daemon need not share a filesystem in cloud mode, and the health check must mean the same
+// thing in both. A missing or stale row is what tells the UI "the backend is down" instead of
+// showing an empty device list that looks identical to "no devices are connected yet".
+async function writeHeartbeat() {
+    try {
+        await store.setDaemonHeartbeat({
+            brokerConnected: client.connected,
+            brokerUrl: currentBrokerUrl,
+            mode: MODE,
+            storeLocation: store.location,
+        });
+    } catch (e) {
+        console.error('[Daemon] Failed to write heartbeat:', e.message);
+    }
+}
+setInterval(writeHeartbeat, 5000);
+writeHeartbeat();
+
 // --- Dispatch: the other half of the orchestrator loop. Cloud's "Run" button (see
 // api/cloud-workflows/runs) inserts run_tasks rows with status 'pending' for every node whose
 // dependencies are already satisfied; everything else starts 'blocked'. This daemon is the only
 // process holding a live, authenticated MQTT connection, so it's also the only thing that can
-// actually publish to a device's execute topic — that's the "dispatch" AGENTS.md flagged as
-// never having been wired up. A Realtime subscription (rather than polling) reacts the moment a
-// task becomes pending, whether that's from a fresh run or from a task just having unblocked one
-// further downstream (see handleTaskStatus below).
-const TERMINAL_TASK_STATUSES = ['completed', 'error', 'cancelled'];
+// publish to a device's execute topic. The store tells it when a task becomes ready — via
+// Supabase Realtime in cloud mode, via a short poll in LAN mode — whether that's from a fresh run
+// or from a task just having unblocked one further downstream (see handleTaskStatus below).
 
 async function handleTaskStatus(payload) {
     const { runId, nodeId, status } = payload;
@@ -133,119 +183,211 @@ async function handleTaskStatus(payload) {
     // a "running" message sent moments before "completed" can still arrive after it (observed
     // directly: a run that genuinely completed on the edge showed completed->running in this log,
     // stale "running" landing late during a reconnect). Once a task reaches a terminal status,
-    // refuse to move it backwards — the `.not(...in...)` guard means this update simply matches
-    // zero rows (not an error) if the task already finished.
-    const { data, error } = await supabase
-        .from('run_tasks')
-        .update({ status, updated_at: new Date().toISOString() })
-        .eq('run_id', runId)
-        .eq('node_id', nodeId)
-        .not('status', 'in', `(${TERMINAL_TASK_STATUSES.join(',')})`)
-        .select('status');
-    if (error) {
-        console.error(`[Daemon] Failed to update run_task ${runId}/${nodeId}:`, error.message);
-        return;
-    }
-    if (!data || data.length === 0) {
+    // refuse to move it backwards — this simply matches zero rows if the task already finished.
+    const moved = await store.updateTaskStatusIfNotTerminal(
+        runId, nodeId, status, TERMINAL_TASK_STATUSES,
+    );
+    if (!moved) {
         console.log(`[Daemon] Ignored stale '${status}' for already-finished task ${runId}/${nodeId}`);
         return;
     }
     console.log(`[Daemon] Task ${runId}/${nodeId} -> ${status}`);
 
-    if (status === 'error') {
-        await supabase.from('runs').update({ status: 'error', updated_at: new Date().toISOString() }).eq('id', runId);
-        return;
-    }
-    if (status === 'completed') {
+    // Both outcomes advance the run, for opposite reasons: 'completed' can release dependents,
+    // 'error' can strand them permanently. The error case used to just stamp the run 'error' and
+    // return, which left every downstream task sitting at 'blocked' forever — safe (they never
+    // ran) but indistinguishable in the UI from a run still making progress.
+    if (status === 'completed' || status === 'error') {
         await advanceRun(runId);
     }
 }
 
-// Mirrors the dependency-unlocking logic the old in-memory orchestrator.ts had (checkReadyNodes)
-// — a node becomes dispatchable once every node it depends on (via the stored edges) has
-// completed. Flow Control nodes aren't dispatched to any device at all (no run_tasks row exists
-// for them), so they're always treated as already-satisfied dependencies.
+// Walk the run forward one step: release whatever the just-finished task unblocked, kill whatever
+// it stranded, and decide whether the run as a whole is over. The rules are `computeAdvance` in
+// src/lib/dag.js — the same function the run route planned this run with, so "what does this edge
+// mean" has exactly one answer on both sides. This function is only the I/O around it.
+//
+// Re-reading the stored edges each time (rather than keeping a dependency list per task) keeps
+// the graph single-sourced: the plan cannot drift from the graph it was derived from.
 async function advanceRun(runId) {
-    const { data: run, error: runError } = await supabase.from('runs').select('nodes, edges, status').eq('id', runId).single();
-    if (runError || !run || run.status !== 'running') return;
+    const run = await store.getRun(runId);
+    if (!run || run.status !== 'running') return;
 
-    const { data: tasks, error: tasksError } = await supabase.from('run_tasks').select('node_id, status').eq('run_id', runId);
-    if (tasksError || !tasks) return;
+    const tasks = await store.listRunTasks(runId);
+    if (!tasks) return;
 
-    const taskByNode = new Map(tasks.map(t => [t.node_id, t.status]));
-    const flowControlNodeIds = new Set(
-        (run.nodes || [])
-            .filter(n => n.data?.block?.instrument === 'Flow Control')
-            .map(n => n.id)
-    );
+    const { unblock, cancel, runStatus, stalled } = computeAdvance(run.nodes, run.edges, tasks);
 
-    const incoming = new Map();
-    for (const e of (run.edges || [])) {
-        if (!incoming.has(e.target)) incoming.set(e.target, []);
-        incoming.get(e.target).push(e.source);
+    // Guarded on 'blocked' for the same reason dispatch claims before publishing: two task-status
+    // messages landing together can run this twice concurrently, and a task already dispatched
+    // must not be dragged back to 'pending' and published a second time.
+    for (const nodeId of unblock) {
+        await store.updateTaskStatusFrom(runId, nodeId, 'blocked', 'pending');
+    }
+    if (unblock.length) console.log(`[Daemon] Run ${runId}: released ${unblock.join(', ')}.`);
+
+    for (const { nodeId, reason } of cancel) {
+        const done = await store.updateTaskStatusFrom(runId, nodeId, 'blocked', 'cancelled');
+        if (done) console.log(`[Daemon] Run ${runId}: cancelled ${nodeId} (${reason}).`);
     }
 
-    const isSatisfied = (nodeId) => flowControlNodeIds.has(nodeId) || taskByNode.get(nodeId) === 'completed';
-
-    const toUnblock = [];
-    for (const [nodeId, status] of taskByNode.entries()) {
-        if (status !== 'blocked') continue;
-        const deps = incoming.get(nodeId) || [];
-        if (deps.every(isSatisfied)) toUnblock.push(nodeId);
-    }
-
-    for (const nodeId of toUnblock) {
-        await supabase.from('run_tasks').update({ status: 'pending', updated_at: new Date().toISOString() }).eq('run_id', runId).eq('node_id', nodeId);
-    }
-
-    const stillActive = Array.from(taskByNode.values()).some(s => s !== 'completed') || toUnblock.length > 0;
-    if (!stillActive) {
-        await supabase.from('runs').update({ status: 'completed', updated_at: new Date().toISOString() }).eq('id', runId);
-        console.log(`[Daemon] Run ${runId} completed.`);
+    if (runStatus !== 'running') {
+        await store.updateRunStatus(runId, runStatus);
+        if (stalled) {
+            // No task is running, queued or ready, yet some are still blocked. The run route's
+            // validation is supposed to make this impossible (a cycle was the only way to build
+            // it on purpose), so reaching here means a graph got past validation — worth a loud
+            // log rather than a run that quietly never ends.
+            console.error(`[Daemon] Run ${runId} stalled: blocked tasks remain with nothing left to run. Marking it errored.`);
+        } else {
+            console.log(`[Daemon] Run ${runId} ${runStatus}.`);
+        }
     }
 }
 
-// Dispatch: publish one pending task to its device's execute topic and flip it to 'queued'.
-// Shared by the Realtime handler below (new/just-unblocked tasks) and the startup catch-up scan
-// (tasks that were left 'pending' from before this process's last restart or MQTT drop — Realtime
-// only streams changes going forward, it doesn't replay rows that were already pending when the
-// subscription opened, so without this catch-up step a daemon restart mid-run would strand them).
+// Publish one ready task to its device's execute topic.
+//
+// Claim first, publish second. The task is moved 'pending' -> 'queued' with a compare-and-set
+// *before* anything goes on the wire, so whoever wins the CAS owns the dispatch and any
+// concurrent notification (a second Realtime event, or the next LAN poll tick arriving while the
+// publish is still in flight) loses it and does nothing. Publishing first and recording after —
+// which is what this did originally — leaves a window where the same task can be sent to a real
+// instrument twice. If the publish then fails, the claim is released back to 'pending' so the
+// next tick retries it rather than leaving it stuck at 'queued' forever.
 async function dispatchTask(task) {
     if (!task || task.status !== 'pending') return;
+
+    const claimed = await store.updateTaskStatusFrom(
+        task.run_id, task.node_id, 'pending', 'queued', { dispatched: true },
+    );
+    if (!claimed) return; // someone else already took it
+
     const execTopic = `${TOPIC_PREFIX}/${task.device_id}/execute`;
-    const execPayload = JSON.stringify({ block: task.block, runId: task.run_id, nodeId: task.node_id });
+    const execPayload = JSON.stringify({
+        block: task.block, runId: task.run_id, nodeId: task.node_id,
+    });
     client.publish(execTopic, execPayload, { qos: 1 }, async (err) => {
         if (err) {
             console.error(`[Daemon] Failed to publish task ${task.run_id}/${task.node_id}:`, err.message);
+            await store.updateTaskStatusFrom(task.run_id, task.node_id, 'queued', 'pending');
             return;
         }
-        const { error } = await supabase
-            .from('run_tasks')
-            .update({ status: 'queued', dispatched_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-            .eq('run_id', task.run_id)
-            .eq('node_id', task.node_id)
-            .eq('status', 'pending'); // guard against a double-dispatch race
-        if (error) console.error(`[Daemon] Failed to mark task ${task.run_id}/${task.node_id} queued:`, error.message);
-        else console.log(`[Daemon] Dispatched ${task.run_id}/${task.node_id} to ${task.device_id}`);
+        console.log(`[Daemon] Dispatched ${task.run_id}/${task.node_id} to ${task.device_id}`);
     });
 }
 
-const dispatchChannel = supabase.channel('run_tasks_dispatch').on(
-    'postgres_changes',
-    { event: '*', schema: 'public', table: 'run_tasks', filter: 'status=eq.pending' },
-    ({ new: task }) => dispatchTask(task)
-).subscribe(async (status) => {
-    if (status === 'SUBSCRIBED') {
-        console.log('[Daemon] Watching run_tasks for dispatch.');
-        const { data: strandedTasks, error } = await supabase.from('run_tasks').select('*').eq('status', 'pending');
-        if (error) {
-            console.error('[Daemon] Failed to scan for stranded pending tasks:', error.message);
-        } else if (strandedTasks?.length) {
-            console.log(`[Daemon] Found ${strandedTasks.length} stranded pending task(s) from before startup, dispatching now.`);
-            for (const task of strandedTasks) await dispatchTask(task);
+// In cloud mode the store's Realtime subscription only streams changes going forward, so the
+// startup scan re-dispatches anything left 'pending' from before this process last restarted.
+// In LAN mode the poll *is* that scan, and the redundant pass is harmless.
+const unsubscribe = store.subscribePendingTasks(dispatchTask, async () => {
+    try {
+        const stranded = await store.listTasksByStatus('pending');
+        if (stranded.length) {
+            console.log(`[Daemon] Found ${stranded.length} stranded pending task(s) from before startup, dispatching now.`);
+            for (const task of stranded) await dispatchTask(task);
         }
+    } catch (e) {
+        console.error('[Daemon] Failed to scan for stranded pending tasks:', e.message);
     }
 });
+console.log('[Daemon] Watching for ready tasks.');
+
+// --- Cloud -> Edge workflow pushes --------------------------------------------------------
+// A sequence saved in the Cloud editor is queued in the store by the API route (which has no
+// broker connection of its own) and published here. Marked 'sent' rather than 'acked': the
+// device owns the durable copy, so the push is only complete once it echoes the body back on its
+// own retained sequences topic (handled above). Re-sending a 'sent' push that was never echoed
+// is deliberate — an at-least-once write of an idempotent, hash-identified body.
+//
+// Retrying 'sent' is not optional: `sequences-push` is deliberately NOT retained (a retained push
+// would be re-applied by any device that reconnects later, forever, long after it stopped being
+// what anyone wanted), so a push published while its device is offline is simply gone. Only the
+// device's echo proves delivery, so anything below 'acked' is re-sent until it is — at-least-once
+// delivery of an idempotent, hash-identified body. Caught by testing exactly that case: a push
+// published while the edge server was restarting stayed 'sent' forever.
+// The executable content of a workflow, with everything the device is entitled to rewrite on
+// save stripped out: version, hashes, timestamps, authorship. Two bodies that produce this same
+// string will run identically, which is the only sense in which a push "took effect".
+function workflowFingerprint(body) {
+    if (!body || typeof body !== 'object') return '';
+    return JSON.stringify({
+        prep: body.prep || [],
+        script: body.script || body.sequence || [],
+        cleanup: body.cleanup || [],
+    });
+}
+
+async function ackIfEchoMatches(deviceId, name, echoedBody) {
+    try {
+        const push = await store.getSequencePush(deviceId, name);
+        if (!push || push.status === 'acked') return false;
+        if (workflowFingerprint(push.body) !== workflowFingerprint(echoedBody)) return false;
+        return await store.ackSequencePush(deviceId, name);
+    } catch (e) {
+        console.error(`[Daemon] Failed to reconcile push ${deviceId}/${name}:`, e.message);
+        return false;
+    }
+}
+
+async function drainSequencePushes({ includeUnacked = false } = {}) {
+    if (!client.connected) return;
+    try {
+        const statuses = includeUnacked ? ['pending', 'sent'] : ['pending'];
+        const pending = (await Promise.all(statuses.map(s => store.listSequencePushes(s)))).flat();
+        for (const push of pending) {
+            const topic = `${TOPIC_PREFIX}/${push.device_id}/sequences-push`;
+            const payload = JSON.stringify({ name: push.name, body: push.body, author: 'cloud' });
+            await new Promise((resolve) => {
+                client.publish(topic, payload, { qos: 1 }, async (err) => {
+                    if (err) {
+                        console.error(`[Daemon] Failed to push ${push.device_id}/${push.name}:`, err.message);
+                    } else {
+                        await store.setSequencePushStatus(push.device_id, push.name, 'sent');
+                        console.log(`[Daemon] Pushed workflow ${push.device_id}/${push.name}, awaiting echo.`);
+                    }
+                    resolve();
+                });
+            });
+        }
+    } catch (e) {
+        console.error('[Daemon] Failed to drain sequence pushes:', e.message);
+    }
+}
+// Fast path for a freshly queued push; slower sweep that re-sends anything still unacknowledged
+// (a device that was offline, or a publish the broker dropped).
+setInterval(() => drainSequencePushes(), 1000);
+setInterval(() => drainSequencePushes({ includeUnacked: true }), 15000);
+
+// --- Broker reconfiguration ----------------------------------------------------------------
+// The broker host is chosen in /settings and stored, so this process has to notice it changing
+// without a restart. Polled rather than pushed: it changes roughly never, and a 3s poll avoids
+// giving the Supabase and SQLite backends yet another change-feed to implement differently.
+async function watchBrokerConfig() {
+    try {
+        const cfg = await store.getBrokerConfig();
+        if (!cfg || !cfg.host) return;
+        const desired = `mqtt://${cfg.host}:${cfg.port || 1883}`;
+        // AWS IoT credentials are file/cert based and cannot be re-pointed by host alone, so a
+        // stored host is honoured only where a plain broker URL is meaningful.
+        if (process.env.AWS_IOT_ENDPOINT) return;
+        if (desired === currentBrokerUrl) return;
+
+        console.log(`[Daemon] Broker config changed: ${currentBrokerUrl} -> ${desired}. Reconnecting.`);
+        currentBrokerUrl = desired;
+        client.end(true, () => {
+            // mqtt.js reconnects to the URL it was constructed with, so re-pointing means
+            // replacing the stream rather than just calling reconnect().
+            client.options.hostname = cfg.host;
+            client.options.port = cfg.port || 1883;
+            client.options.href = desired;
+            client.reconnect();
+        });
+    } catch (e) {
+        console.error('[Daemon] Failed to read broker config:', e.message);
+    }
+}
+setInterval(watchBrokerConfig, 3000);
+watchBrokerConfig();
 
 // A device that drops without a clean disconnect still gets its LWT delivered (status: offline,
 // retained) by the broker — but if the daemon itself was offline when that happened, it'll only
@@ -253,11 +395,24 @@ const dispatchChannel = supabase.channel('run_tasks_dispatch').on(
 // for the daemon-was-connected-the-whole-time case, catching a device that goes silent without
 // even the LWT firing (e.g. the broker itself losing that device's session ungracefully).
 setInterval(async () => {
-    const staleBefore = new Date(Date.now() - 15000).toISOString();
-    const { error } = await supabase
-        .from('devices')
-        .update({ status: 'offline' })
-        .lt('last_seen', staleBefore)
-        .eq('status', 'online');
-    if (error) console.error('[Daemon] Failed to mark stale devices offline:', error.message);
+    try {
+        await store.markStaleDevicesOffline(new Date(Date.now() - 15000).toISOString());
+    } catch (e) {
+        console.error('[Daemon] Failed to mark stale devices offline:', e.message);
+    }
 }, 5000);
+
+// Leave a truthful heartbeat behind on a clean exit, so the UI says "backend stopped" straight
+// away instead of waiting for the row to age out.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, async () => {
+        console.log(`\n[Daemon] ${signal} — shutting down.`);
+        try { if (unsubscribe) unsubscribe(); } catch { /* nothing to release */ }
+        try {
+            await store.setDaemonHeartbeat({ brokerConnected: false, brokerUrl: url, mode: MODE, storeLocation: store.location });
+        } catch { /* best effort */ }
+        try { client.end(true); } catch { /* already closed */ }
+        try { store.close(); } catch { /* already closed */ }
+        process.exit(0);
+    });
+}

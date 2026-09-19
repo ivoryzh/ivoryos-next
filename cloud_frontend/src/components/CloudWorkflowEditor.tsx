@@ -9,6 +9,7 @@ import { LIBRARY_INSTRUMENT } from '@ivoryos/shared-ui';
 interface CloudWorkflowEditorProps {
   cloudDevices: any[];
   statusData: any;
+  health?: any;
   nodes: Node[];
   setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
   edges: Edge[];
@@ -89,8 +90,14 @@ const CustomCloudNode = ({ data, id }: any) => {
             return (
               <div key={paramKey} className="flex flex-col gap-2">
                 <label className="text-xs text-gray-400 font-bold uppercase">{paramKey}</label>
+                {/* `nodrag` is what lets you actually click into this field. Without it React
+                    Flow treats a mousedown anywhere on the node as the start of a node drag, so
+                    clicking the input pans the canvas instead of placing a caret — you could
+                    sometimes type, but never click or select. `nowheel` stops a scroll over the
+                    field from zooming the canvas. */}
                 <input
                   type="text"
+                  className="nodrag nowheel"
                   value={val}
                   onChange={e => handleParamChange(paramKey, e.target.value)}
                 />
@@ -141,7 +148,7 @@ const CustomCloudNode = ({ data, id }: any) => {
                             newParts[i] = e.target.value;
                             updateNodeData(id, { block: { ...block, returnVar: newParts.join(', ') } });
                           }}
-                          className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                          className="nodrag nowheel w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
                         />
                       </div>
                     );
@@ -164,6 +171,7 @@ const nodeTypes: NodeTypes = {
 export default function CloudWorkflowEditor({
   cloudDevices,
   statusData,
+  health,
   nodes,
   setNodes,
   edges,
@@ -336,7 +344,41 @@ export default function CloudWorkflowEditor({
       {header}
       <div className="flex-1 flex h-full w-full overflow-hidden">
         <div className="glass-sidebar flex flex-col z-10 shrink-0 border-t" style={{ borderColor: 'var(--panel-border)' }}>
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {/* Backend + device status sits at the head of the toolbox, beside the devices it
+              describes, rather than in the title bar next to the workflow name — which is about
+              the document, not the lab. One line, full detail on hover. */}
+          <div className="px-4 pt-4 pb-2 shrink-0">
+            {(() => {
+              const checking = !health;
+              const ok = health?.ok;
+              const total = health?.devices?.total ?? cloudDevices.length;
+              const online = health?.devices?.online ?? 0;
+              const problems: string[] = health?.problems || [];
+
+              let dot = 'bg-green-500';
+              let label = '';
+              if (checking) { dot = 'bg-gray-400'; label = 'Checking backend…'; }
+              else if (!ok) { dot = 'bg-orange-500'; label = problems[0] || 'Backend unavailable'; }
+              else if (total === 0) { dot = 'bg-gray-400'; label = 'No devices connected'; }
+              else { label = `${online}/${total} device${total !== 1 ? 's' : ''} online`; }
+
+              const detail = [
+                health?.mode && `mode: ${health.mode}`,
+                health?.store?.backend && `store: ${health.store.backend}${health.store.ok ? '' : ' (unreachable)'}`,
+                (health?.daemon?.brokerUrl || health?.brokerUrl) && `broker: ${health.daemon?.brokerUrl || health.brokerUrl}`,
+                health?.daemon && `daemon: ${health.daemon.running ? 'running' : 'not running'}`,
+                ...problems,
+              ].filter(Boolean).join('\n');
+
+              return (
+                <div className="flex items-center gap-2 min-w-0" title={detail || undefined}>
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+                  <span className="text-xs font-medium truncate text-gray-600 dark:text-gray-300">{label}</span>
+                </div>
+              );
+            })()}
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 pt-2 space-y-3">
             {cloudDevices.map(device => {
               const deviceId = device.id;
               const dInstruments = device.schema?.instruments || {};

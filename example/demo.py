@@ -9,7 +9,8 @@ temperature, catalyst loading and reaction time converges on a real optimum.
     python example/demo.py
 
 The synthetic test drivers (enums, dataclasses, deliberately long names, failing
-methods, async variants) are kept out of the deck so screenshots stay clean. Load them
+methods, async variants, and the variadic/keyword-only/positional-only signature shapes
+in variadic_driver.py) are kept out of the deck so screenshots stay clean. Load them
 alongside the lab deck with:
 
     IVORYOS_DEMO_TEST_DRIVERS=1 python example/demo.py
@@ -65,12 +66,18 @@ hplc = HPLC()
 # vial_washer = ReactionVialWasher(solvent="acetone")
 
 # --- Synthetic test drivers (opt-in) ----------------------------------------------
-if os.getenv("IVORYOS_DEMO_TEST_DRIVERS"):
-    from dummy_driver import AsyncPumpDriver, DummyMathDriver, PumpDriver
+# if os.getenv("IVORYOS_DEMO_TEST_DRIVERS"):
+from dummy_driver import AsyncPumpDriver, DummyMathDriver, PumpDriver
+from variadic_driver import VariadicProbe, VendorBridge
 
-    test_pump = PumpDriver()
-    test_async_pump = AsyncPumpDriver()
-    test_math_driver = DummyMathDriver()
+test_pump = PumpDriver()
+test_async_pump = AsyncPumpDriver()
+test_math_driver = DummyMathDriver()
+# Signature shapes that don't fit "a step stores named arguments": *args, **kwargs,
+# keyword-only, positional-only, decorated and compiled methods. Each one reports back
+# what actually reached the driver -- see variadic_driver.py.
+test_variadics = VariadicProbe()
+test_vendor_bridge = VendorBridge()
 
 # Run edge server
 ivoryos_edge.run(__name__)

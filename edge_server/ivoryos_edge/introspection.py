@@ -144,6 +144,60 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
     return param_data
 
 
+def _unwrap_requiredness(annotation):
+    """`NotRequired[bool]` / `Required[int]` describe whether a TypedDict key must be present,
+    not what type it is. Required-ness comes from the TypedDict's own key sets, so strip the
+    wrapper and keep the type underneath — without this a declared option renders as
+    "NotRequired[bool]" free text instead of a True/False dropdown."""
+    if getattr(get_origin(annotation), "__name__", "") in ("NotRequired", "Required"):
+        args = get_args(annotation)
+        if args:
+            return args[0]
+    return annotation
+
+
+def _declared_kwargs_fields(annotation):
+    """The keyword arguments a `**kwargs` annotation *declares*, as {name: (annotation, required)}.
+
+    PEP 692 lets a driver say exactly what its `**kwargs` accepts:
+
+        class MeasureOptions(TypedDict):
+            slit_um: int
+            lamp: NotRequired[bool]
+
+        def measure(self, wavelength_nm: float, **options: Unpack[MeasureOptions]): ...
+
+    That is the difference between "arguments this schema cannot enumerate" and "arguments
+    nobody bothered to write down". When they are declared, each one becomes an ordinary listed
+    parameter — typed field, dropdown, default, casting, and a real typo check — instead of a
+    free-text row the scientist has to know the spelling of. Returns None when the annotation
+    says nothing, which is the ordinary `**kwargs` case.
+
+    A bare `**options: MeasureOptions` is read the same way. It is not what PEP 692 specifies
+    (that form means "every value is a MeasureOptions"), but it is a common enough slip that
+    guessing the useful reading beats rendering nothing.
+    """
+    if getattr(get_origin(annotation), "__name__", "") == "Unpack":
+        args = get_args(annotation)
+        annotation = args[0] if args else None
+
+    # Detected by the key sets a TypedDict always carries rather than typing.is_typeddict(),
+    # which does not recognise a typing_extensions TypedDict on every runtime.
+    required_keys = getattr(annotation, "__required_keys__", None)
+    if required_keys is None or not hasattr(annotation, "__annotations__"):
+        return None
+
+    try:
+        hints = typing.get_type_hints(annotation)
+    except Exception:
+        hints = dict(getattr(annotation, "__annotations__", {}))
+
+    return {
+        key: (_unwrap_requiredness(hint), key in required_keys)
+        for key, hint in hints.items()
+    }
+
+
 def _resolve_field_type(owner, field_name, declared):
     """dataclasses.fields() hands back the *declared* annotation, which under PEP 563 is a
     string. Resolve it against the owning class where possible so nested dataclasses/enums
@@ -386,6 +440,130 @@ def has_member(instance, name):
         return False
 
 
+def _unwrapped_for_description(method, name):
+    """The function a signature-losing decorator is hiding, or None.
+
+    `functools.wraps` exists to prevent this and is forgotten constantly — in lab code and in
+    vendor SDKs alike, where a method is wrapped for retries, a device lock, unit conversion or
+    logging. What introspection is handed then is the *wrapper*: `(*args, **kwargs)` and no
+    docstring. So the deck publishes "no parameters, accepts anything" for a method that really
+    takes two named ones, offers a free-text kwargs editor for it, and every argument typed
+    there comes back as "unexpected keyword argument" from the function underneath — an error
+    about a signature the operator was never shown.
+
+    The recovery is a guess, so it is kept narrow: the signature must be exactly
+    `(*args, **kwargs)` (the forwarding shape and nothing else), there must be no `__wrapped__`
+    (with one, `inspect.signature` has already followed it), and the closure must hold exactly
+    one function whose `__name__` is the name this method is published under. Two decorators
+    deep the inner name is the other wrapper's, so the guess is refused rather than risked.
+
+    The recovered function is only ever *described*. Calls still go through the wrapper, which
+    is there to do something.
+    """
+    if hasattr(method, "__wrapped__"):
+        return None
+    try:
+        kinds = [p.kind for p in inspect.signature(method).parameters.values()]
+    except (TypeError, ValueError):
+        return None
+    if kinds != [inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD]:
+        return None
+
+    matches = []
+    for cell in getattr(getattr(method, "__func__", method), "__closure__", None) or ():
+        try:
+            content = cell.cell_contents
+        except ValueError:  # an empty cell, in a recursive closure
+            continue
+        # Other cells are fine — a decorator closes over its retry count too. It is the single
+        # same-named function that identifies the thing being wrapped.
+        if inspect.isfunction(content) and getattr(content, "__name__", None) == name:
+            matches.append(content)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _advertise_signature(outer, inner):
+    """`outer`, wearing `inner`'s signature and docstring.
+
+    A bound method's `__signature__` cannot be assigned, so this is a shim in the same shape as
+    the property and positional-only ones: everything downstream introspects it, and everything
+    it is given goes to the wrapper unchanged.
+    """
+    try:
+        sig = inspect.signature(inner)
+    except (TypeError, ValueError):
+        return outer
+
+    if inspect.iscoroutinefunction(inner):
+        # The wrapper is an ordinary function returning a coroutine — awaiting its return value
+        # is what running the method actually means.
+        async def shim(*args, **kwargs):
+            return await outer(*args, **kwargs)
+    else:
+        def shim(*args, **kwargs):
+            return outer(*args, **kwargs)
+
+    shim.__name__ = getattr(inner, "__name__", "call")
+    shim.__doc__ = inner.__doc__
+    # `self` belongs to the unbound function that was recovered, not to this call.
+    shim.__signature__ = sig.replace(
+        parameters=[p for p in sig.parameters.values() if p.name != "self"])
+    return shim
+
+
+def _bind_positional_only(func):
+    """Wrap a method that has positional-only parameters so it can be called entirely by keyword.
+
+    Every call site invokes `method(**args)` — a step stores named arguments and nothing else —
+    so a `def read_channel(self, channel, /, gain=1.0)` blew up with "got some positional-only
+    arguments passed as keyword arguments" at run time, in the middle of a workflow. The
+    parameter is real and the caller does have to supply it (unlike a variadic, which is why
+    that one is dropped from the schema and this one is not), so the fix belongs here: pull the
+    marked names out of the keyword dict in order and pass them positionally.
+
+    Only the leading run of supplied names is moved. A gap means an argument is missing, and
+    Python's own error for that says so better than anything invented here.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        # No signature to read — nothing to rearrange, and the caller's keywords are all we have.
+        return func
+
+    names = [p.name for p in sig.parameters.values() if p.kind is inspect.Parameter.POSITIONAL_ONLY]
+    if not names:
+        return func
+
+    def split(kwargs):
+        positional = []
+        rest = dict(kwargs)
+        for n in names:
+            if n not in rest:
+                break
+            positional.append(rest.pop(n))
+        return positional, rest
+
+    if inspect.iscoroutinefunction(func):
+        async def shim(**kwargs):
+            positional, rest = split(kwargs)
+            return await func(*positional, **rest)
+    else:
+        def shim(**kwargs):
+            positional, rest = split(kwargs)
+            return func(*positional, **rest)
+
+    shim.__name__ = getattr(func, "__name__", "call")
+    shim.__doc__ = func.__doc__
+    # The advertised signature names them, so cast_arguments still finds each annotation and
+    # iscoroutinefunction still answers correctly (the async branch above keeps that true).
+    shim.__signature__ = sig.replace(parameters=[
+        p.replace(kind=inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        if p.kind is inspect.Parameter.POSITIONAL_ONLY else p
+        for p in sig.parameters.values()
+    ])
+    return shim
+
+
 def resolve_callable(instance, name):
     """Return a plain callable for a schema entry name.
 
@@ -425,7 +603,20 @@ def resolve_callable(instance, name):
         property_getter.__signature__ = inspect.Signature(parameters=[])
         return property_getter
 
-    return getattr(instance, name)
+    method = getattr(instance, name)
+
+    # The schema describes what a signature-losing decorator hides (see
+    # _unwrapped_for_description), so the callable has to advertise the same thing or
+    # cast_arguments would still see `(*args, **kwargs)` and cast nothing: the schema would
+    # promise a float and the driver would be handed "2.5". The call itself still goes through
+    # the wrapper — it is there to retry, lock or log, and skipping it would skip that.
+    inner = _unwrapped_for_description(method, name)
+    if inner is not None:
+        method = _advertise_signature(method, inner)
+
+    # Plain methods pass straight through unless they have positional-only parameters, which
+    # `method(**args)` cannot supply — see _bind_positional_only.
+    return _bind_positional_only(method)
 
 
 def inspect_device_module(device_instance):
@@ -465,11 +656,39 @@ def inspect_device_module(device_instance):
             continue
 
         try:
-            sig = inspect.signature(method)
-            docstring = inspect.getdoc(method)
+            # A decorator that forgot functools.wraps hands us its own (*args, **kwargs) instead
+            # of the method's signature; describe what it is hiding where that can be recovered
+            # safely. Only the description changes — resolve_callable still calls the wrapper.
+            described = _unwrapped_for_description(method, name) or method
+            docstring = inspect.getdoc(described)
+            try:
+                sig = inspect.signature(described)
+            except (TypeError, ValueError):
+                # A compiled entry point (a ctypes/pybind11 binding, a builtin) has no signature
+                # to read. Dropping the method — which is what letting this raise did — hid a
+                # capability the driver plainly exposes, with only a line on stderr to say so.
+                # "Parameters unknown" is exactly what accepts_kwargs already means downstream:
+                # nothing is listed, and nothing the caller sends is reported as a typo.
+                schema[name] = {
+                    "description": docstring or "",
+                    "parameters": {},
+                    "return_type": "Any",
+                    "return_info": None,
+                    "return_paths": [],
+                    "accepts_kwargs": True,
+                    # Distinct from a genuine **kwargs, which is a promise the signature makes.
+                    # Here nothing was read: the arguments may be keyword-able, or the method may
+                    # be a C function that takes positional arguments only — `min(x=1)` reports
+                    # "expected at least 1 argument, got 0" however much the caller typed in —
+                    # and this deck has no way to send positional arguments. The UI says so
+                    # rather than presenting the same confident row editor a **kwargs gets.
+                    "signature_unavailable": True,
+                    "is_coroutine": inspect.iscoroutinefunction(method),
+                }
+                continue
 
             # Real type objects where PEP 563 left strings — see _resolve_hints.
-            hints = _resolve_hints(method)
+            hints = _resolve_hints(described)
 
             params = {}
             # A **kwargs method takes arguments this schema cannot enumerate, so anything not
@@ -489,10 +708,34 @@ def inspect_device_module(device_instance):
                 # none, which is exactly what works. Keyed on kind, never on the name — the
                 # conventional args/kwargs spelling is incidental.
                 if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                    accepts_kwargs = accepts_kwargs or param.kind is inspect.Parameter.VAR_KEYWORD
+                    if param.kind is inspect.Parameter.VAR_KEYWORD:
+                        # ...unless the driver declared what they are (PEP 692). Then they are
+                        # ordinary parameters and the form can show them properly — see
+                        # _declared_kwargs_fields. accepts_kwargs stays false in that case: the
+                        # set is known, so an argument outside it is a typo again.
+                        declared = _declared_kwargs_fields(hints.get(param_name, param.annotation))
+                        if declared:
+                            for key, (key_annotation, key_required) in declared.items():
+                                info = extract_type_info(key_annotation)
+                                # A TypedDict key carries no value to default to; whether it may
+                                # be omitted is what its key sets say, not what extract_type_info
+                                # infers from an absent default.
+                                info["required"] = key_required
+                                params.setdefault(key, info)
+                        else:
+                            accepts_kwargs = True
                     continue
                 annotation = hints.get(param_name, param.annotation)
                 params[param_name] = extract_type_info(annotation, param.default)
+                if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                    # Unlike a variadic, this one *is* an argument the caller supplies — it just
+                    # cannot be supplied by name: `def read(self, channel, /)` called as
+                    # read(channel=1) raises TypeError, and every call site here invokes
+                    # `method(**args)`. So it stays in the schema and is marked instead:
+                    # resolve_callable binds it positionally at run time, and the Python preview
+                    # renders it without a keyword. Common in wrapped C drivers — zlib.crc32 is
+                    # `(data, value=0, /)`.
+                    params[param_name]["positional"] = True
                 
             return_type = "Any"
             return_info = None
@@ -518,7 +761,10 @@ def inspect_device_module(device_instance):
                 "return_info": return_info,
                 "return_paths": return_paths,
                 "accepts_kwargs": accepts_kwargs,
-                "is_coroutine": inspect.iscoroutinefunction(method)
+                # From the described function too: a sync wrapper around an async method returns
+                # a coroutine, and the queue has to know to await it rather than hand the
+                # coroutine object back as the step's result.
+                "is_coroutine": inspect.iscoroutinefunction(described)
             }
         except Exception as e:
             print(f"Failed to inspect method {name}: {e}")
@@ -562,16 +808,46 @@ def cast_value(annotation, val):
 def cast_arguments(method, args):
     if not args:
         return {}
-    sig = inspect.signature(method)
+    try:
+        sig = inspect.signature(method)
+    except (TypeError, ValueError):
+        # A compiled entry point with no readable signature (see inspect_device_module). There
+        # is nothing to cast against, so forward what the caller sent rather than refusing to
+        # run the method at all.
+        return {k: v for k, v in args.items() if not k.startswith('_')}
+
     casted_args = {}
+    var_keyword = None
     for param_name, param in sig.parameters.items():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            var_keyword = param
+            continue
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            # Not an argument a caller can name (see inspect_device_module) — a key matching its
+            # name is an ordinary keyword argument headed for **kwargs, not this.
+            continue
         if param_name in args:
             casted_args[param_name] = cast_value(param.annotation, args[param_name])
-            
-    # Also include any args that aren't in signature (kwargs etc)
-    # Exclude internal metadata arguments which start with '_'
+
+    # Anything the signature doesn't list is destined for **kwargs. It arrives as JSON — a form
+    # sends "2.5", not 2.5 — so a method that says what its **kwargs are gets the same casting a
+    # named parameter would. Two ways of saying it, and they have to agree with what
+    # inspect_device_module reported for the same annotation or the schema promises a type the
+    # call never applies: a declared TypedDict (PEP 692) casts each key by its own field type,
+    # and a blanket `**offsets: float` casts every one of them. An unannotated `**kwargs` has an
+    # empty annotation and cast_value passes the value through untouched.
+    # Internal metadata arguments, which start with '_', are never forwarded to a driver.
+    declared = _declared_kwargs_fields(var_keyword.annotation) if var_keyword is not None else None
     for k, v in args.items():
-        if k not in casted_args and not k.startswith('_'):
+        if k in casted_args or k.startswith('_'):
+            continue
+        if declared is not None:
+            # A key outside a declared set is passed through rather than dropped: the driver is
+            # the one entitled to reject it, and silently losing an argument is worse.
+            casted_args[k] = cast_value(declared[k][0], v) if k in declared else v
+        elif var_keyword is not None:
+            casted_args[k] = cast_value(var_keyword.annotation, v)
+        else:
             casted_args[k] = v
     return casted_args
 

@@ -146,7 +146,25 @@ export function generatePythonCode(
         return;
       }
 
-      const params = Object.entries(block.params).map(([k, v]) => `${k}=${formatValue(v)}`).join(', ');
+      // A positional-only parameter cannot be written as a keyword — `read_channel(channel=2)`
+      // on a `def read_channel(self, channel, /)` is a TypeError, so rendering it that way
+      // previews code that does not run. Introspection marks those parameters; emit the leading
+      // run of supplied ones by position, in the order the schema declares them, and the rest by
+      // name. The run stops at the first one left empty, for the same reason execution does:
+      // after a gap, position no longer identifies anything.
+      const schemaParams: Record<string, any> = block.schema?.parameters || {};
+      const positionalNames: string[] = [];
+      for (const [name, info] of Object.entries(schemaParams)) {
+        if (!(info as any)?.positional) continue;
+        if (!(name in block.params)) break;
+        positionalNames.push(name);
+      }
+      const params = [
+        ...positionalNames.map(k => formatValue(block.params[k])),
+        ...Object.entries(block.params)
+          .filter(([k]) => !positionalNames.includes(k))
+          .map(([k, v]) => `${k}=${formatValue(v)}`),
+      ].join(', ');
       emitAssignment(`${block.instrument}.${block.method}(${params})`);
     });
     return body;

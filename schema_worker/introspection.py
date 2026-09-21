@@ -144,6 +144,60 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
     return param_data
 
 
+def _unwrap_requiredness(annotation):
+    """`NotRequired[bool]` / `Required[int]` describe whether a TypedDict key must be present,
+    not what type it is. Required-ness comes from the TypedDict's own key sets, so strip the
+    wrapper and keep the type underneath — without this a declared option renders as
+    "NotRequired[bool]" free text instead of a True/False dropdown."""
+    if getattr(get_origin(annotation), "__name__", "") in ("NotRequired", "Required"):
+        args = get_args(annotation)
+        if args:
+            return args[0]
+    return annotation
+
+
+def _declared_kwargs_fields(annotation):
+    """The keyword arguments a `**kwargs` annotation *declares*, as {name: (annotation, required)}.
+
+    PEP 692 lets a driver say exactly what its `**kwargs` accepts:
+
+        class MeasureOptions(TypedDict):
+            slit_um: int
+            lamp: NotRequired[bool]
+
+        def measure(self, wavelength_nm: float, **options: Unpack[MeasureOptions]): ...
+
+    That is the difference between "arguments this schema cannot enumerate" and "arguments
+    nobody bothered to write down". When they are declared, each one becomes an ordinary listed
+    parameter — typed field, dropdown, default, casting, and a real typo check — instead of a
+    free-text row the scientist has to know the spelling of. Returns None when the annotation
+    says nothing, which is the ordinary `**kwargs` case.
+
+    A bare `**options: MeasureOptions` is read the same way. It is not what PEP 692 specifies
+    (that form means "every value is a MeasureOptions"), but it is a common enough slip that
+    guessing the useful reading beats rendering nothing.
+    """
+    if getattr(get_origin(annotation), "__name__", "") == "Unpack":
+        args = get_args(annotation)
+        annotation = args[0] if args else None
+
+    # Detected by the key sets a TypedDict always carries rather than typing.is_typeddict(),
+    # which does not recognise a typing_extensions TypedDict on every runtime.
+    required_keys = getattr(annotation, "__required_keys__", None)
+    if required_keys is None or not hasattr(annotation, "__annotations__"):
+        return None
+
+    try:
+        hints = typing.get_type_hints(annotation)
+    except Exception:
+        hints = dict(getattr(annotation, "__annotations__", {}))
+
+    return {
+        key: (_unwrap_requiredness(hint), key in required_keys)
+        for key, hint in hints.items()
+    }
+
+
 def _resolve_field_type(owner, field_name, declared):
     """dataclasses.fields() hands back the *declared* annotation, which under PEP 563 is a
     string. Resolve it against the owning class where possible so nested dataclasses/enums
@@ -365,6 +419,48 @@ def describe_property(name, prop):
     return entries
 
 
+def _unwrapped_for_description(method, name):
+    """The function a signature-losing decorator is hiding, or None.
+
+    `functools.wraps` exists to prevent this and is forgotten constantly — in lab code and in
+    vendor SDKs alike, where a method is wrapped for retries, a device lock, unit conversion or
+    logging. What introspection is handed then is the *wrapper*: `(*args, **kwargs)` and no
+    docstring. So the deck publishes "no parameters, accepts anything" for a method that really
+    takes two named ones, offers a free-text kwargs editor for it, and every argument typed
+    there comes back as "unexpected keyword argument" from the function underneath — an error
+    about a signature the operator was never shown.
+
+    The recovery is a guess, so it is kept narrow: the signature must be exactly
+    `(*args, **kwargs)` (the forwarding shape and nothing else), there must be no `__wrapped__`
+    (with one, `inspect.signature` has already followed it), and the closure must hold exactly
+    one function whose `__name__` is the name this method is published under. Two decorators
+    deep the inner name is the other wrapper's, so the guess is refused rather than risked.
+
+    The recovered function is only ever *described*. Calls still go through the wrapper, which
+    is there to do something.
+    """
+    if hasattr(method, "__wrapped__"):
+        return None
+    try:
+        kinds = [p.kind for p in inspect.signature(method).parameters.values()]
+    except (TypeError, ValueError):
+        return None
+    if kinds != [inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD]:
+        return None
+
+    matches = []
+    for cell in getattr(getattr(method, "__func__", method), "__closure__", None) or ():
+        try:
+            content = cell.cell_contents
+        except ValueError:  # an empty cell, in a recursive closure
+            continue
+        # Other cells are fine — a decorator closes over its retry count too. It is the single
+        # same-named function that identifies the thing being wrapped.
+        if inspect.isfunction(content) and getattr(content, "__name__", None) == name:
+            matches.append(content)
+    return matches[0] if len(matches) == 1 else None
+
+
 def inspect_class(cls):
     """
     Inspects a Python class and returns a JSON-serializable 
@@ -388,15 +484,41 @@ def inspect_class(cls):
             continue
             
         try:
-            sig = inspect.signature(method)
-            docstring = inspect.getdoc(method)
+            # A decorator that forgot functools.wraps hands us its own (*args, **kwargs) instead
+            # of the method's signature — describe what it hides where that is recoverable.
+            described = _unwrapped_for_description(method, name) or method
+            docstring = inspect.getdoc(described)
+            try:
+                sig = inspect.signature(described)
+            except (TypeError, ValueError):
+                # A compiled entry point (a ctypes/pybind11 binding, a builtin) has no signature
+                # to read, and dropping it hid a capability the class plainly exposes.
+                # "Parameters unknown" is what accepts_kwargs already means downstream: nothing
+                # listed, and nothing the caller sends reported as a typo.
+                schema[name] = {
+                    "description": docstring or "",
+                    "parameters": {},
+                    "return_type": "Any",
+                    "return_info": None,
+                    "return_paths": [],
+                    "accepts_kwargs": True,
+                    # Distinct from a genuine **kwargs, which is a promise the signature makes.
+                    # Here nothing was read: the arguments may be keyword-able, or the method may
+                    # be a C function that takes positional arguments only — `min(x=1)` reports
+                    # "expected at least 1 argument, got 0" however much the caller typed in —
+                    # and this deck has no way to send positional arguments. The UI says so
+                    # rather than presenting the same confident row editor a **kwargs gets.
+                    "signature_unavailable": True,
+                    "is_coroutine": inspect.iscoroutinefunction(method),
+                }
+                continue
 
             # Under PEP 563 (`from __future__ import annotations`, increasingly common) every
             # annotation arrives as a *string*, so the Enum, bool and dataclass checks below all
             # silently fail and a dropdown degrades into a free-text box. Resolve the real objects
             # first where we can; if a forward reference cannot be resolved, fall back to the raw
             # annotations rather than losing the method.
-            hints = _resolve_hints(method)
+            hints = _resolve_hints(described)
 
             params = {}
             # A **kwargs method takes arguments this schema cannot enumerate, so anything not
@@ -416,10 +538,32 @@ def inspect_class(cls):
                 # none, which is exactly what works. Keyed on kind, never on the name — the
                 # conventional args/kwargs spelling is incidental.
                 if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                    accepts_kwargs = accepts_kwargs or param.kind is inspect.Parameter.VAR_KEYWORD
+                    if param.kind is inspect.Parameter.VAR_KEYWORD:
+                        # ...unless the driver declared what they are (PEP 692). Then they are
+                        # ordinary parameters and the form can show them properly — see
+                        # _declared_kwargs_fields. accepts_kwargs stays false in that case: the
+                        # set is known, so an argument outside it is a typo again.
+                        declared = _declared_kwargs_fields(hints.get(param_name, param.annotation))
+                        if declared:
+                            for key, (key_annotation, key_required) in declared.items():
+                                info = extract_type_info(key_annotation)
+                                # A TypedDict key carries no value to default to; whether it may
+                                # be omitted is what its key sets say, not what extract_type_info
+                                # infers from an absent default.
+                                info["required"] = key_required
+                                params.setdefault(key, info)
+                        else:
+                            accepts_kwargs = True
                     continue
                 annotation = hints.get(param_name, param.annotation)
                 params[param_name] = extract_type_info(annotation, param.default)
+                if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                    # Unlike a variadic, this one *is* an argument the caller supplies — it just
+                    # cannot be supplied by name, and everything downstream calls with keywords
+                    # only. Marked rather than dropped: edge_server's resolve_callable binds it
+                    # positionally at run time and the Python preview renders it without a
+                    # keyword. Common in wrapped C drivers — zlib.crc32 is `(data, value=0, /)`.
+                    params[param_name]["positional"] = True
                 
             return_type = "Any"
             return_info = None
@@ -439,7 +583,7 @@ def inspect_class(cls):
                 "return_info": return_info,
                 "return_paths": return_paths,
                 "accepts_kwargs": accepts_kwargs,
-                "is_coroutine": inspect.iscoroutinefunction(method)
+                "is_coroutine": inspect.iscoroutinefunction(described)
             }
         except Exception as e:
             print(f"Failed to inspect method {name} of class {cls.__name__}: {e}")

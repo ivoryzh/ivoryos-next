@@ -454,6 +454,12 @@ async def startup_event():
             "class": instance.__class__.__name__
         }
         print(f"Introspected module '{name}': {list(app.state.instrument_schemas[name].keys())}")
+
+    # The one moment the deck's shape can change: nothing writes instrument_schemas after this.
+    # Saved workflows are checked against this fingerprint, so a verdict only goes stale when the
+    # workflow changes (its body_hash) or the server restarts against different drivers.
+    from .compatibility import schema_fingerprint
+    app.state.schema_fingerprint = schema_fingerprint(app.state.instrument_schemas)
         
     try:
         import json
@@ -838,6 +844,9 @@ def _workflow_summary(name):
     }
 
 
+from . import compatibility
+
+
 @app.get("/api/workflows")
 def list_workflows():
     try:
@@ -859,6 +868,16 @@ def list_workflows():
                 other for other in names
                 if other != name and name in wf.link_targets(bodies.get(other) or {})
             ]
+            # Still runnable against the drivers currently connected? The bodies are already in
+            # hand for linked_by, and the verdict is cached per body_hash + deck fingerprint, so
+            # this costs nothing on a listing where neither has changed — see compatibility.py.
+            summary["compatibility"] = compatibility.check(
+                name,
+                bodies.get(name) or {},
+                getattr(app.state, "instrument_schemas", {}),
+                getattr(app.state, "schema_fingerprint", ""),
+                names,
+            )
             summaries.append(summary)
         return {"workflows": summaries, "tags": wf.all_tags(WORKFLOWS_DIR)}
     except Exception as e:

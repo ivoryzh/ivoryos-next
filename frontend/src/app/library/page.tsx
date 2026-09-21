@@ -22,6 +22,10 @@ type WorkflowItem = {
   // "calibration"), and because a folder would be a second identity for something whose name is
   // already its identity — moving one would break every pinned reference to it.
   tags?: string[];
+  // Whether this still runs against the drivers currently connected. Computed server-side by the
+  // same validator the agent uses, cached per body_hash + deck fingerprint — so it is already in
+  // the listing response rather than something this page has to ask for. See compatibility.py.
+  compatibility?: { status: 'ok' | 'broken'; error_count: number; errors: { where?: string; message: string; hint?: string }[] };
 };
 
 // Mirrors MAX_TAGS / MAX_TAG_LENGTH in edge_server/ivoryos_edge/workflows.py. Enforced here too
@@ -66,6 +70,45 @@ function LinkLine({ names, tone, lead, tooltipTitle }: {
         <p className="font-semibold mb-1 opacity-70">{tooltipTitle}</p>
         <ul className="space-y-0.5">
           {names.map(n => <li key={n} className="break-words">{n}</li>)}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A workflow that no longer fits the deck.
+ *
+ * Stored steps name an instrument, a method and arguments, and none of it is resolved until the
+ * workflow runs — so a driver edit (a renamed parameter, a dropped method, an instrument swapped
+ * for a newer model) leaves every affected workflow looking perfectly fine until someone queues
+ * one and a reaction fails four steps in. This is that failure, moved to where the decision to
+ * run is actually made.
+ *
+ * Red rather than amber, and the count rather than the first message: the count is what says how
+ * much work this is, and the messages are long enough that one of them inline would push the rest
+ * of the card out. The tooltip carries them, with the step each one is about.
+ */
+function IncompatibleLine({ compatibility }: { compatibility: NonNullable<WorkflowItem['compatibility']> }) {
+  const { error_count: count, errors } = compatibility;
+  return (
+    <div className="group/compat relative mt-3 flex items-center gap-1.5 text-[11px] rounded-lg px-2 py-1.5 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/40">
+      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">
+        Won&apos;t run on this deck — <strong>{count === 1 ? '1 problem' : `${count} problems`}</strong>
+      </span>
+      <div className="hidden group-hover/compat:block absolute left-0 bottom-full mb-1.5 z-50 w-max max-w-[300px] p-2.5 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-[11px] shadow-xl pointer-events-none">
+        <p className="font-semibold mb-1 opacity-70">Checked against the connected instruments:</p>
+        <ul className="space-y-1">
+          {errors.map((e: { where?: string; message: string }, i: number) => (
+            <li key={i} className="break-words">
+              {e.where ? <span className="font-mono opacity-60">{e.where} </span> : null}
+              {e.message}
+            </li>
+          ))}
+          {count > errors.length && (
+            <li className="opacity-60">…and {count - errors.length} more. Open it in the Designer to see every step.</li>
+          )}
         </ul>
       </div>
     </div>
@@ -470,6 +513,9 @@ export default function LibraryPage() {
                             <p className="text-sm text-gray-500 dark:text-gray-400 mt-2 line-clamp-2">{workflow.description}</p>
                         ) : (
                             <p className="text-xs text-gray-400 mt-2 italic">No description provided.</p>
+                        )}
+                        {workflow.compatibility?.status === 'broken' && (
+                          <IncompatibleLine compatibility={workflow.compatibility} />
                         )}
                         {/* The blast radius of editing this workflow: these resolve to it at run
                             time and change with it. Copies never appear here, because an inlined

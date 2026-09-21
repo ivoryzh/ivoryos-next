@@ -19,6 +19,7 @@ import {
   type ReuseMode,
 } from './workflowBody';
 import { confirmDialog, notify, promptDialog } from './dialogs';
+import { ExtraArguments } from './ExtraArguments';
 import { WorkflowPeek, type WorkflowPeekTarget } from './WorkflowPeek';
 import { WorkflowDiff } from './WorkflowDiff';
 
@@ -511,6 +512,23 @@ export default function WorkflowEditor({
       }
       return { ...block, params: { ...block.params, [param]: parsedValue } };
     });
+  };
+
+  /** Argument names already given to this same method elsewhere in the workflow.
+   *
+   *  The weakness of a free-text row is that the scientist has to know the option's spelling;
+   *  a vendor option used once is almost always used again, so the second time it is a pick
+   *  from the list rather than something to remember. (A driver that declares its options as a
+   *  TypedDict skips all of this and gets real fields.) */
+  const kwargNamesUsedFor = (instrument: string, method: string, schemaNames: Set<string>): string[] => {
+    const names = new Set<string>();
+    [prepSequence, sequence, cleanupSequence].forEach(list => (list || []).forEach(b => {
+      if (b.instrument !== instrument || b.method !== method) return;
+      Object.keys(b.params || {}).forEach(k => {
+        if (!schemaNames.has(k) && !k.startsWith('_')) names.add(k);
+      });
+    }));
+    return Array.from(names).sort();
   };
 
   const handleReturnVarChange = (blockId: string, value: string, listId: string) => {
@@ -1306,11 +1324,26 @@ export default function WorkflowEditor({
                   // warning triangle is reserved for something actually broken now: a missing
                   // required parameter, a wrong type, or a method that no longer exists.
 
+                  // A **kwargs method takes arguments this schema cannot list, so the ones this
+                  // step carries are not orphans — they are the point. They get their own
+                  // name/value editor below (where a name can be changed or a new one added)
+                  // instead of a fixed field each, and are kept out of the orphan sweep so they
+                  // are not rendered twice.
+                  const acceptsKwargs = !isFlowBlock && !!block.schema?.accepts_kwargs;
+                  const schemaParamNames = new Set(Object.keys(effectiveSchema || {}));
+                  const extraArgs: Record<string, any> = {};
+                  if (acceptsKwargs && block.params) {
+                    for (const [k, v] of Object.entries(block.params)) {
+                      if (!schemaParamNames.has(k) && !k.startsWith('_')) extraArgs[k] = v;
+                    }
+                  }
+
                   // Any argument the step carries that the resolved schema doesn't mention gets a
                   // field too. Hiding it is what let `test: 1` sit on a block invisibly, still
                   // being substituted into the run with no way to see or clear it.
                   if (effectiveSchema && block.params) {
-                    const orphaned = Object.keys(block.params).filter(k => effectiveSchema[k] === undefined);
+                    const orphaned = Object.keys(block.params).filter(
+                      k => effectiveSchema[k] === undefined && !(k in extraArgs));
                     if (orphaned.length) {
                       effectiveSchema = { ...effectiveSchema };
                       orphaned.forEach(k => { effectiveSchema[k] = { type: 'unknown', required: false, orphaned: true }; });
@@ -1331,6 +1364,9 @@ export default function WorkflowEditor({
                     ? allParams.filter(p => p !== 'condition' && p !== 'duration_seconds' && p !== 'prompt' && p !== 'variable_name' && p !== 'message')
                     : allParams;
                   const hasParams = visibleParams.length > 0;
+                  // `configure(**settings)` lists no parameters and still has something to fill
+                  // in, so expandability can't be read off the parameter count alone.
+                  const hasBody = hasParams || acceptsKwargs;
 
                   // Everything this step's return value can be pointed at. A structured result
                   // (dataclass/Pydantic model, or anything nested) gets its own Outputs panel
@@ -1510,8 +1546,8 @@ export default function WorkflowEditor({
 
                                   {/* Top Row: Info & Controls */}
                                   <div
-                                    onClick={() => !isFlowBlock && (hasParams || usesOutputPanel) && toggleExpand(block.id, listId)}
-                                    className={`px-3 py-1.5 flex items-center justify-between ${!isFlowBlock && (hasParams || usesOutputPanel) ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
+                                    onClick={() => !isFlowBlock && (hasBody || usesOutputPanel) && toggleExpand(block.id, listId)}
+                                    className={`px-3 py-1.5 flex items-center justify-between ${!isFlowBlock && (hasBody || usesOutputPanel) ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
                                   >
                                     <div className="flex items-center min-w-0 flex-1">
                                       {/* Only in select mode, so the cards stay uncluttered the rest
@@ -1684,16 +1720,26 @@ export default function WorkflowEditor({
                                   </div>
                                   </div>
 
+                                  {/* What is wrong with this step is not something to click for.
+                                      These used to live inside the expandable body, and a block is
+                                      only expandable when it has parameters — so on a method that
+                                      takes none ("Method 'x.y' no longer exists" being the case
+                                      that matters most) the message had nowhere to appear at all,
+                                      leaving a warning triangle whose explanation existed only in
+                                      a hover tooltip. */}
+                                  {!isFlowBlock && blockWarnings.length > 0 && (
+                                    <div className="px-3 pb-2 pt-0">
+                                      <div className="bg-amber-50/50 dark:bg-amber-900/10 border border-amber-200/50 dark:border-amber-500/20 rounded text-amber-700 dark:text-amber-400 text-[10px] px-2 py-1.5 font-medium">
+                                          <ul className="list-disc pl-4 space-y-0.5">
+                                              {blockWarnings.map((w, idx) => <li key={idx}>{w}</li>)}
+                                          </ul>
+                                      </div>
+                                    </div>
+                                  )}
+
                                   {/* Bottom Row: Params */}
                                   {isExpanded && !isFlowBlock && (
                                     <div className="px-3 pb-2 pt-0 flex flex-col space-y-2">
-                                      {blockWarnings.length > 0 && (
-                                        <div className="bg-amber-50/50 dark:bg-amber-900/10 border border-amber-200/50 dark:border-amber-500/20 rounded text-amber-700 dark:text-amber-400 text-[10px] px-2 py-1.5 font-medium">
-                                            <ul className="list-disc pl-4 space-y-0.5">
-                                                {blockWarnings.map((w, idx) => <li key={idx}>{w}</li>)}
-                                            </ul>
-                                        </div>
-                                      )}
                                       {(() => {
                                         if (!hasParams) return null;
                                         return (
@@ -1766,6 +1812,28 @@ export default function WorkflowEditor({
                                         </div>
                                         );
                                       })()}
+
+                                      {acceptsKwargs && (
+                                        <div className="p-2 border border-gray-200 dark:border-white/10 rounded-lg bg-white dark:bg-[#1a1a1a]">
+                                          <ExtraArguments
+                                            idPrefix={`extra-${listId}-${block.id}`}
+                                            value={extraArgs}
+                                            unknownSignature={!!block.schema?.signature_unavailable}
+                                            // Names already used for this same method elsewhere in the
+                                            // workflow: the second time an option is needed it is a pick
+                                            // rather than a spelling the scientist has to remember.
+                                            suggestions={kwargNamesUsedFor(block.instrument, block.method, schemaParamNames)}
+                                            valueSuggestions={availableVars.map(v => ({ value: `#${v}`, label: 'variable from an earlier step' }))}
+                                            onChange={(next) => updateBlock(listId, block.id, b => {
+                                              const kept: Record<string, any> = {};
+                                              for (const [k, v] of Object.entries(b.params || {})) {
+                                                if (schemaParamNames.has(k) || k.startsWith('_')) kept[k] = v;
+                                              }
+                                              return { ...b, params: { ...kept, ...next } };
+                                            })}
+                                          />
+                                        </div>
+                                      )}
 
                                       {/* Outputs: one variable per field of a structured return.
                                           The whole point of naming fields individually is that a

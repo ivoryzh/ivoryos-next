@@ -4,7 +4,7 @@ import { API_BASE } from '@/config';
 import { useState, useEffect, useRef } from 'react';
 import { Sun, Moon, Info, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { ResultView, confirmDialog } from '@ivoryos/shared-ui';
+import { ExtraArguments, ResultView, confirmDialog } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
 type LogEntry = {
@@ -153,6 +153,16 @@ export default function InstrumentsPage() {
     };
 
     walk(methodSchema.parameters, rawArgs, '', argsToSubmit);
+
+    // `walk` only visits what the schema lists, so a **kwargs method's extra arguments would be
+    // collected by the form and then dropped on the way out. They are exactly the ones the
+    // schema cannot list, so they are taken straight from the form values.
+    if (methodSchema.accepts_kwargs) {
+      for (const [name, val] of Object.entries(rawArgs)) {
+        if (name.startsWith('_') || methodSchema.parameters?.[name] !== undefined) continue;
+        if (val !== undefined && val !== '') argsToSubmit[name] = val;
+      }
+    }
 
     if (missing.length > 0) {
       // Marked on the fields themselves rather than announced. alert() is a silent no-op in the
@@ -447,6 +457,29 @@ export default function InstrumentsPage() {
 
                             return Object.entries(methodData.parameters).map(([param, pData]: [string, any]) => renderParamField(pData, param, param));
                           })()}
+
+                          {/* A **kwargs method's arguments cannot be generated from the schema —
+                              that is what accepts_kwargs means — so they are typed in by name.
+                              Without this the only way to call `configure(**settings)` from here
+                              was with nothing at all. */}
+                          {methodData.accepts_kwargs && (
+                            <ExtraArguments
+                              idPrefix={`extra-${key}`}
+                              layout="stacked"
+                              unknownSignature={!!methodData.signature_unavailable}
+                              value={Object.fromEntries(
+                                Object.entries(formValues[key] || {})
+                                  .filter(([name]) => !name.startsWith('_') && methodData.parameters?.[name] === undefined)
+                              )}
+                              onChange={(next) => setFormValues(prev => {
+                                const listed = Object.fromEntries(
+                                  Object.entries(prev[key] || {})
+                                    .filter(([name]) => name.startsWith('_') || methodData.parameters?.[name] !== undefined)
+                                );
+                                return { ...prev, [key]: { ...listed, ...next } };
+                              })}
+                            />
+                          )}
                         </div>
 
                         <div className="mt-auto">

@@ -28,6 +28,7 @@ const fs = require('fs');
 // two copies that used to exist disagreed.
 const { TERMINAL_TASK_STATUSES, computeAdvance } = require('./src/lib/dag.js');
 const { getStore, resolveBrokerUrl } = require('./src/lib/store');
+const { startEmbeddedBroker } = require('./src/lib/embedded-broker.js');
 
 let store;
 try {
@@ -62,7 +63,24 @@ function buildMqttOptions() {
 }
 
 const { url, options } = buildMqttOptions();
-const client = mqtt.connect(url, options);
+// `manualConnect` so the embedded broker (if this process is going to be the broker) is listening
+// before the first connection attempt. Without it the client races its own broker, fails once,
+// and greets a brand new user with an MQTT error that resolves itself a second later — which is
+// exactly the kind of noise that makes a working setup look broken.
+const client = mqtt.connect(url, { ...options, manualConnect: true });
+
+// Resolves on a later tick than this module body, so every handler below is registered before the
+// connection is opened. Held for the shutdown path.
+let embeddedBroker = null;
+startEmbeddedBroker(url).then((result) => {
+    if (result.started) {
+        embeddedBroker = result;
+        console.log(`[Daemon] Embedded broker listening on 0.0.0.0:${result.port} — no mosquitto needed.`);
+    } else {
+        console.log(`[Daemon] Using external broker (${result.reason}).`);
+    }
+    client.connect();
+});
 // Declared here, not beside watchBrokerConfig below: writeHeartbeat() runs at startup and reads
 // it, and a `let` further down would still be in its temporal dead zone at that point.
 let currentBrokerUrl = url;
@@ -412,6 +430,10 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
             await store.setDaemonHeartbeat({ brokerConnected: false, brokerUrl: url, mode: MODE, storeLocation: store.location });
         } catch { /* best effort */ }
         try { client.end(true); } catch { /* already closed */ }
+        // Released before exit so a restart does not find its own port still held: the socket
+        // would linger just long enough for the next run to decide an external broker owns 1883
+        // and quietly connect to nothing.
+        try { if (embeddedBroker) await embeddedBroker.close(); } catch { /* already down */ }
         try { store.close(); } catch { /* already closed */ }
         process.exit(0);
     });

@@ -162,3 +162,65 @@ test('a graph that got past validation stalls loudly rather than hanging', () =>
   assert.strictEqual(advanced.stalled, true);
   assert.strictEqual(advanced.runStatus, 'error');
 });
+
+// --- parameter completeness -------------------------------------------------------------------
+// An empty box on a dispatched step sends "" to real hardware as if it were a value, and an
+// unsubstituted "#temperature" sends that string. Both used to pass validation entirely.
+
+// A step whose schema declares params, so "is this box empty" has something to be empty.
+const withParams = (id, params, schemaParams, dev = 'dev1') => ({
+  id,
+  data: {
+    targetDeviceId: dev,
+    block: {
+      instrument: 'Library Workflows',
+      method: 'Suzuki coupling screen',
+      params,
+      schema: { parameters: schemaParams || Object.fromEntries(Object.keys(params).map(k => [k, { type: 'str', required: true }])) },
+    },
+  },
+});
+
+test('a step with an empty parameter box is refused', () => {
+  const nodes = [start, withParams('A', { temperature_c: '65', vial_id: '' })];
+  const problems = dag.validateGraph(nodes, [e('start_node', 'A')]);
+  assert.ok(codes(problems).includes('empty_param'));
+  assert.match(problems.find(p => p.code === 'empty_param').message, /vial_id/);
+  // Only the blank one is named — a filled box next to it is not the problem.
+  assert.doesNotMatch(problems.find(p => p.code === 'empty_param').message, /temperature_c/);
+});
+
+test('whitespace is empty, and a schema default is not', () => {
+  const blank = [start, withParams('A', { vial_id: '   ' })];
+  assert.ok(codes(dag.validateGraph(blank, [e('start_node', 'A')])).includes('empty_param'));
+
+  // params leaves it unset, but the schema supplies a real default: the box shows a value, the
+  // edge applies one, and refusing to run here would be wrong.
+  const defaulted = [start, withParams('A', {}, { vial_id: { type: 'str', default: 'v1' } })];
+  assert.deepStrictEqual(dag.validateGraph(defaulted, [e('start_node', 'A')]), []);
+});
+
+test('a #placeholder is a value while authoring, but never at dispatch', () => {
+  const nodes = [start, withParams('A', { temperature_c: '#temp' })];
+  const edges = [e('start_node', 'A')];
+
+  // The canvas validates before substituting, where #temp is the normal authored state.
+  assert.deepStrictEqual(dag.validateGraph(nodes, edges), []);
+
+  // planRun is about to write run_tasks, so the same graph is refused there.
+  const { errors, tasks } = dag.planRun('r', nodes, edges);
+  assert.ok(codes(errors).includes('unresolved_placeholder'));
+  assert.deepStrictEqual(tasks, [], 'nothing is planned when a placeholder survives');
+});
+
+test('Flow Control params are not policed — it is never dispatched', () => {
+  // A blank field on a contracted-out node cannot reach an instrument, and treating it as an
+  // error would reject graphs that run correctly today.
+  const sleep = { id: 's1', data: { targetDeviceId: '', block: {
+    instrument: 'Flow Control', method: 'Sleep', params: { duration: '' },
+    schema: { parameters: { duration: { type: 'str' } } },
+  } } };
+  const nodes = [start, sleep, inst('A')];
+  const edges = [e('start_node', 's1'), e('s1', 'A')];
+  assert.deepStrictEqual(dag.validateGraph(nodes, edges), []);
+});

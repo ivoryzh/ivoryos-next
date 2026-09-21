@@ -236,6 +236,28 @@ function createSqliteStore(filePath) {
       return res.changes;
     },
 
+    async countActiveDeviceTasks(deviceId, activeStatuses) {
+      // The caller owns the status list (see dag.js) so this stays the one place that knows how
+      // to query, and never a second place that knows what "active" means.
+      const marks = activeStatuses.map(() => '?').join(',');
+      const row = get(
+        `select count(*) as c from run_tasks where device_id = ? and status in (${marks})`,
+        deviceId, ...activeStatuses,
+      );
+      return row ? row.c : 0;
+    },
+
+    // Removes the device and the rows that exist only to serve it: its mirrored sequence library
+    // and any queued pushes, both of which are caches of device state and meaningless once it is
+    // gone. `run_tasks` is deliberately left alone — those are history, and a finished run that
+    // named a since-removed device is still a truthful record of what actually ran.
+    async deleteDevice(deviceId) {
+      run('delete from edge_sequences where device_id = ?', deviceId);
+      run('delete from sequence_pushes where device_id = ?', deviceId);
+      const res = run('delete from devices where id = ?', deviceId);
+      return res.changes;
+    },
+
     // --- edge sequences ------------------------------------------------------------------
     async upsertSequence({ device_id, name, description, body }) {
       run(

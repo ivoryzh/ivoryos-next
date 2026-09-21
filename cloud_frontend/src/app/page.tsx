@@ -5,34 +5,46 @@ import { Play, AlertTriangle, RefreshCw, Download, Save, FilePlus2 } from 'lucid
 import { useNodesState, useEdgesState, addEdge, Connection, Edge, Node } from '@xyflow/react';
 import CloudWorkflowEditor from '@/components/CloudWorkflowEditor';
 import { LIBRARY_INSTRUMENT, scanDynamicParams } from '@ivoryos/shared-ui';
-import { validateGraph } from '@/lib/dag';
+import { validateGraph, isDynamicValue, effectiveParamValue, blankParamsOf } from '@/lib/dag';
+import RunConfigPanel, { ConfigurableNode } from '@/components/RunConfigPanel';
 
 // A param written "#name" is a placeholder filled in at run time — the same convention the edge
 // Designer uses (scanDynamicParams). Parallel branches on this canvas are usually one protocol
 // repeated over different inputs, so those values belong to the run rather than baked into the
 // graph, and the same graph can be re-run with different ones.
 const DYNAMIC_PREFIX = '#';
-const isDynamic = (v: unknown) => typeof v === 'string' && v.trim().startsWith(DYNAMIC_PREFIX);
 
-/** Every distinct #name on the canvas, with the nodes referencing it. */
-function collectDynamicParams(nodes: any[]): Record<string, string[]> {
-  const found: Record<string, string[]> = {};
-  for (const n of nodes) {
-    const params = n?.data?.block?.params || {};
-    for (const v of Object.values(params)) {
-      if (!isDynamic(v)) continue;
-      const name = String(v).trim().slice(1);
-      if (!name) continue; // a bare '#' is reported separately
-      if (!found[name]) found[name] = [];
-      if (!found[name].includes(n.id)) found[name].push(n.id);
-    }
+/**
+ * The distinct #names ONE node references, in the order its params declare them.
+ *
+ * Deliberately per node rather than per canvas. Two steps both written `#temperature` are two
+ * screens of the same protocol, and running the same sequence twice at two temperatures is the
+ * reason to put it on the canvas twice. Collecting these globally by name — which is what the
+ * first pass did — quietly forces the two to be equal, with nothing on the graph to show for it.
+ */
+function dynamicVarsOf(node: any): string[] {
+  const block = node?.data?.block || {};
+  const found: string[] = [];
+  for (const key of Object.keys(block.schema?.parameters || {})) {
+    const value = effectiveParamValue(block, key);
+    if (!isDynamicValue(value)) continue;
+    const name = String(value).trim().slice(1);
+    if (!name) continue; // a bare '#' names nothing and is reported separately
+    if (!found.includes(name)) found.push(name);
   }
   return found;
 }
 
-const hasBareHash = (nodes: any[]) => nodes.some(n =>
-  Object.values(n?.data?.block?.params || {})
-    .some(v => typeof v === 'string' && v.trim() === DYNAMIC_PREFIX));
+/** Values supplied for this node's #names. Lives on the node, so Save/Export/Load carry it. */
+const configOf = (node: any): Record<string, string> => (node?.data?.config || {});
+
+const isBlankValue = (v: unknown) => !String(v ?? '').trim();
+
+const hasBareHash = (nodes: any[]) => nodes.some((n) => {
+  const block = n?.data?.block || {};
+  return Object.keys(block.schema?.parameters || {})
+    .some(k => String(effectiveParamValue(block, k) ?? '').trim() === DYNAMIC_PREFIX);
+});
 
 export default function CloudDesignerPage() {
   const [statusData, setStatusData] = useState<any>({ instruments: {} });
@@ -85,8 +97,13 @@ export default function CloudDesignerPage() {
   
   const [isExecuting, setIsExecuting] = useState(false);
   const [health, setHealth] = useState<any>(null);
-  // Values typed for each #name before a run. Kept out of the graph so the canvas stays reusable.
-  const [dynamicValues, setDynamicValues] = useState<Record<string, string>>({});
+  // Open when a run needs #placeholder values supplied. Per-node values themselves live on the
+  // nodes (`data.config`), so they are saved, exported and reloaded with the workflow rather than
+  // retyped every session.
+  const [showConfigPanel, setShowConfigPanel] = useState(false);
+  // Nodes the last run attempt rejected, so the canvas can point at them instead of leaving a
+  // list of ids in an alert for someone to match up by eye.
+  const [invalidNodeIds, setInvalidNodeIds] = useState<string[]>([]);
 
   // Polled alongside the device list. "0 Edges Online" used to be the only signal, and it looked
   // identical whether the backend was down or the lab was simply idle — this is what separates
@@ -307,6 +324,54 @@ export default function CloudDesignerPage() {
     alert(`Workflow '${currentWorkflowName}' saved to Cloud Library!`);
   };
 
+  /** Every node that still needs a value typed for at least one of its #names. */
+  const nodesNeedingConfig = (list: any[]) => list.filter((n) => {
+    const vars = dynamicVarsOf(n);
+    if (!vars.length) return false;
+    const cfg = configOf(n);
+    return vars.some(v => isBlankValue(cfg[v]));
+  });
+
+  /** Panel rows: every node with #names, filled or not, so a configured one can be reviewed. */
+  const configurableNodes = (): ConfigurableNode[] => nodes
+    .filter(n => dynamicVarsOf(n).length > 0)
+    .map((n) => {
+      const block = (n.data as any)?.block || {};
+      return {
+        id: String(n.id),
+        label: block.instrument === LIBRARY_INSTRUMENT
+          ? String(block.method || n.id)
+          : `${block.instrument} · ${String(block.method || '').replace(/_/g, ' ')}`,
+        deviceId: String((n.data as any)?.targetDeviceId || ''),
+        vars: dynamicVarsOf(n),
+        values: configOf(n),
+      };
+    });
+
+  const setNodeConfigValue = (nodeId: string, varName: string, value: string) => {
+    setNodes(nds => nds.map(n => (String(n.id) !== nodeId ? n : {
+      ...n,
+      data: { ...n.data, config: { ...configOf(n), [varName]: value } },
+    })));
+  };
+
+  const copyNodeConfig = (fromNodeId: string, toNodeId: string) => {
+    const source = nodes.find(n => String(n.id) === fromNodeId);
+    if (!source) return;
+    // Copied by value, not linked. Two steps that happen to start identical are still two steps,
+    // and editing one afterwards must not silently move the other.
+    const copied = { ...configOf(source) };
+    setNodes(nds => nds.map(n => (String(n.id) !== toNodeId ? n : {
+      ...n,
+      data: { ...n.data, config: { ...configOf(n), ...copied } },
+    })));
+  };
+
+  /**
+   * Gate a run. Structure first, then the two parameter problems, which are deliberately handled
+   * differently: an empty box is an incomplete *step* and is fixed on the node, while a #name is a
+   * complete step whose value belongs to the *run* and is collected in the panel.
+   */
   const runDistributedWorkflow = async () => {
     if (nodes.length === 0) return;
 
@@ -316,48 +381,53 @@ export default function CloudDesignerPage() {
     // check alone would enforce nothing.
     const problems = validateGraph(nodes, edges);
     if (problems.length > 0) {
+      // Point at the offending nodes on the canvas as well as naming them, so a large graph does
+      // not turn a list of ids into a search.
+      setInvalidNodeIds(nodes.filter(n => blankParamsOf(n).length > 0).map(n => String(n.id)));
       alert(problems.map(p => p.message).join('\n\n'));
       return;
     }
+    setInvalidNodeIds([]);
 
     if (hasBareHash(nodes)) {
       alert("'#' needs a variable name after it (e.g. '#temperature').");
       return;
     }
 
-    // Running with placeholders unfilled would dispatch the literal string "#temperature" to an
-    // instrument, which is not a value. Blocked rather than attempted — the same gate the
-    // Designer applies before its Configure step.
-    const missing = Object.keys(collectDynamicParams(nodes))
-      .filter(k => !String(dynamicValues[k] ?? '').trim());
-    if (missing.length > 0) {
-      // The per-node Configure panel that supplies these (a spreadsheet of rows, or a Bayesian
-      // parameter space handed to the edge's own optimizer) is not built yet, so say that rather
-      // than asking for input with nowhere to type it.
-      alert(
-        `This workflow has unfilled placeholders: ${missing.map(m => '#' + m).join(', ')}.\n\n`
-        + 'Per-node configuration is not built yet. Replace them with literal values to run it for now.',
-      );
+    // Unfilled placeholders open the panel rather than refusing: unlike an empty box, there is
+    // somewhere obvious to type the value, so asking beats reporting.
+    if (nodesNeedingConfig(nodes).length > 0) {
+      setShowConfigPanel(true);
       return;
     }
 
+    await dispatchRun();
+  };
+
+  const dispatchRun = async () => {
+    setShowConfigPanel(false);
     setIsExecuting(true);
     try {
       // Substituted into the dispatched copy only — the canvas keeps its #placeholders, which is
       // what makes the same graph re-runnable over a different set of inputs.
       const resolvedNodes = nodes.map(n => {
         const block = (n.data as any)?.block;
-        const params = block?.params || {};
-        const next: Record<string, any> = {};
+        if (!block) return n;
+        const cfg = configOf(n);
+        // Seeded from the node's own params so a value that only ever existed as a schema default
+        // is written out explicitly once it resolves — the dispatched copy has to be complete on
+        // its own, since the edge never sees this node's schema.
+        const params: Record<string, any> = { ...(block.params || {}) };
         let changed = false;
-        for (const [k, v] of Object.entries(params)) {
-          if (isDynamic(v)) {
-            const key = String(v).trim().slice(1);
-            if (dynamicValues[key] !== undefined) { next[k] = dynamicValues[key]; changed = true; continue; }
-          }
-          next[k] = v;
+        for (const key of Object.keys(block.schema?.parameters || {})) {
+          const value = effectiveParamValue(block, key);
+          if (!isDynamicValue(value)) continue;
+          const varName = String(value).trim().slice(1);
+          if (cfg[varName] === undefined) continue;
+          params[key] = cfg[varName];
+          changed = true;
         }
-        return changed ? { ...n, data: { ...n.data, block: { ...block, params: next } } } : n;
+        return changed ? { ...n, data: { ...n.data, block: { ...block, params } } } : n;
       });
 
       const payload = {
@@ -393,6 +463,7 @@ export default function CloudDesignerPage() {
           cloudDevices={cloudDevices}
           statusData={statusData}
           health={health}
+          invalidNodeIds={invalidNodeIds}
           nodes={nodes}
           setNodes={setNodes}
           edges={edges}
@@ -462,6 +533,15 @@ export default function CloudDesignerPage() {
           }
         />
       </div>
+      {showConfigPanel && (
+        <RunConfigPanel
+          nodes={configurableNodes()}
+          onChange={setNodeConfigValue}
+          onCopy={copyNodeConfig}
+          onCancel={() => setShowConfigPanel(false)}
+          onRun={dispatchRun}
+        />
+      )}
     </div>
   );
 }

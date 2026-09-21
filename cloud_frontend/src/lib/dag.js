@@ -61,6 +61,42 @@ function isFlowControlNode(node) {
   return FLOW_CONTROL_INSTRUMENTS.indexOf(String(blockOf(node).instrument || '')) !== -1;
 }
 
+// `#name` means "supply this when the run starts" — the same convention the edge Designer uses
+// (AGENTS.md section 4). Anywhere a value is expected, a bare '#' is not one.
+const DYNAMIC_PREFIX = '#';
+const isDynamicValue = (v) => typeof v === 'string' && v.trim().startsWith(DYNAMIC_PREFIX);
+
+/**
+ * The value a field actually shows, which is what "is this box empty" has to mean: the node
+ * renders `params[k]`, falling back to the schema default. A param left untouched where the
+ * schema supplies a default is NOT empty — the default is a real value and the edge applies it.
+ */
+function effectiveParamValue(block, key) {
+  const params = block.params || {};
+  if (params[key] !== undefined) return params[key];
+  const declared = (block.schema && block.schema.parameters && block.schema.parameters[key]) || {};
+  return declared.default;
+}
+
+/** Declared params whose effective value is blank — the boxes a person sees as empty. */
+function blankParamsOf(node) {
+  const block = blockOf(node);
+  const declared = Object.keys((block.schema && block.schema.parameters) || {});
+  return declared.filter((key) => {
+    const v = effectiveParamValue(block, key);
+    if (v === undefined || v === null) return true;
+    if (typeof v === 'string') return v.trim() === '';
+    return false;
+  });
+}
+
+/** Declared params still holding a `#name` placeholder (including a bare '#', which names nothing). */
+function placeholderParamsOf(node) {
+  const block = blockOf(node);
+  const declared = Object.keys((block.schema && block.schema.parameters) || {});
+  return declared.filter((key) => isDynamicValue(effectiveParamValue(block, key)));
+}
+
 function isStartNode(node) {
   return isFlowControlNode(node) && String(blockOf(node).method || '') === START_METHOD;
 }
@@ -125,9 +161,13 @@ function effectiveDependencies(nodeId, incoming, isFlowControlId) {
  *
  * @param {any[]} nodes
  * @param {any[]} edges
+ * @param {{ requireResolvedParams?: boolean }} [opts] `requireResolvedParams` additionally rejects
+ *   params still holding a `#name`. The canvas validates *before* substituting, where `#name` is
+ *   the normal authored state, so only a caller holding already-substituted nodes (the run route)
+ *   passes it.
  * @returns {GraphProblem[]}
  */
-function validateGraph(nodes, edges) {
+function validateGraph(nodes, edges, opts) {
   const errors = [];
   if (!Array.isArray(nodes)) return [{ code: 'bad_payload', message: 'nodes must be an array.' }];
   if (!Array.isArray(edges)) return [{ code: 'bad_payload', message: 'edges must be an array.' }];
@@ -256,6 +296,36 @@ function validateGraph(nodes, edges) {
     });
   }
 
+  // Parameter completeness. Only `dispatchable` nodes: a Flow Control node is contracted out of
+  // the graph and never reaches an instrument, so an empty field on one cannot actuate anything.
+  // An empty field on a step that IS dispatched sends "" to real hardware as if it were a value.
+  const blanks = [];
+  const unresolved = [];
+  for (const node of dispatchable) {
+    const blank = blankParamsOf(node);
+    if (blank.length) blanks.push(`${node.id} (${blank.join(', ')})`);
+    if (opts && opts.requireResolvedParams) {
+      const left = placeholderParamsOf(node);
+      if (left.length) unresolved.push(`${node.id} (${left.join(', ')})`);
+    }
+  }
+  if (blanks.length) {
+    errors.push({
+      code: 'empty_param',
+      message: 'Step(s) with empty parameters: ' + blanks.join('; ')
+        + '. Fill them in, or write #name to supply the value when the run starts.',
+    });
+  }
+  if (unresolved.length) {
+    // Only checked for callers that have already substituted (the run route). Reaching dispatch
+    // with a literal "#temperature" would hand an instrument that string as if it were a number.
+    errors.push({
+      code: 'unresolved_placeholder',
+      message: 'Step(s) still carrying unfilled placeholders: ' + unresolved.join('; ')
+        + '. These must be given values before the run is dispatched.',
+    });
+  }
+
   return errors;
 }
 
@@ -273,7 +343,11 @@ function validateGraph(nodes, edges) {
  * @returns {{ errors: GraphProblem[], tasks: PlannedTask[] }}
  */
 function planRun(runId, nodes, edges) {
-  const errors = validateGraph(nodes, edges);
+  // Always `requireResolvedParams`: these nodes are the ones about to be written as run_tasks and
+  // dispatched, so a `#name` surviving to here is a value that will never arrive. Enforced inside
+  // planRun rather than left to the caller precisely so there is no flag anyone can forget — the
+  // canvas is not the only route in (Library, localStorage, a direct POST).
+  const errors = validateGraph(nodes, edges, { requireResolvedParams: true });
   if (errors.length) return { errors, tasks: [] };
 
   const { incoming } = buildGraph(nodes, edges);
@@ -365,6 +439,10 @@ module.exports = {
   isStartNode,
   deviceIdOf,
   blockOf,
+  isDynamicValue,
+  effectiveParamValue,
+  blankParamsOf,
+  placeholderParamsOf,
   buildGraph,
   effectiveDependencies,
   validateGraph,

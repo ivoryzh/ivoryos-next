@@ -78,6 +78,34 @@ function createSupabaseStore(url, serviceRoleKey) {
       return (data || []).length;
     },
 
+    async countActiveDeviceTasks(deviceId, activeStatuses) {
+      // The caller owns the status list (see dag.js) so this stays the one place that knows how
+      // to query, and never a second place that knows what "active" means.
+      const { count, error } = await supabase.from('run_tasks')
+        .select('run_id', { count: 'exact', head: true })
+        .eq('device_id', deviceId)
+        .in('status', activeStatuses);
+      if (error) fail(`Failed to count active tasks for ${deviceId}`, error);
+      return count || 0;
+    },
+
+    // Removes the device and the rows that exist only to serve it: its mirrored sequence library
+    // and any queued pushes, both of which are caches of device state and meaningless once it is
+    // gone. `run_tasks` is deliberately left alone — those are history, and a finished run that
+    // named a since-removed device is still a truthful record of what actually ran. Deleted
+    // explicitly rather than leaning on a cascade so both stores behave identically whatever the
+    // Supabase schema's foreign keys happen to say.
+    async deleteDevice(deviceId) {
+      for (const table of ['edge_sequences', 'sequence_pushes']) {
+        const { error } = await supabase.from(table).delete().eq('device_id', deviceId);
+        if (error) fail(`Failed to delete ${table} rows for ${deviceId}`, error);
+      }
+      const { data, error } = await supabase.from('devices')
+        .delete().eq('id', deviceId).select('id');
+      if (error) fail(`Failed to delete device ${deviceId}`, error);
+      return (data || []).length;
+    },
+
     // --- edge sequences ------------------------------------------------------------------
     async upsertSequence({ device_id, name, description, body }) {
       const { error } = await supabase.from('edge_sequences').upsert({

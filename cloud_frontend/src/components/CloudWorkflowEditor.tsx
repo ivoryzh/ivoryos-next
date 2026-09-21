@@ -10,6 +10,8 @@ interface CloudWorkflowEditorProps {
   cloudDevices: any[];
   statusData: any;
   health?: any;
+  /** Nodes the last run attempt rejected — outlined on the canvas so the problem is findable. */
+  invalidNodeIds?: string[];
   nodes: Node[];
   setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
   edges: Edge[];
@@ -21,7 +23,7 @@ interface CloudWorkflowEditorProps {
 }
 
 const CustomCloudNode = ({ data, id }: any) => {
-  const { block, updateNodeData, statusData, cloudDevices, targetDeviceId, taskStatus } = data;
+  const { block, updateNodeData, statusData, cloudDevices, targetDeviceId, taskStatus, isInvalid } = data;
   const isMissing = !statusData?.instruments?.[block.instrument] || !statusData?.instruments?.[block.instrument]?.[block.method];
 
   const handleParamChange = (paramKey: string, val: any) => {
@@ -50,6 +52,10 @@ const CustomCloudNode = ({ data, id }: any) => {
       if (!targetDeviceId) borderClass = 'border-orange-500';
       else if (isMissing) borderClass = 'border-red-500';
   }
+  // Outranks the resting states above, but never a live task status: while a run is in flight the
+  // border is reporting what the hardware is doing, which matters more than a stale authoring
+  // complaint. Only reachable when a run was refused, so nothing is in flight anyway.
+  if (isInvalid && !taskStatus) borderClass = 'border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.6)]';
 
   const isStartNode = block.instrument === 'Flow Control' && block.method === 'Start';
   const hasBottomSection = !isStartNode && (allParams.length > 0 || (block.schema?.return_type && block.schema.return_type !== 'None' && block.schema.return_type !== 'NoneType'));
@@ -87,9 +93,14 @@ const CustomCloudNode = ({ data, id }: any) => {
           {allParams.map((paramKey) => {
             const pData = block.schema.parameters[paramKey];
             const val = block.params[paramKey] !== undefined ? block.params[paramKey] : (pData.default || '');
+            // An empty box is the thing that blocks a run, so it is marked on the box itself
+            // rather than only in the message that named this node.
+            const isEmpty = !String(val ?? '').trim();
             return (
               <div key={paramKey} className="flex flex-col gap-2">
-                <label className="text-xs text-gray-400 font-bold uppercase">{paramKey}</label>
+                <label className={`text-xs font-bold uppercase ${isInvalid && isEmpty ? 'text-red-400' : 'text-gray-400'}`}>
+                  {paramKey}{isInvalid && isEmpty ? ' — required' : ''}
+                </label>
                 {/* `nodrag` is what lets you actually click into this field. Without it React
                     Flow treats a mousedown anywhere on the node as the start of a node drag, so
                     clicking the input pans the canvas instead of placing a caret — you could
@@ -97,7 +108,7 @@ const CustomCloudNode = ({ data, id }: any) => {
                     field from zooming the canvas. */}
                 <input
                   type="text"
-                  className="nodrag nowheel"
+                  className={`nodrag nowheel ${isInvalid && isEmpty ? 'ring-1 ring-red-500' : ''}`}
                   value={val}
                   onChange={e => handleParamChange(paramKey, e.target.value)}
                 />
@@ -172,6 +183,7 @@ export default function CloudWorkflowEditor({
   cloudDevices,
   statusData,
   health,
+  invalidNodeIds,
   nodes,
   setNodes,
   edges,
@@ -339,6 +351,18 @@ export default function CloudWorkflowEditor({
     }));
   }, [cloudDevices, updateNodeData, setNodes]);
 
+  // Kept separate from the effect above: that one re-runs whenever the device list is polled,
+  // and folding this into it would clear the invalid outline every few seconds.
+  useEffect(() => {
+    const invalid = new Set(invalidNodeIds || []);
+    setNodes(nds => nds.map(n => {
+      if (n.type !== 'customCloudNode') return n;
+      const isInvalid = invalid.has(String(n.id));
+      if (Boolean((n.data as any)?.isInvalid) === isInvalid) return n;
+      return { ...n, data: { ...n.data, isInvalid } };
+    }));
+  }, [invalidNodeIds, setNodes]);
+
   return (
     <div className="flex-1 flex flex-col h-full w-full bg-transparent overflow-hidden">
       {header}
@@ -391,11 +415,29 @@ export default function CloudWorkflowEditor({
                 Object.entries(dInstruments).filter(([k]) => k !== "Library Workflows" && k !== "Flow Control")
               );
 
+              // An offline device keeps its toolbox entry on purpose — the schema and sequence
+              // library are a retained snapshot, and browsing or drafting against a lab that is
+              // powered down is legitimate. What is not legitimate is showing it as green: this
+              // dot was hardcoded, so a device that had gone away still read as connected while
+              // the header two lines above it said "0/1 device online". Same vocabulary as the
+              // canvas node's dot, so one status has one appearance everywhere.
+              const isOnline = String(device.status || '').includes('online');
+
               return (
                 <div key={deviceId} className="device-group mb-6">
-                  <div className="flex items-center space-x-2 px-2 py-1 mb-2">
-                    <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]"></div>
+                  <div
+                    className="flex items-center space-x-2 px-2 py-1 mb-2"
+                    title={isOnline
+                      ? `${deviceId} is online`
+                      : `${deviceId} is offline — showing its last known instruments and workflows`}
+                  >
+                    <div className={`w-2 h-2 rounded-full ${isOnline
+                      ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]'
+                      : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
                     <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200">{deviceId}</h3>
+                    {!isOnline && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-red-400">offline</span>
+                    )}
                   </div>
 
                   <div className="space-y-2 mt-2">

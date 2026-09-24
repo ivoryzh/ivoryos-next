@@ -1,5 +1,6 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
+import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
@@ -16,6 +17,7 @@ import {
   WorkflowMap,
   buildSavedBody,
   scanDynamicParams,
+  scanLiveInputVars,
   toSequenceBlocks,
   chooseDialog,
   confirmDialog,
@@ -226,9 +228,9 @@ export default function DesignerPage() {
             // is currently offering.
             if (wfJson.version) versions[wfName] = wfJson.version;
 
-                // Self-reference is filtered reactively by WorkflowEditor
-                // (currentWorkflowName), because this page can switch which workflow
-                // it is editing without rebuilding the toolbox.
+            // Self-reference is filtered reactively by WorkflowEditor
+            // (currentWorkflowName), because this page can switch which workflow
+            // it is editing without rebuilding the toolbox.
 
             data.instruments["Library Workflows"][wfName] = {
               description: wfJson.description || "Saved Workflow from Library",
@@ -560,6 +562,46 @@ export default function DesignerPage() {
     return vars;
   };
 
+  // The `#names` this sequence still needs a value for before it can run, i.e. whether the
+  // header offers Run or Configure. It has to agree with what the Configure page will then ask
+  // for, or Run dispatches a sequence that fails on an unresolved '#name' mid-run, and Configure
+  // opens on a page with nothing to fill in. Two things the old top-level-only check missed:
+  //
+  // - A `#name` nested inside a structured argument. Configure scans those; this did not.
+  // - A linked workflow. Its block starts with empty `params`: its `#names` exist only as the
+  //   link's declared parameters, so a link nobody had filled in looked fully resolved and got
+  //   a Run button. On the device, an unfilled parameter leaves the body's '#name' in place.
+  //
+  // A name a `User_Input` step asks for at run time is still not one to configure, whether the
+  // prompt is on this canvas or inside the linked workflow.
+  const findUnresolvedVars = (blocks: SequenceBlock[]): Set<string> => {
+    const live = getLiveInputVars(blocks);
+    const found = new Set<string>();
+    const scan = (obj: any) => {
+      if (!obj || typeof obj !== 'object') return;
+      Object.values(obj).forEach(v => {
+        if (typeof v === 'string' && v.trim().startsWith('#')) {
+          const name = v.trim().substring(1).trim();
+          if (name && !live.has(name)) found.add(name);
+        } else if (v && typeof v === 'object') {
+          scan(v);
+        }
+      });
+    };
+    blocks.forEach(b => {
+      scan(b.params);
+      if (b.instrument !== 'Library Workflows') return;
+      const linked = statusData?.instruments?.['Library Workflows']?.[b.method];
+      const prompted = scanLiveInputVars(linked?.body);
+      Object.keys(b.schema?.parameters || {}).forEach(name => {
+        const supplied = b.params?.[name];
+        const blank = supplied === undefined || supplied === null || String(supplied).trim() === '';
+        if (blank && !prompted.has(name) && !live.has(name)) found.add(name);
+      });
+    });
+    return found;
+  };
+
   // Finds a '#' used as a dynamic parameter with no variable name after it (e.g. '#' instead of '#temperature'),
   // searching nested object parameters too.
   const findEmptyHashName = (blocks: SequenceBlock[]): string | null => {
@@ -589,7 +631,7 @@ export default function DesignerPage() {
     const emptyHashLocation = findEmptyHashName(allBlocks);
     if (emptyHashLocation) {
       await notify(`'#' needs a variable name after it (e.g. '#temperature'). Found an empty one in ${emptyHashLocation}.`,
-                   { title: 'Unnamed variable', tone: 'error' });
+        { title: 'Unnamed variable', tone: 'error' });
       return false;
     }
 
@@ -612,7 +654,7 @@ export default function DesignerPage() {
 
           if (val === undefined || val === '') {
             await notify(`Missing parameter '${key}' in ${block.instrument}.${block.method}`,
-                         { title: 'Incomplete step', tone: 'error' });
+              { title: 'Incomplete step', tone: 'error' });
             return false;
           }
 
@@ -621,7 +663,7 @@ export default function DesignerPage() {
           const typeStr = ((param as any)?.type || '').toLowerCase();
           if ((typeStr.includes('int') || typeStr.includes('float')) && isNaN(Number(val))) {
             await notify(`Parameter '${key}' in ${block.instrument}.${block.method} expects a number (or '#variable'), got '${val}'`,
-                         { title: 'Wrong parameter type', tone: 'error' });
+              { title: 'Wrong parameter type', tone: 'error' });
             return false;
           }
         }
@@ -651,7 +693,8 @@ export default function DesignerPage() {
       // 1. Submit Sequence to Edge Queue
       const payload = {
         name: await buildRunName(`${currentWorkflowName || 'Designer'} Run`, '', API_BASE),
-        parameters: { type: 'Sequence' },
+        // workflow_name lets the edge time runs of a saved workflow (runtime.py).
+        parameters: { type: 'Sequence', ...(unmodifiedSavedWorkflowName() ? { workflow_name: unmodifiedSavedWorkflowName() } : {}) },
         prep: prepSequence.filter(b => !b.isHidden).map(blockToPayload),
         sequence: sequence.filter(b => !b.isHidden).map(blockToPayload),
         cleanup: cleanupSequence.filter(b => !b.isHidden).map(blockToPayload)
@@ -686,241 +729,236 @@ export default function DesignerPage() {
 
   return (
     <div className={`h-screen w-screen overflow-x-auto overflow-y-hidden bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans ${theme}`}>
-    {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
+      {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
         panes at narrow widths (which just produces overlapping, clipped controls), it holds its
         natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
-    {/* The assistant takes the toolbox's column rather than adding one, so the minimum only
+      {/* The assistant takes the toolbox's column rather than adding one, so the minimum only
         grows by the difference between them (26rem panel vs 18rem toolbox) — not by the panel's
         full width, which is what it cost when the two were shown side by side. */}
-    <div className={`flex h-full ${agentOpen ? 'min-w-[1208px]' : 'min-w-[1080px]'}`}>
-      {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <div className={`flex h-full ${agentOpen ? 'min-w-[1208px]' : 'min-w-[1080px]'}`}>
+        {/* Sidebar */}
+        <Sidebar theme={theme} toggleTheme={toggleTheme} />
 
-      {agentOpen && (
-        <AgentPanel
-          prepSequence={prepSequence}
-          sequence={sequence}
-          cleanupSequence={cleanupSequence}
-          workflowName={currentWorkflowName}
-          instruments={instruments}
-          onApply={(body) => {
-            // Replaces the canvas wholesale, which is why it is only reachable from an explicit
-            // accept and why the diff is offered first: the proposal is always a complete body.
-            setPrepSequence(body.prep);
-            setSequence(body.script);
-            setCleanupSequence(body.cleanup);
-            // The steps persist themselves on change, but the name and description do not —
-            // they are only written when a workflow is saved or loaded from the Library. Doing
-            // the same here keeps them through a reload, rather than leaving the canvas full
-            // and the header blank.
-            if (body.name && !currentWorkflowName) {
-              setCurrentWorkflowName(body.name);
-              localStorage.setItem('ivoryos_editing_workflow', body.name);
-            }
-            if (body.description && !currentWorkflowDescription) {
-              setCurrentWorkflowDescription(body.description);
-              localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
-            }
-          }}
-          onClose={toggleAgent}
-        />
-      )}
+        {agentOpen && (
+          <AgentPanel
+            prepSequence={prepSequence}
+            sequence={sequence}
+            cleanupSequence={cleanupSequence}
+            workflowName={currentWorkflowName}
+            instruments={instruments}
+            onApply={(body) => {
+              // Replaces the canvas wholesale, which is why it is only reachable from an explicit
+              // accept and why the diff is offered first: the proposal is always a complete body.
+              setPrepSequence(body.prep);
+              setSequence(body.script);
+              setCleanupSequence(body.cleanup);
+              // The steps persist themselves on change, but the name and description do not —
+              // they are only written when a workflow is saved or loaded from the Library. Doing
+              // the same here keeps them through a reload, rather than leaving the canvas full
+              // and the header blank.
+              if (body.name && !currentWorkflowName) {
+                setCurrentWorkflowName(body.name);
+                localStorage.setItem('ivoryos_editing_workflow', body.name);
+              }
+              if (body.description && !currentWorkflowDescription) {
+                setCurrentWorkflowDescription(body.description);
+                localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
+              }
+            }}
+            onClose={toggleAgent}
+          />
+        )}
 
-      {/* Main Designer Area */}
-      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        <WorkflowEditor
-          toolboxFooter={<AgentToolboxButton open={agentOpen} onToggle={toggleAgent} />}
-          hideToolbox={agentOpen}
-          statusData={statusData}
-          prepSequence={prepSequence}
-          setPrepSequence={setPrepSequence}
-          sequence={sequence}
-          setSequence={setSequence}
-          cleanupSequence={cleanupSequence}
-          setCleanupSequence={setCleanupSequence}
-          header={
-            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-50 relative">
-              <div className="flex flex-col justify-center flex-1 mr-4 space-y-1">
-                <div className="flex items-center space-x-3">
+        {/* Main Designer Area */}
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+          <WorkflowEditor
+            toolboxFooter={<AgentToolboxButton open={agentOpen} onToggle={toggleAgent} />}
+            hideToolbox={agentOpen}
+            statusData={statusData}
+            prepSequence={prepSequence}
+            setPrepSequence={setPrepSequence}
+            sequence={sequence}
+            setSequence={setSequence}
+            cleanupSequence={cleanupSequence}
+            setCleanupSequence={setCleanupSequence}
+            header={
+              <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-50 relative">
+                <div className="flex flex-col justify-center flex-1 mr-4 space-y-1">
+                  <div className="flex items-center space-x-3">
+                    <input
+                      type="text"
+                      value={currentWorkflowName}
+                      onChange={(e) => setCurrentWorkflowName(e.target.value)}
+                      placeholder="Sequence Name"
+                      className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
+                    />
+                    {isUnsaved && <span className="px-1.5 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 text-[10px] font-bold uppercase tracking-wider">Unsaved</span>}
+                    {isOffline && (
+                      <span className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 text-[10px] font-bold uppercase tracking-wider border border-purple-200 dark:border-purple-500/30">
+                        <AlertTriangle className="w-3 h-3" />
+                        <span>Offline Mode</span>
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="text"
-                    value={currentWorkflowName}
-                    onChange={(e) => setCurrentWorkflowName(e.target.value)}
-                    placeholder="Sequence Name"
-                    className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
+                    value={currentWorkflowDescription}
+                    onChange={(e) => setCurrentWorkflowDescription(e.target.value)}
+                    placeholder="Add a short description..."
+                    className="text-xs text-gray-400 dark:text-gray-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 w-full"
                   />
-                  {isUnsaved && <span className="px-1.5 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 text-[10px] font-bold uppercase tracking-wider">Unsaved</span>}
-                  {isOffline && (
-                    <span className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 text-[10px] font-bold uppercase tracking-wider border border-purple-200 dark:border-purple-500/30">
-                      <AlertTriangle className="w-3 h-3" />
-                      <span>Offline Mode</span>
-                    </span>
-                  )}
                 </div>
-                <input
-                  type="text"
-                  value={currentWorkflowDescription}
-                  onChange={(e) => setCurrentWorkflowDescription(e.target.value)}
-                  placeholder="Add a short description..."
-                  className="text-xs text-gray-400 dark:text-gray-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 w-full"
-                />
-              </div>
-              <div className="flex items-center space-x-2">
-                {/* Save and New belong with the other actions. They used to sit beside the name,
+                <div className="flex items-center space-x-2">
+                  {/* Save and New belong with the other actions. They used to sit beside the name,
                     against a two-line block, so they were vertically offset from every other
                     control in the header no matter what padding they were given. */}
-                <button
-                  onClick={startNewWorkflow}
-                  title="Start a new, empty workflow"
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
-                >
-                  <FilePlus2 className="w-4 h-4 text-gray-400" />
-                  <span className="hidden sm:inline">New</span>
-                </button>
-
-                <button
-                  onClick={saveWorkflow}
-                  disabled={sequence.length === 0}
-                  title="Save this workflow to the library"
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Save className="w-4 h-4" />
-                  <span className="hidden sm:inline">Save</span>
-                </button>
-
-                <div className="relative group">
-                  <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
-                    <Settings2 className="w-4 h-4" />
-                    <span className="hidden sm:inline">Manage</span>
+                  <button
+                    onClick={startNewWorkflow}
+                    title="Start a new, empty workflow"
+                    className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+                  >
+                    <FilePlus2 className="w-4 h-4 text-gray-400" />
+                    <span className="hidden sm:inline">New</span>
                   </button>
-                  <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-                    <button
-                      onClick={exportJSON}
-                      disabled={sequence.length === 0}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
-                    >
-                      <Download className="w-4 h-4" />
-                      <span>Export JSON</span>
-                    </button>
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 flex items-center space-x-2 border-t border-gray-100 dark:border-white/5"
-                    >
-                      <Upload className="w-4 h-4" />
-                      <span>Import JSON</span>
-                    </button>
-                  </div>
-                </div>
 
-                <input
-                  type="file"
-                  accept=".json"
-                  className="hidden"
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                />
+                  <button
+                    onClick={saveWorkflow}
+                    disabled={sequence.length === 0}
+                    title="Save this workflow to the library"
+                    className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span className="hidden sm:inline">Save</span>
+                  </button>
 
-                <button
-                  onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
-                >
-                  {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
-                  <span className="hidden sm:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
-                </button>
-                {(() => {
-                  const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
-                  const liveInputVars = getLiveInputVars(allBlocks);
-                  const hasDynamicParams = allBlocks.some(block =>
-                    Object.values(block.params).some(val =>
-                      typeof val === 'string' && val.startsWith('#') && !liveInputVars.has(val.substring(1).trim())
-                    )
-                  );
-                  const hasNoSteps = prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0;
-                  return (
-                    <>
+                  <div className="relative group">
+                    <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
+                      <Settings2 className="w-4 h-4" />
+                      <span className="hidden sm:inline">Manage</span>
+                    </button>
+                    <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
                       <button
-                        onClick={async () => {
-                          if (!await validateSequence()) return;
-                          if (sequence.length === 0 && (prepSequence.length > 0 || cleanupSequence.length > 0)) {
-                            if (!await confirmDialog("There are no steps in the Main Workflow — only Prep and Cleanup will run.", {
-                              title: 'Run anyway?',
-                              confirmLabel: 'Run',
-                            })) {
-                              return;
+                        onClick={exportJSON}
+                        disabled={sequence.length === 0}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>Export JSON</span>
+                      </button>
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5 flex items-center space-x-2 border-t border-gray-100 dark:border-white/5"
+                      >
+                        <Upload className="w-4 h-4" />
+                        <span>Import JSON</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <input
+                    type="file"
+                    accept=".json"
+                    className="hidden"
+                    ref={fileInputRef}
+                    onChange={handleFileUpload}
+                  />
+
+                  <button
+                    onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
+                    className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+                  >
+                    {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
+                    <span className="hidden sm:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
+                  </button>
+                  {(() => {
+                    const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
+                    const hasDynamicParams = findUnresolvedVars(allBlocks).size > 0;
+                    const hasNoSteps = prepSequence.length === 0 && sequence.length === 0 && cleanupSequence.length === 0;
+                    return (
+                      <>
+                        <button
+                          onClick={async () => {
+                            if (!await validateSequence()) return;
+                            if (sequence.length === 0 && (prepSequence.length > 0 || cleanupSequence.length > 0)) {
+                              if (!await confirmDialog("There are no steps in the Main Workflow — only Prep and Cleanup will run.", {
+                                title: 'Run anyway?',
+                                confirmLabel: 'Run',
+                              })) {
+                                return;
+                              }
                             }
-                          }
-                          // Configure is not a dispatch — it hands off to the page where values
-                          // get filled in, and the preview belongs in front of the real run
-                          // that happens there, not in front of the handoff.
-                          if (hasDynamicParams) { window.location.href = '/execution'; return; }
-                          // The preview is the last thing seen before hardware moves. It is no
-                          // longer a button of its own, so this is where it earns its place:
-                          // linked workflows expanded, exactly what will be queued.
-                          setIsMapOpen(true);
-                        }}
-                        disabled={hasNoSteps}
-                        className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
+                            // Configure is not a dispatch — it hands off to the page where values
+                            // get filled in, and the preview belongs in front of the real run
+                            // that happens there, not in front of the handoff.
+                            if (hasDynamicParams) { window.location.href = '/execution'; return; }
+                            // The preview is the last thing seen before hardware moves. It is no
+                            // longer a button of its own, so this is where it earns its place:
+                            // linked workflows expanded, exactly what will be queued.
+                            setIsMapOpen(true);
+                          }}
+                          disabled={hasNoSteps}
+                          className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
                             ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                             : hasDynamicParams
                               ? 'bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50 shadow-sm'
                               : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
-                          }`}
-                      >
-                        {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                        <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run')}</span>
-                      </button>
-                      {hasDynamicParams && sequence.some(s => s.returnVar) && (
-                        <a
-                          href="/optimize"
-                          className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
+                            }`}
                         >
-                          <Zap className="w-4 h-4" />
-                          <span>Optimize</span>
-                        </a>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-            </header>
-          }
-          customView={
-            viewMode === 'code' ? (
-              <PythonCodeView
-                code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta)}
-                theme={theme}
-                fileName={currentWorkflowName || 'sequence'}
-              />
-            ) : null
-          }
-          workflowVersions={workflowVersions}
-          onEditWorkflow={openWorkflowInDesigner}
-          currentWorkflowName={currentWorkflowName}
-          fetchWorkflowVersion={async (name, version) => {
-            const res = await fetch(`${API_BASE}/api/workflows/${name}?version=${version}`);
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || `v${version} not found`);
-            return data;
-          }}
-        />
-        <WorkflowMap
-          confirmLabel={hasPendingRuns ? 'Add to queue' : 'Run'}
-          onConfirm={async () => {
-            setIsMapOpen(false);
-            if (hasPendingRuns && !await confirmDialog(
-              "A task is already running. Add this sequence to the execution queue?",
-              { title: 'Queue this run?', confirmLabel: 'Add to queue' })) {
-              return;
+                          {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                          <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run')}</span>
+                        </button>
+                        {hasDynamicParams && sequence.some(s => s.returnVar) && (
+                          <a
+                            href="/optimize"
+                            className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
+                          >
+                            <Zap className="w-4 h-4" />
+                            <span>Optimize</span>
+                          </a>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </header>
             }
-            runSequence();
-          }}
-          isOpen={isMapOpen}
-          onClose={() => setIsMapOpen(false)}
-          fetchExpansion={fetchExpansion}
-        />
-      </div>
+            customView={
+              viewMode === 'code' ? (
+                <PythonCodeView
+                  code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta)}
+                  theme={theme}
+                  fileName={currentWorkflowName || 'sequence'}
+                />
+              ) : null
+            }
+            workflowVersions={workflowVersions}
+            onEditWorkflow={openWorkflowInDesigner}
+            currentWorkflowName={currentWorkflowName}
+            fetchWorkflowVersion={async (name, version) => {
+              const res = await fetch(`${API_BASE}/api/workflows/${name}?version=${version}`);
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || `v${version} not found`);
+              return data;
+            }}
+          />
+          <WorkflowMap
+            confirmLabel={hasPendingRuns ? 'Add to queue' : 'Run'}
+            onConfirm={async () => {
+              setIsMapOpen(false);
+              if (hasPendingRuns && !await confirmDialog(
+                "A task is already running. Add this sequence to the execution queue?",
+                { title: 'Queue this run?', confirmLabel: 'Add to queue' })) {
+                return;
+              }
+              runSequence();
+            }}
+            isOpen={isMapOpen}
+            onClose={() => setIsMapOpen(false)}
+            fetchExpansion={fetchExpansion}
+          />
+        </div>
 
-    </div>
+      </div>
     </div>
   );
 }

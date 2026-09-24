@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, ChevronDown, ChevronRight, Layers, Link2, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, Layers, Link2, RefreshCw, Repeat, X } from 'lucide-react';
 
 export type ExpandedStep = {
   instrument: string;
@@ -57,12 +57,6 @@ type Props = {
 /** Used when no spreadsheet is loaded (the Designer), so batch behaviour is still explorable. */
 const EXAMPLE_ROWS = 6;
 const EXAMPLE_BATCH_SIZE = 3;
-
-const PHASES: { key: 'prep' | 'sequence' | 'cleanup'; label: string }[] = [
-  { key: 'prep', label: 'Prep' },
-  { key: 'sequence', label: 'Main' },
-  { key: 'cleanup', label: 'Cleanup' },
-];
 
 const isInternalParam = (key: string) => key.startsWith('_');
 
@@ -143,6 +137,46 @@ function batchGroups(steps: ExpandedStep[], rows: number, batchSize: number) {
   return groups;
 }
 
+/**
+ * How often one main-phase step fires, as a pill in a fixed column so the whole list scans at a
+ * glance. It replaces a faint "× 5 each" that read as part of the method name and said nothing
+ * about *what* the 5 counted.
+ */
+function RepeatPill({ batch, perGroup, lastGroup, groups, rows }: {
+  batch: boolean;
+  perGroup: number;
+  lastGroup: number;
+  groups: number;
+  rows: number;
+}) {
+  if (batch) {
+    return (
+      <span
+        title={`Runs once for each batch${groups > 1 ? ` — ${groups} times in all` : ''}, with the values from that batch's first row.`}
+        className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-bold bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-500/15 dark:text-teal-300 dark:border-teal-500/30"
+      >
+        <Layers className="w-3 h-3" />
+        ×1
+        <span className="font-medium opacity-75">per batch</span>
+      </span>
+    );
+  }
+  const uneven = groups > 1 && lastGroup !== perGroup;
+  return (
+    <span
+      title={`Runs once for each row ${groups > 1 ? 'in a batch' : ''} before the next step starts — ${rows} times in all${uneven ? `; the last batch has ${lastGroup} row${lastGroup === 1 ? '' : 's'}` : ''}.`}
+      className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-bold bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:border-indigo-500/30"
+    >
+      <Repeat className="w-3 h-3" />
+      ×{perGroup}{uneven ? '*' : ''}
+      <span className="font-medium opacity-75">per sample</span>
+    </span>
+  );
+}
+
+const numberInputClass =
+  'w-12 px-1.5 py-0.5 rounded border border-gray-300 dark:border-white/10 bg-white dark:bg-black/40 text-gray-800 dark:text-gray-100 text-[11px] disabled:opacity-60';
+
 export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, confirmLabel, onConfirm }: Props) {
   const [result, setResult] = useState<ExpansionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -190,22 +224,196 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
 
   const mainSteps = result?.sequence || [];
   const batchStepCount = mainSteps.filter(isBatchStep).length;
-  const perSampleCount = mainSteps.length - batchStepCount;
-  // Only when at least one step actually runs once per batch. With none, grouping changes
-  // nothing — every step fires once per row whatever the batch size — so the section was
-  // explaining a distinction that did not exist, at the cost of listing every step a second time.
-  const showBatchSection = !!result && mainSteps.length > 0 && batchStepCount > 0;
 
-  // How often a main-phase step actually fires. This is the thing the preview exists to tell
-  // you and it used to live only inside the batch section, which meant it was missing entirely
-  // for a plain per-row run and duplicated the step list when it wasn't.
-  const repeatsPerRun = !!spreadsheet || rows > 1;
-  const perSampleReps = batchStepCount > 0 ? Math.min(batchSize, rows) : rows;
+  // Whether the main phase repeats at all. With a spreadsheet it always does (once per row). In
+  // the Designer a plain Run goes through once, so the loop is only drawn — with example numbers —
+  // when batch steps exist and there is a grouping worth exploring.
+  const loops = !!spreadsheet || batchStepCount > 0;
+  const isExample = !spreadsheet && loops;
+  const groups = loops ? batchGroups(mainSteps, rows, batchSize) : [];
+  const perGroup = groups[0]?.rowCount ?? 1;
+  const lastGroup = groups[groups.length - 1]?.rowCount ?? 1;
+  // The batch-size control matters whenever there is something for it to change: a batch step to
+  // group, or (on Configure) a batch size already set that splits the walk into several passes.
+  const showBatchControl = loops && (batchStepCount > 0 || groups.length > 1);
 
   const cost = result ? spreadsheetCost(mainSteps, rows, batchSize) : null;
-  const totalCalls = result && cost
+  const totalCalls = result && cost && loops
     ? cost.calls + result.prep.length + result.cleanup.length
-    : null;
+    : result?.counts.total ?? null;
+
+  const renderSteps = (phase: 'prep' | 'sequence' | 'cleanup', steps: ExpandedStep[]) =>
+    groupSteps(steps).map((group, gi) => {
+      const groupKey = `${phase}-${gi}`;
+      const isCollapsed = collapsed[groupKey];
+
+      const stepRows = group.steps.map((step, si) => {
+        const params = Object.entries(step.params || {}).filter(([k]) => !isInternalParam(k));
+        return (
+          <div
+            key={si}
+            className={`flex items-start gap-2 px-2.5 py-1.5 rounded-md bg-white dark:bg-white/[0.03] border border-gray-100 dark:border-white/5 ${group.parent ? 'ml-5 border-l-2 border-l-emerald-200 dark:border-l-emerald-800/50' : ''}`}
+          >
+            <span className="text-[10px] font-mono text-gray-400 dark:text-gray-600 w-5 shrink-0 text-right pt-0.5">
+              {group.startIndex + si + 1}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">
+                  {String(step.instrument || '').replace(/_/g, ' ')}
+                </span>
+                <span className="text-xs font-medium text-gray-800 dark:text-gray-100">
+                  {String(step.method || '').replace(/_/g, ' ')}
+                </span>
+              </div>
+              {params.length > 0 && (
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 font-mono mt-0.5 break-words">
+                  {params.map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ')}
+                </p>
+              )}
+            </div>
+            {/* Only the main phase repeats — prep and cleanup say "once" in their header. */}
+            {phase === 'sequence' && loops && (
+              <RepeatPill
+                batch={isBatchStep(step)}
+                perGroup={perGroup}
+                lastGroup={lastGroup}
+                groups={groups.length}
+                rows={rows}
+              />
+            )}
+          </div>
+        );
+      });
+
+      if (!group.parent) return <div key={groupKey} className="space-y-1">{stepRows}</div>;
+
+      return (
+        <div key={groupKey} className="space-y-1">
+          <button
+            onClick={() => toggle(groupKey)}
+            className="w-full flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 transition-colors text-left"
+          >
+            {isCollapsed
+              ? <ChevronRight className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+              : <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
+            <Link2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <span className="text-xs font-bold text-gray-700 dark:text-gray-200 truncate">
+              {group.parent}
+            </span>
+            <span className="text-[10px] text-gray-400 dark:text-gray-500 shrink-0">
+              {group.steps.length} steps
+            </span>
+          </button>
+          {!isCollapsed && stepRows}
+        </div>
+      );
+    });
+
+  // One header shape for all three phases, so "once" and "×3 batches" sit in the same place and
+  // read as answers to the same question.
+  const phaseHeader = (label: string, count: number, badge: React.ReactNode, extra?: React.ReactNode) => (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 mb-2">
+      <span className="text-xs font-bold text-gray-800 dark:text-gray-100">{label}</span>
+      <span className="text-[11px] text-gray-400 dark:text-gray-500">{count} step{count === 1 ? '' : 's'}</span>
+      {badge}
+      <div className="h-px bg-gray-200 dark:bg-white/10 flex-1 min-w-[1rem]" />
+      {extra}
+    </div>
+  );
+
+  const oncePill = (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">
+      once
+    </span>
+  );
+
+  const bookend = (key: 'prep' | 'cleanup', label: string) => {
+    if (!result || !result[key].length) return null;
+    return (
+      <section className="mb-4">
+        {phaseHeader(label, result[key].length, oncePill)}
+        <div className="space-y-1">{renderSteps(key, result[key])}</div>
+      </section>
+    );
+  };
+
+  const mainSection = () => {
+    if (!result || !mainSteps.length) return null;
+    const passes = groups.length;
+    const iterationPill = !loops ? oncePill : (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-600 text-white">
+        <Repeat className="w-3 h-3" />
+        {passes > 1 ? `${passes} batches` : `${rows} row${rows === 1 ? '' : 's'}`}
+      </span>
+    );
+    const controls = loops ? (
+      <div className="flex items-center gap-3 text-[11px] text-gray-500 dark:text-gray-400">
+        <label className="flex items-center gap-1.5">
+          rows
+          <input
+            type="number"
+            min={1}
+            value={rows}
+            disabled={!!spreadsheet}
+            onChange={(e) => setExampleRows(Math.max(1, parseInt(e.target.value) || 1))}
+            title={spreadsheet ? 'Taken from the spreadsheet' : 'Example row count — no spreadsheet is loaded'}
+            className={numberInputClass}
+          />
+        </label>
+        {showBatchControl && (
+          <label className="flex items-center gap-1.5">
+            batch size
+            <input
+              type="number"
+              min={1}
+              value={batchSize}
+              onChange={(e) => setBatchSize(Math.max(1, parseInt(e.target.value) || 1))}
+              title={spreadsheet?.onBatchSizeChange
+                ? 'Changes the real batch size for this run'
+                : 'How many consecutive rows make up one batch'}
+              className={numberInputClass}
+            />
+          </label>
+        )}
+      </div>
+    ) : null;
+
+    return (
+      <section className="mb-4">
+        {phaseHeader('Main', mainSteps.length, iterationPill, controls)}
+        {!loops ? (
+          <div className="space-y-1">{renderSteps('sequence', mainSteps)}</div>
+        ) : (
+          // The loop is drawn, not described: a frame around exactly the steps that repeat, with
+          // what it repeats over written on the frame itself. Prep and cleanup sit outside it.
+          <div className="rounded-xl border-2 border-dashed border-indigo-200 dark:border-indigo-500/30 bg-indigo-50/30 dark:bg-indigo-500/[0.04] p-2">
+            <div className="space-y-1">{renderSteps('sequence', mainSteps)}</div>
+            <div className="mt-2 pt-2 border-t border-dashed border-indigo-200 dark:border-indigo-500/30 flex flex-wrap items-center gap-1.5 text-[11px] text-indigo-700 dark:text-indigo-300">
+              <Repeat className="w-3.5 h-3.5 shrink-0" />
+              {passes > 1 ? (
+                <>
+                  <span className="font-semibold">repeat for each batch</span>
+                  {groups.map(group => (
+                    <span
+                      key={group.index}
+                      className="px-2 py-0.5 rounded-full bg-white dark:bg-black/30 border border-indigo-200 dark:border-indigo-500/30"
+                    >
+                      {/* "rows 5–5" reads like a typo; a remainder batch of one is common. */}
+                      {group.firstRow === group.lastRow ? `row ${group.firstRow}` : `rows ${group.firstRow}–${group.lastRow}`}
+                    </span>
+                  ))}
+                </>
+              ) : (
+                <span>each step runs for every row before the next step starts; an If/While block runs whole, row by row</span>
+              )}
+              {isExample && <span className="text-gray-400 dark:text-gray-500">· example numbers, no spreadsheet loaded</span>}
+            </div>
+          </div>
+        )}
+      </section>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
@@ -261,30 +469,14 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
         )}
 
         {result && (
-          <div className="shrink-0 px-5 py-3 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.02] flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs">
-            <span className="text-gray-600 dark:text-gray-300">
+          // Totals only. How they break down is the phase sections' job, directly below.
+          <div className="shrink-0 px-5 py-2.5 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.02] flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-gray-600 dark:text-gray-300">
+            <span>
               <strong className="text-gray-900 dark:text-white">{result.counts.total}</strong> steps
-              <span className="text-gray-400 dark:text-gray-500">
-                {' '}({result.counts.prep} prep · {result.counts.sequence} main · {result.counts.cleanup} cleanup)
-              </span>
+              {loops && totalCalls !== null && (
+                <> → <strong className="text-gray-900 dark:text-white">{totalCalls}</strong> calls{isExample ? ' (example)' : ''}</>
+              )}
             </span>
-            {spreadsheet && totalCalls !== null && cost && (
-              <span className="text-gray-600 dark:text-gray-300">
-                {batchStepCount > 0 ? (
-                  <>
-                    {rows} rows × batch {batchSize} ={' '}
-                    <strong className="text-gray-900 dark:text-white">{cost.groups}</strong>{' '}
-                    groups, <strong className="text-gray-900 dark:text-white">{totalCalls}</strong> calls
-                  </>
-                ) : (
-                  <>
-                    {rows} rows ×{' '}
-                    <strong className="text-gray-900 dark:text-white">{result.counts.sequence}</strong>{' '}
-                    steps = <strong className="text-gray-900 dark:text-white">{totalCalls}</strong> calls
-                  </>
-                )}
-              </span>
-            )}
             {result.resolved_links.length > 0 && (
               <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
                 <Link2 className="w-3.5 h-3.5" />
@@ -317,169 +509,13 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
             </p>
           )}
 
-          {showBatchSection && result && !error && (() => {
-            const groups = batchGroups(mainSteps, rows, batchSize);
-            return (
-              <section className="mb-5 rounded-xl border border-teal-200 dark:border-teal-800/40 bg-teal-50/40 dark:bg-teal-900/10 overflow-hidden">
-                <div className="px-3 py-2.5 border-b border-teal-200/70 dark:border-teal-800/40 flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <Layers className="w-4 h-4 text-teal-600 dark:text-teal-400 shrink-0" />
-                  <span className="text-xs font-bold text-teal-800 dark:text-teal-300">Batch execution</span>
-
-                  <label className="flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
-                    Rows
-                    <input
-                      type="number"
-                      min={1}
-                      value={rows}
-                      disabled={!!spreadsheet}
-                      onChange={(e) => setExampleRows(Math.max(1, parseInt(e.target.value) || 1))}
-                      title={spreadsheet ? 'Taken from the spreadsheet' : 'Example row count — no spreadsheet is loaded'}
-                      className="w-14 px-1.5 py-0.5 rounded border border-gray-300 dark:border-white/10 bg-white dark:bg-black/40 text-gray-800 dark:text-gray-100 disabled:opacity-60"
-                    />
-                  </label>
-
-                  <label className="flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
-                    Batch size
-                    <input
-                      type="number"
-                      min={1}
-                      value={batchSize}
-                      onChange={(e) => setBatchSize(Math.max(1, parseInt(e.target.value) || 1))}
-                      title={spreadsheet?.onBatchSizeChange
-                        ? 'Changes the real batch size for this run'
-                        : 'How many consecutive rows make up one batch group'}
-                      className="w-14 px-1.5 py-0.5 rounded border border-gray-300 dark:border-white/10 bg-white dark:bg-black/40 text-gray-800 dark:text-gray-100"
-                    />
-                  </label>
-
-                  <span className="text-[11px] text-gray-500 dark:text-gray-400">
-                    {perSampleCount} per-sample · {batchStepCount} batch step{batchStepCount === 1 ? '' : 's'}
-                    {' → '}
-                    <strong className="text-gray-800 dark:text-gray-100">{groups.length}</strong> group{groups.length === 1 ? '' : 's'},{' '}
-                    <strong className="text-gray-800 dark:text-gray-100">{cost?.calls}</strong> calls
-                  </span>
-                </div>
-
-                {!spreadsheet && (
-                  <p className="px-3 pt-2 text-[10px] text-gray-500 dark:text-gray-400">
-                    No spreadsheet is loaded, so these are example numbers — change them to see how the
-                    batch steps would be grouped on the Configure page.
-                  </p>
-                )}
-
-                {/* Just the split. What each step does, and how often, is the job of the phase
-                    list below — this section answers only "how do my rows get carved up?".
-                    Listing the steps here as well made the same run appear twice. */}
-                <div className="p-3 flex flex-wrap gap-2">
-                  {groups.map(group => (
-                    <div
-                      key={group.index}
-                      className="rounded-lg border border-teal-200/70 dark:border-teal-800/30 bg-white dark:bg-black/20 px-2.5 py-1.5"
-                    >
-                      <span className="text-[11px] font-bold text-teal-800 dark:text-teal-300">
-                        Batch {group.index}
-                        <span className="font-medium text-teal-600/80 dark:text-teal-400/80">
-                          {/* A remainder group of one is common (5 rows at batch 2) and "rows 5–5"
-                              reads like a typo. */}
-                          {group.firstRow === group.lastRow
-                            ? ` · row ${group.firstRow}`
-                            : ` · rows ${group.firstRow}–${group.lastRow}`}
-                        </span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            );
-          })()}
-
-          {result && !error && PHASES.map(({ key, label }) => {
-            const steps = result[key];
-            if (!steps.length) return null;
-            return (
-              <section key={key} className="mb-5 last:mb-0">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-px bg-gray-200 dark:bg-white/10 flex-1" />
-                  <span className="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest">
-                    {label} · {steps.length}
-                  </span>
-                  <div className="h-px bg-gray-200 dark:bg-white/10 flex-1" />
-                </div>
-
-                <div className="space-y-1">
-                  {groupSteps(steps).map((group, gi) => {
-                    const groupKey = `${key}-${gi}`;
-                    const isCollapsed = collapsed[groupKey];
-
-                    const rows = group.steps.map((step, si) => {
-                      const params = Object.entries(step.params || {}).filter(([k]) => !isInternalParam(k));
-                      return (
-                        <div
-                          key={si}
-                          className={`flex items-start gap-2 px-2.5 py-1.5 rounded-md bg-gray-50 dark:bg-white/[0.03] ${group.parent ? 'ml-5 border-l-2 border-emerald-200 dark:border-emerald-800/50' : ''}`}
-                        >
-                          <span className="text-[10px] font-mono text-gray-400 dark:text-gray-600 w-6 shrink-0 text-right pt-0.5">
-                            {group.startIndex + si + 1}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 dark:bg-white/10 dark:text-gray-300 capitalize">
-                                {String(step.instrument || '').replace(/_/g, ' ')}
-                              </span>
-                              <span className="text-xs font-medium text-gray-800 dark:text-gray-100 capitalize">
-                                {String(step.method || '').replace(/_/g, ' ')}
-                              </span>
-                              {/* Only the main phase repeats — prep and cleanup bookend the run
-                                  once each, so annotating them would be noise. */}
-                              {key === 'sequence' && repeatsPerRun && (
-                                isBatchStep(step) ? (
-                                  <span className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200 dark:bg-teal-500/20 dark:text-teal-300 dark:border-teal-700/40">
-                                    <Layers className="w-2.5 h-2.5" /> once per batch
-                                  </span>
-                                ) : (
-                                  <span className="text-[10px] font-semibold text-gray-400 dark:text-gray-500">
-                                    × {perSampleReps} each
-                                  </span>
-                                )
-                              )}
-                            </div>
-                            {params.length > 0 && (
-                              <p className="text-[11px] text-gray-500 dark:text-gray-400 font-mono mt-0.5 break-words">
-                                {params.map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ')}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    });
-
-                    if (!group.parent) return <div key={groupKey} className="space-y-1">{rows}</div>;
-
-                    return (
-                      <div key={groupKey} className="space-y-1">
-                        <button
-                          onClick={() => toggle(groupKey)}
-                          className="w-full flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 transition-colors text-left"
-                        >
-                          {isCollapsed
-                            ? <ChevronRight className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                            : <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
-                          <Link2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                          <span className="text-xs font-bold text-gray-700 dark:text-gray-200 truncate">
-                            {group.parent}
-                          </span>
-                          <span className="text-[10px] text-gray-400 dark:text-gray-500 shrink-0">
-                            {group.steps.length} steps
-                          </span>
-                        </button>
-                        {!isCollapsed && rows}
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            );
-          })}
+          {result && !error && (
+            <>
+              {bookend('prep', 'Prep')}
+              {mainSection()}
+              {bookend('cleanup', 'Cleanup')}
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -201,6 +201,49 @@ export function scanDynamicParams(body: SavedWorkflowBody | undefined): Record<s
 }
 
 /**
+ * The `#names` a saved workflow fills in for itself, by asking at run time (`User_Input`).
+ *
+ * `scanDynamicParams` reports every `#name` in a body, including these, so on its own it cannot
+ * tell "the caller must supply this" from "the workflow prompts for this". Anything deciding
+ * whether a sequence needs configuring before it can run has to subtract these, the same way the
+ * Configure page does once it has expanded the link.
+ */
+export function scanLiveInputVars(body: SavedWorkflowBody | undefined): Set<string> {
+  const names = new Set<string>();
+  flattenSavedBody(body).forEach((b: any) => {
+    const instrument = b.instrument || '';
+    const method = b.action || b.method || '';
+    const isUserInput = (instrument === 'Flow_Control' || instrument === 'Flow Control') && method === 'User_Input';
+    const name = String((b.args || b.params || {}).variable_name || '').trim();
+    if (isUserInput && name) names.add(name);
+  });
+  return names;
+}
+
+/**
+ * Every output variable a saved workflow produces, in the order its steps declare them.
+ *
+ * The mirror image of `scanDynamicParams`: that answers "what does this workflow need supplied",
+ * this answers "what does it hand back". Cloud uses it to offer a linked workflow's outputs as
+ * optimization objectives without having to open the body itself.
+ *
+ * Only this body's own steps — a return variable produced *inside* a workflow this one links to
+ * is not visible here, because resolving that means expanding the link, which is `expand_workflow_
+ * blocks`'s job on the edge and deliberately has no client-side twin (AGENTS.md section 3).
+ */
+export function scanReturnVars(body: SavedWorkflowBody | undefined): string[] {
+  const names: string[] = [];
+  flattenSavedBody(body).forEach((b: any) => {
+    String(b.return || b.returnVar || '')
+      .split(',')
+      .map((n: string) => n.trim())
+      .filter(Boolean)
+      .forEach((n: string) => { if (!names.includes(n)) names.push(n); });
+  });
+  return names;
+}
+
+/**
  * Bring a saved workflow into the sequence being edited.
  *
  * `link` is the default: it keeps a single reference block that resolves at run time, so the saved

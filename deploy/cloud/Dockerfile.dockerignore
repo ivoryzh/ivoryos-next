@@ -1,0 +1,20 @@
+# Applies only to deploy/cloud/Dockerfile (BuildKit reads <Dockerfile>.dockerignore), so other
+# images built from this repo are unaffected. The context is the repository root; send only what
+# the Cloud image needs, and never local state or secrets.
+**
+
+!package.json
+!package-lock.json
+!frontend/package.json
+!packages/shared-ui/**
+!cloud_frontend/**
+
+**/node_modules
+**/.next
+**/*.tsbuildinfo
+cloud_frontend/*.db
+cloud_frontend/*.db-shm
+cloud_frontend/*.db-wal
+cloud_frontend/.env*
+cloud_frontend/certs
+cloud_frontend/publish_test.js

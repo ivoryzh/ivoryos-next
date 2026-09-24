@@ -30,13 +30,10 @@
     },
     {
       "name": "cloud-frontend",
-      "runtimeExecutable": "npm",
+      "runtimeExecutable": "node",
       "runtimeArgs": [
-        "--prefix",
-        "cloud_frontend",
-        "run",
+        "cloud_frontend/scripts/run-all.js",
         "dev",
-        "--",
         "-p",
         "3002"
       ],

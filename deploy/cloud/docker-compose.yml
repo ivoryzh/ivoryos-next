@@ -1,0 +1,59 @@
+# IvoryOS Cloud: the web app and its daemon, supervised by Docker.
+#
+#   First time / after `git pull`:   docker compose -f deploy/cloud/docker-compose.yml up -d --build
+#   Logs:                            docker compose -f deploy/cloud/docker-compose.yml logs -f
+#   Stop:                            docker compose -f deploy/cloud/docker-compose.yml down
+#
+# Two services from one image, not one container running both: each is restarted on its own if it
+# crashes, and `restart: unless-stopped` brings both back after a reboot. (For running on a bare
+# machine without Docker, `npm run start:all` in cloud_frontend/ does the pairing in one process.)
+#
+# Mode follows the environment, exactly as without Docker (AGENTS.md section 0): leave SUPABASE_URL
+# unset for a LAN lab (SQLite on the shared volume + the daemon's embedded broker), set it for the
+# hosted product (Supabase + AWS IoT; no broker port needed).
+
+name: ivoryos-cloud
+
+x-app: &app
+  image: ivoryos-cloud:latest
+  build:
+    context: ../..
+    dockerfile: deploy/cloud/Dockerfile
+  restart: unless-stopped
+  # tini as PID 1: forwards stop signals and reaps zombies, so `docker compose down` is clean.
+  init: true
+  env_file:
+    - path: ../../cloud_frontend/.env.local
+      required: false
+  environment:
+    IVORYOS_LOCAL_DB: /data/ivoryos_cloud.db
+  volumes:
+    # The LAN database, shared by both services (SQLite in WAL mode on one host is safe).
+    - cloud-data:/data
+    # AWS IoT certificates for the daemon, in cloud mode only (AWS_IOT_*_PATH=/certs/...).
+    - ../../cloud_frontend/certs:/certs:ro
+
+services:
+  web:
+    <<: *app
+    ports:
+      - "${IVORYOS_WEB_PORT:-3002}:3000"
+    healthcheck:
+      # Liveness of the web app only. Whether the daemon and broker are healthy is what
+      # /api/health *reports*; a down daemon must not get the web container restarted.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  daemon:
+    <<: *app
+    command: ["node", "--disable-warning=ExperimentalWarning", "daemon.js"]
+    ports:
+      # LAN mode's embedded broker, where edge devices connect. Change the host side if another
+      # broker already has 1883 on this machine; unused in cloud mode.
+      - "${IVORYOS_MQTT_PORT:-1883}:1883"
+
+volumes:
+  cloud-data:

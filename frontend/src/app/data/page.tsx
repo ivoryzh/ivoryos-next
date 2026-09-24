@@ -4,7 +4,9 @@ import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { readNamedOutput, ResultView } from '@ivoryos/shared-ui';
+import {
+  ResultView, RunDataTable, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf,
+} from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned. When that value is a plain scalar — the overwhelmingly common case, since that's the
@@ -51,9 +53,172 @@ type TimelineStep = {
   status?: string;
   start_time?: string;
   end_time?: string;
-  /** Which trial/row this step belonged to, for runs that repeat the same sequence. */
-  iteration?: number;
+  /**
+   * Which trial/row this step belonged to, for runs that repeat the same sequence -- or 'prep' /
+   * 'cleanup' for the steps that ran once around them.
+   */
+  iteration?: BandKey;
 };
+
+type BandKey = number | 'prep' | 'cleanup';
+
+const secondsBetween = (a?: string, b?: string) => {
+  if (!a || !b) return '';
+  const ms = parseServerTime(b) - parseServerTime(a);
+  return Number.isFinite(ms) ? `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)}s` : '';
+};
+
+const StatusDot = ({ status }: { status?: string }) => (
+  <span
+    title={status}
+    className={`w-2 h-2 rounded-full shrink-0 ${status === 'completed' ? 'bg-green-500'
+      : status === 'error' ? 'bg-red-500'
+        : status === 'running' || status === 'waiting_input' ? 'bg-indigo-500 animate-pulse'
+          : 'bg-gray-300 dark:bg-gray-600'}`}
+  />
+);
+
+/**
+ * One step as a line of log: what was called, with what, and what came back. Arguments are the
+ * ones actually passed (bookkeeping keys like `_row`/`_phase` dropped). An If/While shows its
+ * condition, the values it read, and the outcome -- every outcome, for a While -- which the edge
+ * records on the step (`condition_record` in queue.py).
+ */
+const summarizeStep = (step: any): { label: string; args: string; outcome: string } => {
+  const params: Record<string, any> = step.params || {};
+  const outputs: any = step.result || {};
+  const visibleArgs = Object.entries(params)
+    .filter(([k]) => !k.startsWith('_'))
+    .map(([k, v]) => `${k}=${cellText(v)}`)
+    .join(', ');
+
+  if (!isFlowStep(step)) {
+    const value = stepResultValue(step.result);
+    return {
+      label: `${step.instrument}.${step.method}`,
+      args: visibleArgs,
+      outcome: value === undefined || value === null ? '' : cellText(value),
+    };
+  }
+
+  switch (step.method) {
+    case 'If':
+    case 'While': {
+      const read = Object.entries(outputs.variables || {}).map(([k, v]) => `${k}=${cellText(v)}`).join(', ');
+      const history: boolean[] = outputs.history || [];
+      const outcome = step.method === 'While' && history.length > 1
+        ? history.map(b => (b ? 'true' : 'false')).join(', ')
+        : outputs.result === undefined ? '' : String(outputs.result);
+      return { label: `${step.method} ${params.condition ?? ''}`.trim(), args: read, outcome };
+    }
+    case 'Sleep':
+      return { label: 'Sleep', args: `${params.duration_seconds ?? ''}s`, outcome: '' };
+    case 'Comment':
+      // The interpolated message once it has run; the raw template (with its #names) otherwise.
+      return outputs.message !== undefined
+        ? { label: 'Comment', args: '', outcome: cellText(outputs.message) }
+        : { label: 'Comment', args: cellText(params.message ?? ''), outcome: '' };
+    case 'User_Input':
+      return {
+        label: 'User Input',
+        args: String(params.variable_name || ''),
+        outcome: outputs.result === undefined ? '' : cellText(outputs.result),
+      };
+    default:
+      return { label: String(step.method).replace(/_/g, ' '), args: '', outcome: '' };
+  }
+};
+
+/** Steps as log lines. Click a line for the full result or error. */
+const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
+  const [open, setOpen] = useState<number | null>(null);
+  return (
+    <div className="divide-y divide-gray-100 dark:divide-white/5 min-w-0">
+      {steps.map((step: any, i: number) => {
+        const { label, args, outcome } = summarizeStep(step);
+        const isOpen = open === i;
+        const hasMore = !!step.error || (!isFlowStep(step) && step.result && outcome.length > 0);
+        return (
+          <div key={i} className={`min-w-0 ${step.status === 'skipped' ? 'opacity-50' : ''}`}>
+            <div
+              onClick={() => hasMore && setOpen(isOpen ? null : i)}
+              className={`flex items-center gap-2 px-3 py-1 text-xs font-mono min-w-0 ${hasMore ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03]' : ''}`}
+            >
+              <span className="w-6 text-right text-[10px] text-gray-400 shrink-0">{start + i + 1}</span>
+              <StatusDot status={step.status} />
+              <span className="text-indigo-600 dark:text-indigo-400 font-semibold truncate shrink-0 max-w-[40%]" title={label}>{label}</span>
+              <span className="text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={args}>{args}</span>
+              {outcome !== '' && (
+                <span className="text-gray-800 dark:text-gray-200 truncate shrink-0 max-w-[35%]" title={outcome}>&rarr; {outcome}</span>
+              )}
+              <span className="text-[10px] text-gray-400 w-12 text-right shrink-0">{secondsBetween(step.start_time, step.end_time)}</span>
+            </div>
+            {step.error && (
+              <pre
+                onClick={() => setOpen(isOpen ? null : i)}
+                className="ml-11 mr-3 mb-1 px-2 py-1 rounded text-[11px] whitespace-pre-wrap break-all cursor-pointer bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 max-h-48 overflow-auto"
+                style={{ overflowWrap: 'anywhere' }}
+              >
+                {isOpen ? step.error : String(step.error).split('\n')[0]}
+              </pre>
+            )}
+            {isOpen && !step.error && (
+              <div className="ml-11 mr-3 mb-1.5 p-2 rounded border text-xs bg-gray-50 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-600 dark:text-gray-300 overflow-hidden">
+                <ResultView value={stepResultValue(step.result)} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+/**
+ * One collapsible line of a repeated run: a row or trial, or the Prep/Cleanup that ran once
+ * around them. Prep and cleanup used to be folded into row 1 (the first row's slice of the flat
+ * step list started with them), which is why they are groups of their own.
+ */
+const iterationLabelOf = (run: any) => (run.type === 'Optimization' ? 'Trial' : run.type === 'Spreadsheet' ? 'Row' : 'Run');
+
+const LogGroup = ({ label, summary, steps, muted, defaultOpen }: {
+  label: string; summary?: string; steps: any[]; muted?: boolean; defaultOpen?: boolean;
+}) => {
+  const [open, setOpen] = useState(!!defaultOpen);
+  if (steps.length === 0) return null;
+  const first = steps.find(s => s.start_time)?.start_time;
+  const last = [...steps].reverse().find(s => s.end_time)?.end_time;
+  return (
+    <div className="min-w-0">
+      <div
+        onClick={() => setOpen(!open)}
+        className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03] min-w-0 ${muted ? 'bg-gray-50/60 dark:bg-white/[0.02]' : ''}`}
+      >
+        <StatusDot status={aggregateStatus(steps)} />
+        <span className={`text-xs font-semibold shrink-0 w-16 ${muted ? 'text-gray-500 dark:text-gray-400' : 'text-gray-700 dark:text-gray-200'}`}>{label}</span>
+        <span className="text-[11px] font-mono text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={summary}>{summary}</span>
+        <span className="text-[10px] text-gray-400 shrink-0">
+          {steps.length} step{steps.length === 1 ? '' : 's'}{first && last ? ` · ${secondsBetween(first, last)}` : ''}
+        </span>
+        {open ? <ChevronUp className="w-3.5 h-3.5 text-gray-400 shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
+      </div>
+      {open && (
+        <div className="border-t border-gray-100 dark:border-white/5 bg-gray-50/40 dark:bg-white/[0.01]">
+          <StepList steps={steps} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const LogCard = ({ title, children }: { title: string; children: React.ReactNode }) => (
+  <div className="min-w-0">
+    <SectionTitle>{title}</SectionTitle>
+    <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 shadow-sm min-w-0 overflow-hidden divide-y divide-gray-100 dark:divide-white/5">
+      {children}
+    </div>
+  </div>
+);
 
 const stepLabel = (step: TimelineStep) =>
   (step.instrument === 'Flow_Control' || step.instrument === 'Flow Control')
@@ -62,24 +227,33 @@ const stepLabel = (step: TimelineStep) =>
 
 const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; iterationLabel?: string }) => {
   const [hovered, setHovered] = useState<number | null>(null);
-  const [hoveredIteration, setHoveredIteration] = useState<number | null>(null);
+  const [hoveredIteration, setHoveredIteration] = useState<BandKey | null>(null);
   // Which iteration the step track is showing. null = the whole run.
-  const [zoom, setZoom] = useState<number | null>(null);
+  const [zoom, setZoom] = useState<BandKey | null>(null);
 
   const timed = steps.filter(s => s.start_time);
 
-  const startOf = (s: TimelineStep) => new Date(s.start_time!).getTime();
-  const endOf = (s: TimelineStep) => new Date(s.end_time || s.start_time!).getTime();
+  const startOf = (s: TimelineStep) => parseServerTime(s.start_time!);
+  const endOf = (s: TimelineStep) => parseServerTime(s.end_time || s.start_time!);
 
   const unit = iterationLabel || 'Iteration';
-  const iterationNumbers = [...new Set(timed.map(s => s.iteration).filter(v => v !== undefined))].sort(
-    (a, b) => (a as number) - (b as number),
-  ) as number[];
-  const hasIterations = iterationNumbers.length > 1;
+  const present = new Set(timed.map(s => s.iteration).filter(v => v !== undefined));
+  const rowNumbers = ([...present].filter(v => typeof v === 'number') as number[]).sort((a, b) => a - b);
+  // Prep and cleanup get bands of their own, either side of the rows. Without them the ribbon is
+  // laid out against the whole run but only draws the rows, so the time spent in prep showed up
+  // as an unexplained empty stretch before row 1.
+  const bandKeys: BandKey[] = [
+    ...(present.has('prep') ? ['prep' as const] : []),
+    ...rowNumbers,
+    ...(present.has('cleanup') ? ['cleanup' as const] : []),
+  ];
+  const hasIterations = bandKeys.length > 1;
+  const isPhase = (k: BandKey) => typeof k !== 'number';
+  const bandName = (k: BandKey) => (k === 'prep' ? 'Prep' : k === 'cleanup' ? 'Cleanup' : `${unit} ${k}`);
 
   // One band per repetition of the sequence, which is the unit a repeated run is actually read
   // in: "trial 7 was the slow one" is the question, not "the 41st bar was the slow one".
-  const bands = iterationNumbers.map(n => {
+  const bands = bandKeys.map(n => {
     const own = timed.filter(s => s.iteration === n);
     return {
       n,
@@ -110,7 +284,9 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
   // Steps are drawn when they can be told apart: a single sequence, or one iteration zoomed in.
   // Zoomed out over fifty trials the per-step bars were a grey smear that answered nothing, so
   // the bands stand in for them until you pick one.
-  const showSteps = !hasIterations || zoom !== null;
+  // With a single iteration there is nothing to pick between, so the steps are always drawn; the
+  // ribbon above still marks where prep and cleanup sat around it.
+  const showSteps = rowNumbers.length <= 1 || zoom !== null;
 
   // Where the time went, over whatever is currently in view.
   const byLabel = new Map<string, number>();
@@ -123,21 +299,37 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
 
   const active = hovered !== null ? viewSteps[hovered] : null;
   const activeBand = hoveredIteration !== null ? bands.find(b => b.n === hoveredIteration) : null;
-  const slowestBand = bands.length > 1
-    ? bands.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a))
+  const rowBands = bands.filter(b => !isPhase(b.n));
+  // Rows in one batch run together (the walk is block-major: every row's first step, then every
+  // row's second), so their spans genuinely overlap. On a single line they were drawn over each
+  // other and read as misplaced; each overlapping band gets the first lane that is free by then.
+  const laneEnds: number[] = [];
+  const laneOf = new Map<BandKey, number>();
+  [...bands].sort((a, b) => a.start - b.start).forEach(band => {
+    let lane = laneEnds.findIndex(end => end <= band.start);
+    if (lane === -1) { lane = laneEnds.length; laneEnds.push(band.end); } else laneEnds[lane] = band.end;
+    laneOf.set(band.n, lane);
+  });
+  const BAND_H = 22;
+  const BAND_GAP = 3;
+  const slowestBand = rowBands.length > 1
+    ? rowBands.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a))
     : null;
 
+  // A floor on the width: squeezed into a narrow window the bands overlapped their own labels and
+  // the time readout wrapped, so below it the timeline scrolls sideways instead.
   return (
-    <div className="mb-6">
-      <div className="flex items-baseline justify-between mb-2 gap-3">
-        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider shrink-0">Timeline</h3>
+    <div className="overflow-x-auto">
+    <div className="min-w-[560px]">
+      <div className="flex items-baseline justify-between mb-1.5 gap-3">
+        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 shrink-0">timeline</h3>
         {/* A fixed readout rather than a native title: a 0.6%-wide bar is close to
             unhoverable, and the browser tooltip needs a hover to be held still on top of it
             before it appears at all — so the information was effectively unreachable. */}
         <div className="text-[11px] font-mono truncate text-right flex-1 min-w-0">
           {activeBand ? (
             <span className="text-gray-700 dark:text-gray-200">
-              <span className="text-indigo-600 dark:text-indigo-400 font-bold">{unit} {activeBand.n}</span>
+              <span className="text-indigo-600 dark:text-indigo-400 font-bold">{bandName(activeBand.n)}</span>
               <span className="text-gray-400">
                 {' · '}{((activeBand.end - activeBand.start) / 1000).toFixed(2)}s
                 {' · '}{activeBand.steps.length} step{activeBand.steps.length === 1 ? '' : 's'}
@@ -148,7 +340,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
           ) : active ? (
             <span className="text-gray-700 dark:text-gray-200">
               {active.iteration !== undefined && (
-                <span className="text-indigo-600 dark:text-indigo-400 font-bold">{unit} {active.iteration} · </span>
+                <span className="text-indigo-600 dark:text-indigo-400 font-bold">{bandName(active.iteration)} · </span>
               )}
               {stepLabel(active)}
               <span className="text-gray-400">
@@ -163,7 +355,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
             </span>
           ) : (
             <span className="text-gray-400 dark:text-gray-600">
-              {hasIterations
+              {rowNumbers.length > 1
                 ? `click a ${unit.toLowerCase()} to see its steps`
                 : 'hover a bar for details'}
             </span>
@@ -175,38 +367,39 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
         <>
           {/* The outer bracket: every repetition, labelled and to scale, so you can see which
               stretch of the run is which before deciding where to look. */}
-          <div className="relative h-7 mb-1.5">
+          <div className="relative mb-1" style={{ height: laneEnds.length * (BAND_H + BAND_GAP) - BAND_GAP }}>
             {bands.map(band => {
               const leftPct = ((band.start - runStart) / runMs) * 100;
               const widthPct = Math.max(((band.end - band.start) / runMs) * 100, 0.8);
               const selected = zoom === band.n;
               return (
                 <button
-                  key={band.n}
+                  key={String(band.n)}
                   type="button"
                   onClick={() => setZoom(selected ? null : band.n)}
                   onMouseEnter={() => setHoveredIteration(band.n)}
                   onMouseLeave={() => setHoveredIteration(null)}
-                  title={`${unit} ${band.n} — ${((band.end - band.start) / 1000).toFixed(2)}s, ${band.steps.length} step${band.steps.length === 1 ? '' : 's'}`}
-                  className={`absolute top-0 h-full rounded-md border text-[10px] font-bold overflow-hidden transition-colors ${
-                    selected
+                  title={`${bandName(band.n)} — ${((band.end - band.start) / 1000).toFixed(2)}s, ${band.steps.length} step${band.steps.length === 1 ? '' : 's'}`}
+                  className={`absolute rounded-md border text-[10px] font-bold overflow-hidden transition-colors ${selected
                       ? 'bg-indigo-500 border-indigo-600 text-white z-20'
                       : band.errors > 0
                         ? 'bg-red-100 border-red-300 text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:border-red-500/40 dark:text-red-300'
-                        : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-500/15 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-500/25'
-                  } ${hoveredIteration === band.n && !selected ? 'ring-1 ring-inset ring-indigo-400' : ''}`}
-                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                        : isPhase(band.n)
+                          ? 'bg-gray-50 border-dashed border-gray-300 text-gray-500 hover:bg-gray-100 dark:bg-white/[0.03] dark:border-white/20 dark:text-gray-400 dark:hover:bg-white/[0.06]'
+                          : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-500/15 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-500/25'
+                    } ${hoveredIteration === band.n && !selected ? 'ring-1 ring-inset ring-indigo-400' : ''}`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%`, top: (laneOf.get(band.n) || 0) * (BAND_H + BAND_GAP), height: BAND_H }}
                 >
                   {/* Only when it fits. A hundred-row run is a ribbon of unlabelled blocks, and
                       the readout above names whichever one you are pointing at. */}
-                  {widthPct > 4 ? band.n : ''}
+                  {widthPct > 4 ? (isPhase(band.n) ? bandName(band.n) : band.n) : ''}
                 </button>
               );
             })}
           </div>
           <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
             <span>
-              {bands.length} {unit.toLowerCase()}{bands.length === 1 ? '' : 's'}
+              {rowBands.length} {unit.toLowerCase()}{rowBands.length === 1 ? '' : /(s|sh|ch|x)$/i.test(unit) ? 'es' : 's'}
               {slowestBand && <> · slowest {unit.toLowerCase()} {slowestBand.n} at {((slowestBand.end - slowestBand.start) / 1000).toFixed(1)}s</>}
             </span>
             {zoom !== null && (
@@ -229,7 +422,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
            you cannot hit. Picking the step nearest the cursor's position in time makes every bar
            reachable regardless of how thin it was drawn. */
         <div
-          className="relative h-8 rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden cursor-crosshair"
+          className="relative h-6 rounded-md bg-gray-100 dark:bg-white/5 overflow-hidden cursor-crosshair"
           onMouseLeave={() => setHovered(null)}
           onMouseMove={e => {
             const rect = e.currentTarget.getBoundingClientRect();
@@ -253,16 +446,15 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
             return (
               <div
                 key={idx}
-                className={`absolute top-0 h-full pointer-events-none ${STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${
-                  hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
-                }`}
+                className={`absolute top-0 h-full pointer-events-none ${STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
+                  }`}
                 style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
               />
             );
           })}
         </div>
       ) : (
-        <p className="h-8 flex items-center justify-center rounded-lg bg-gray-50 dark:bg-white/[0.03] text-[11px] text-gray-400 dark:text-gray-500">
+        <p className="h-6 flex items-center justify-center rounded-md bg-gray-50 dark:bg-white/[0.03] text-[11px] text-gray-400 dark:text-gray-500">
           Pick a {unit.toLowerCase()} above to see its steps
         </p>
       )}
@@ -271,7 +463,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
         <span>{new Date(minStart).toLocaleTimeString()}</span>
         <span className="text-center">
           {((maxEnd - minStart) / 1000).toFixed(1)}s
-          {zoom !== null ? ` in ${unit.toLowerCase()} ${zoom}` : ' total'}
+          {zoom !== null ? ` in ${bandName(zoom).toLowerCase()}` : ' total'}
           {' · '}{viewSteps.length} step{viewSteps.length === 1 ? '' : 's'}
         </span>
         <span>{new Date(maxEnd).toLocaleTimeString()}</span>
@@ -279,7 +471,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
 
       {showSteps && slowest.length > 1 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[10px] text-gray-500 dark:text-gray-400">
-          <span className="uppercase font-bold tracking-wider text-gray-400">Most time</span>
+          <span className="font-semibold text-gray-400">most time</span>
           {slowest.map(([label, ms]) => (
             <span key={label} className="font-mono">
               {label}
@@ -289,8 +481,44 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
         </div>
       )}
     </div>
+    </div>
   );
 };
+
+/**
+ * Which batch each row ran in, or null when the run was not batched.
+ *
+ * Rows in one batch run interleaved -- every row's first step, then every row's second -- so per
+ * row the timeline drew overlapping bars that read as misplaced. A batched run is drawn as its
+ * batches instead (5 rows at batch size 2 is 3 bands); the data and steps stay per row.
+ * `batch_size` is recorded on runs since it existed; older ones are grouped by overlap, which is
+ * exactly what sharing a batch looks like in time.
+ */
+function batchOfRows(run: any): Map<number, number> | null {
+  if (run.type !== 'Spreadsheet' || (run.rows?.length || 0) < 2) return null;
+  const map = new Map<number, number>();
+  const size = Number(run.batchSize) || 0;
+  if (size) {
+    for (const r of run.rows) map.set(r.row, Math.ceil(r.row / size));
+  } else {
+    const spans = run.rows
+      .map((r: any) => {
+        const starts = (r.details || []).map((d: any) => parseServerTime(d.start_time)).filter(Number.isFinite);
+        const ends = (r.details || []).map((d: any) => parseServerTime(d.end_time || d.start_time)).filter(Number.isFinite);
+        return starts.length ? { row: r.row, start: Math.min(...starts), end: Math.max(...ends) } : null;
+      })
+      .filter(Boolean)
+      .sort((a: any, b: any) => a.start - b.start);
+    let batch = 0;
+    let end = -Infinity;
+    for (const s of spans) {
+      if (s.start >= end) batch += 1;
+      end = Math.max(end, s.end);
+      map.set(s.row, batch);
+    }
+  }
+  return new Set(map.values()).size < run.rows.length ? map : null;
+}
 
 export default function DataPage() {
   const [history, setHistory] = useState<any[]>([]);
@@ -300,129 +528,11 @@ export default function DataPage() {
   const [plots, setPlots] = useState<Record<string, string> | null>(null);
   const [plotsError, setPlotsError] = useState<string | null>(null);
   const [plotsLoading, setPlotsLoading] = useState(false);
-  const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [pendingDeleteRun, setPendingDeleteRun] = useState<any>(null);
   const [isDeletingRun, setIsDeletingRun] = useState(false);
 
-  const formatRuns = (runs: any[]) => runs.map((r: any) => {
-      let vars = r.parameters?.variables || [];
-      let type = r.parameters?.type || (vars.length > 0 ? 'Spreadsheet' : 'Sequence');
-      
-      let rows = [];
-      if (type === 'Sequence') {
-          rows = [{
-              row: 1,
-              status: r.status,
-              data: r.steps?.map((s: any) => s.status === 'completed' ? JSON.stringify(s.outputs?.result || '').replace(/,/g, ';') : (s.error || s.status)).join(',')
-          }];
-          vars = r.steps?.map((s: any) => `${s.instrument}.${s.method}`) || [];
-      } else if (type === 'Optimization') {
-          const paramSpace = r.parameters?.parameter_space || [];
-          const objectiveConfig = r.parameters?.objective_config || [];
-          const seqTemplate = r.parameters?.sequence_template || [];
-          const seqLength = seqTemplate.length;
-          const paramNames = paramSpace.map((p: any) => p.name);
-          const objectiveNames = objectiveConfig.map((o: any) => o.name);
-          vars = [...paramNames, ...objectiveNames.map((n: string) => `${n} (objective)`)];
-
-          const iterationCount = seqLength > 0 ? Math.ceil((r.steps?.length || 0) / seqLength) : 0;
-          for (let i = 0; i < iterationCount; i++) {
-              const iterSteps = r.steps?.slice(i * seqLength, (i + 1) * seqLength) || [];
-              const hasError = iterSteps.some((s: any) => s.status === 'error');
-              const isRunning = iterSteps.some((s: any) => s.status === 'running');
-              const isPending = iterSteps.every((s: any) => s.status === 'pending');
-              const status = hasError ? 'error' : isRunning ? 'running' : isPending ? 'pending' : 'completed';
-
-              // The suggested value for each search-space parameter shows up as a step argument
-              // somewhere in this iteration's steps (whichever templated call actually used it).
-              const paramValues = paramNames.map((name: string) => {
-                  const step = iterSteps.find((s: any) => s.parameters && name in (s.parameters || {}));
-                  return step ? step.parameters[name] : '';
-              });
-              // The objective's value is whatever step in the template was configured with that
-              // returnVar — match by template position since steps themselves don't store returnVar.
-              const objectiveValues = objectiveNames.map((name: string) =>
-                  readNamedOutput(name, seqTemplate, iterSteps));
-
-              rows.push({
-                  row: i + 1,
-                  status,
-                  data: [...paramValues, ...objectiveValues].join(','),
-                  details: iterSteps.map((s: any) => ({
-                      instrument: s.instrument,
-                      method: s.method,
-                      status: s.status,
-                      result: s.outputs,
-                      error: s.error,
-                      start_time: s.start_time,
-                      end_time: s.end_time
-                  }))
-              });
-          }
-      } else if (type === 'Spreadsheet') {
-          const inputVars = vars;
-          const rowCount = r.parameters?.rows?.length || 0;
-          // Only present on runs submitted after this was added — older persisted runs have no
-          // record of which step is "the" output, so they fall back to input-only columns below
-          // (their outputs are still visible per-row in the UI, and via Export Log).
-          const seqTemplate = r.parameters?.sequence_template || [];
-          // One step can save several named outputs (one per field of a structured return), so
-          // each becomes its own column rather than the whole "a, b" list becoming one.
-          const returnVars = seqTemplate.flatMap((t: any) =>
-              t.returnBindings?.length
-                  ? t.returnBindings.map((b: any) => b.var).filter(Boolean)
-                  : String(t.returnVar || '').split(',').map((v: string) => v.trim()).filter(Boolean));
-          const seqLength = seqTemplate.length || (rowCount > 0 && r.steps?.length ? Math.floor(r.steps.length / rowCount) : 0);
-          vars = [...inputVars, ...returnVars];
-
-          for(let i=0; i<rowCount; i++) {
-              const rowSteps = r.steps?.slice(i * seqLength, (i+1) * seqLength) || [];
-              const hasError = rowSteps.some((s: any) => s.status === 'error');
-              const isRunning = rowSteps.some((s: any) => s.status === 'running');
-              const isPending = rowSteps.every((s: any) => s.status === 'pending');
-              const status = hasError ? 'error' : isRunning ? 'running' : isPending ? 'pending' : 'completed';
-
-              const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
-              // Match each returnVar to the step at the same position in the per-row template —
-              // rowSteps mirrors seqTemplate's order since every row repeats the same block sequence.
-              const outputVals = returnVars.map((rv: string) => readNamedOutput(rv, seqTemplate, rowSteps));
-              const dataStr = [...inputVals, ...outputVals].join(',');
-
-              rows.push({
-                  row: i + 1,
-                  status,
-                  data: dataStr,
-                  details: rowSteps.map((s:any) => ({
-                      instrument: s.instrument,
-                      method: s.method,
-                      status: s.status,
-                      result: s.outputs,
-                      error: s.error,
-                      start_time: s.start_time,
-                      end_time: s.end_time
-                  }))
-              });
-          }
-      }
-      
-      return {
-          id: r.id,
-          name: r.name || 'Unnamed Workflow',
-          type,
-          timestamp: r.start_time || new Date().toISOString(),
-          variables: vars,
-          rows,
-          steps: r.steps,
-          config: type === 'Optimization' ? {
-              optimizer: r.parameters?.optimizer,
-              budget: r.parameters?.budget,
-              error_recovery: r.parameters?.error_recovery,
-              optimizer_config: r.parameters?.optimizer_config || {},
-              parameter_space: r.parameters?.parameter_space || [],
-              objective_config: r.parameters?.objective_config || []
-          } : null
-      };
-  });
+  // One reading of a run record, shared with Cloud's view of synced results.
+  const formatRuns = (runs: any[]) => runs.map(formatRun);
 
   useEffect(() => {
     // Theme init
@@ -432,17 +542,17 @@ export default function DataPage() {
     else document.documentElement.classList.remove('dark');
 
     const fetchRuns = async () => {
-        try {
-            const res = await fetch(`${API_BASE}/api/queue/runs`);
-            const data = await res.json();
-            const formatted = formatRuns(data.runs);
-            setHistory(formatted);
-            setSelectedRun((prev: any) => prev ? formatted.find((f: any) => f.id === prev.id) || prev : formatted[0]);
-        } catch(e) {}
+      try {
+        const res = await fetch(`${API_BASE}/api/queue/runs`);
+        const data = await res.json();
+        const formatted = formatRuns(data.runs);
+        setHistory(formatted);
+        setSelectedRun((prev: any) => prev ? formatted.find((f: any) => f.id === prev.id) || prev : formatted[0]);
+      } catch (e) { }
     };
 
     fetchRuns();
-    
+
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
       .then(data => setEdgeStatus(data))
@@ -450,21 +560,21 @@ export default function DataPage() {
 
     const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
     ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            if (data.status) setEdgeStatus(data.status);
-            if (data.runs) {
-                const formatted = formatRuns(data.runs);
-                setHistory(formatted);
-                setSelectedRun((prev: any) => prev ? formatted.find((f: any) => f.id === prev.id) || prev : formatted[0]);
-            }
-        } catch(e) {}
+      try {
+        const data = JSON.parse(event.data);
+        if (data.status) setEdgeStatus(data.status);
+        if (data.runs) {
+          const formatted = formatRuns(data.runs);
+          setHistory(formatted);
+          setSelectedRun((prev: any) => prev ? formatted.find((f: any) => f.id === prev.id) || prev : formatted[0]);
+        }
+      } catch (e) { }
     };
-      
+
     return () => {
-        ws.close();
+      ws.close();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -501,150 +611,148 @@ export default function DataPage() {
     if (newTheme === 'dark') document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
   };
-  
+
   const deleteRun = async (run: any) => {
-     setIsDeletingRun(true);
-     try {
-        const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to delete run');
-        setHistory(prev => prev.filter(r => r.id !== run.id));
-        setSelectedRun((prev: any) => (prev?.id === run.id ? null : prev));
-        setPendingDeleteRun(null);
-     } catch (e: any) {
-        alert("Failed to delete run: " + e.message);
-     } finally {
-        setIsDeletingRun(false);
-     }
+    setIsDeletingRun(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete run');
+      setHistory(prev => prev.filter(r => r.id !== run.id));
+      setSelectedRun((prev: any) => (prev?.id === run.id ? null : prev));
+      setPendingDeleteRun(null);
+    } catch (e: any) {
+      alert("Failed to delete run: " + e.message);
+    } finally {
+      setIsDeletingRun(false);
+    }
   };
 
   const clearHistory = async () => {
-     if(confirm("Are you sure you want to clear all history? (Not implemented in DB yet)")) {
-         // Future: call DELETE /api/queue/runs
-         alert("Clearing history directly from the Edge database will be added soon.");
-     }
+    if (confirm("Are you sure you want to clear all history? (Not implemented in DB yet)")) {
+      // Future: call DELETE /api/queue/runs
+      alert("Clearing history directly from the Edge database will be added soon.");
+    }
   };
-  
+
   const downloadRunDataCSV = (run: any) => {
-     if (!run || run.type !== 'Spreadsheet') return;
-     
-     const header = run.variables.join(',');
-     const csvRows = run.rows.map((r: any) => {
-         const escapedData = r.data.split(',').map((d: string) => `"${d}"`).join(',');
-         return escapedData;
-     });
-     
-     const csvContent = "data:text/csv;charset=utf-8," + header + "\n" + csvRows.join("\n");
-     const encodedUri = encodeURI(csvContent);
-     const link = document.createElement("a");
-     link.setAttribute("href", encodedUri);
-     link.setAttribute("download", `ivoryos_data_${run.id}.csv`);
-     document.body.appendChild(link);
-     link.click();
-     link.remove();
+    if (!run || !run.variables?.length) return;
+
+    // Row values are kept as an array rather than a comma-joined string: joining and splitting
+    // again broke every value that contained a comma (any structured result) into extra columns.
+    // A Blob rather than an encodeURI'd data: URL, which silently truncated the file at the
+    // first '#' in any value.
+    const url = URL.createObjectURL(new Blob([datasheetCsv(run)], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `ivoryos_data_${run.id}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   const downloadRunLogCSV = (run: any) => {
-     if (!run || !run.steps) return;
-     
-     const paramKeys = new Set<string>();
-     const outputKeys = new Set<string>();
-     
-     const flattenObj = (obj: any, prefix = ''): Record<string, string> => {
-         const res: Record<string, string> = {};
-         if (!obj) return res;
-         Object.entries(obj).forEach(([k, v]) => {
-             const newKey = prefix ? `${prefix}.${k}` : k;
-             if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-                 Object.assign(res, flattenObj(v, newKey));
-             } else {
-                 res[newKey] = String(v);
-             }
-         });
-         return res;
-     };
+    if (!run || !run.steps) return;
 
-     run.steps.forEach((step: any) => {
-         const params = { ...(step.parameters || {}) };
-         delete params._phase;
-         const flatParams = flattenObj(params);
-         Object.keys(flatParams).forEach(k => paramKeys.add(`Param:${k}`));
-         
-         const flatOutputs = flattenObj(step.outputs);
-         Object.keys(flatOutputs).forEach(k => outputKeys.add(`Output:${k}`));
-     });
-     
-     const pKeys = Array.from(paramKeys).sort();
-     const oKeys = Array.from(outputKeys).sort();
-     
-     const header = ["Step Index", "Phase", "Iteration", "Instrument", "Method", "Status", "Start Time", "End Time", "Error", ...pKeys, ...oKeys].join(',');
-     
-     let phaseCounts: Record<string, number> = {};
-     let currentPhaseStr = '';
-     
-     const csvRows = run.steps.map((step: any, idx: number) => {
-         const params = { ...(step.parameters || {}) };
-         const phase = params._phase || 'Main';
-         delete params._phase;
-         
-         if (phase !== currentPhaseStr) {
-             currentPhaseStr = phase;
-             phaseCounts = {};
-         }
-         
-         const stepKey = `${step.instrument}.${step.method}`;
-         phaseCounts[stepKey] = (phaseCounts[stepKey] || 0) + 1;
-         const iteration = phaseCounts[stepKey];
-         
-         const escapeCSV = (s: any) => {
-             if (s === null || s === undefined) return '';
-             const str = String(s);
-             if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-                 return `"${str.replace(/"/g, '""')}"`;
-             }
-             return str;
-         };
-         
-         const flatParams = flattenObj(params);
-         const flatOutputs = flattenObj(step.outputs);
-         
-         const pVals = pKeys.map(k => escapeCSV(flatParams[k.replace('Param:', '')]));
-         const oVals = oKeys.map(k => escapeCSV(flatOutputs[k.replace('Output:', '')]));
-         
-         const formatDate = (dateString: string) => {
-             if (!dateString) return '';
-             try {
-                 const d = new Date(dateString);
-                 const pad = (n: number) => n.toString().padStart(2, '0');
-                 return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-             } catch (e) {
-                 return dateString;
-             }
-         };
-         
-         return [
-             idx + 1,
-             phase,
-             iteration,
-             step.instrument,
-             step.method,
-             step.status,
-             formatDate(step.start_time),
-             formatDate(step.end_time),
-             escapeCSV(step.error),
-             ...pVals,
-             ...oVals
-         ].join(',');
-     });
-     
-     const csvContent = "data:text/csv;charset=utf-8," + header + "\n" + csvRows.join("\n");
-     const encodedUri = encodeURI(csvContent);
-     const link = document.createElement("a");
-     link.setAttribute("href", encodedUri);
-     link.setAttribute("download", `ivoryos_log_${run.id}.csv`);
-     document.body.appendChild(link);
-     link.click();
-     link.remove();
+    const paramKeys = new Set<string>();
+    const outputKeys = new Set<string>();
+
+    const flattenObj = (obj: any, prefix = ''): Record<string, string> => {
+      const res: Record<string, string> = {};
+      if (!obj) return res;
+      Object.entries(obj).forEach(([k, v]) => {
+        const newKey = prefix ? `${prefix}.${k}` : k;
+        if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+          Object.assign(res, flattenObj(v, newKey));
+        } else {
+          res[newKey] = String(v);
+        }
+      });
+      return res;
+    };
+
+    run.steps.forEach((step: any) => {
+      const params = { ...(step.parameters || {}) };
+      delete params._phase;
+      const flatParams = flattenObj(params);
+      Object.keys(flatParams).forEach(k => paramKeys.add(`Param:${k}`));
+
+      const flatOutputs = flattenObj(step.outputs);
+      Object.keys(flatOutputs).forEach(k => outputKeys.add(`Output:${k}`));
+    });
+
+    const pKeys = Array.from(paramKeys).sort();
+    const oKeys = Array.from(outputKeys).sort();
+
+    const header = ["Step Index", "Phase", "Iteration", "Instrument", "Method", "Status", "Start Time", "End Time", "Error", ...pKeys, ...oKeys].join(',');
+
+    let phaseCounts: Record<string, number> = {};
+    let currentPhaseStr = '';
+
+    const csvRows = run.steps.map((step: any, idx: number) => {
+      const params = { ...(step.parameters || {}) };
+      const phase = params._phase || 'Main';
+      delete params._phase;
+
+      if (phase !== currentPhaseStr) {
+        currentPhaseStr = phase;
+        phaseCounts = {};
+      }
+
+      const stepKey = `${step.instrument}.${step.method}`;
+      phaseCounts[stepKey] = (phaseCounts[stepKey] || 0) + 1;
+      const iteration = phaseCounts[stepKey];
+
+      const escapeCSV = (s: any) => {
+        if (s === null || s === undefined) return '';
+        const str = String(s);
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+
+      const flatParams = flattenObj(params);
+      const flatOutputs = flattenObj(step.outputs);
+
+      const pVals = pKeys.map(k => escapeCSV(flatParams[k.replace('Param:', '')]));
+      const oVals = oKeys.map(k => escapeCSV(flatOutputs[k.replace('Output:', '')]));
+
+      const formatDate = (dateString: string) => {
+        if (!dateString) return '';
+        try {
+          const d = serverDate(dateString);
+          const pad = (n: number) => n.toString().padStart(2, '0');
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        } catch (e) {
+          return dateString;
+        }
+      };
+
+      return [
+        idx + 1,
+        phase,
+        iteration,
+        step.instrument,
+        step.method,
+        step.status,
+        formatDate(step.start_time),
+        formatDate(step.end_time),
+        escapeCSV(step.error),
+        ...pVals,
+        ...oVals
+      ].join(',');
+    });
+
+    const csvContent = "data:text/csv;charset=utf-8," + header + "\n" + csvRows.join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `ivoryos_log_${run.id}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   };
 
   return (
@@ -684,329 +792,192 @@ export default function DataPage() {
 
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden min-w-0">
-         <div className="w-80 min-w-[20rem] max-w-[20rem] flex-none border-r border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/20 flex flex-col">
-            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-               <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">Run History</h2>
-               <button onClick={clearHistory} className="text-red-500 hover:text-red-600 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20" title="Clear All History">
-                  <Trash2 className="w-4 h-4" />
-               </button>
-            </header>
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                {history.length === 0 ? (
-                    <div className="text-gray-500 dark:text-gray-600 italic text-sm text-center mt-10">No history found.</div>
-                ) : (
-                    history.map(run => (
-                        <div
-                           key={run.id}
-                           onClick={() => setSelectedRun(run)}
-                           className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
-                        >
-                           <div className="flex justify-between items-center mb-1 gap-2">
-                               <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate min-w-0">{run.name.split(' - ')[0]}</span>
-                               <div className="flex items-center gap-1.5 shrink-0">
-                                   <span className="text-[10px] text-gray-500">{new Date(run.timestamp).toLocaleString()}</span>
-                                   <button
-                                      onClick={(e) => { e.stopPropagation(); setPendingDeleteRun(run); }}
-                                      title="Delete run"
-                                      className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-opacity"
-                                   >
-                                       <Trash2 className="w-3.5 h-3.5" />
-                                   </button>
-                               </div>
-                           </div>
-                           <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
-                               {run.variables.length} variables • {run.rows.length} rows
-                           </div>
-                        </div>
-                    ))
-                )}
-            </div>
-         </div>
-         
-         <div className="flex-1 flex flex-col relative z-0 min-w-0 overflow-hidden">
-            {selectedRun ? (
-                <>
-                <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-                  <div className="flex items-center space-x-3">
-                    <Database className="w-5 h-5 text-indigo-500" />
-                    <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">{selectedRun.name.split(' - ')[0]}</h2>
+        <div className="w-80 min-w-[20rem] max-w-[20rem] flex-none border-r border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/20 flex flex-col">
+          <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+            <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">Run History</h2>
+            <button onClick={clearHistory} className="text-red-500 hover:text-red-600 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20" title="Clear All History">
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </header>
+          <div className="flex-1 overflow-y-auto p-4 space-y-2">
+            {history.length === 0 ? (
+              <div className="text-gray-500 dark:text-gray-600 italic text-sm text-center mt-10">No history found.</div>
+            ) : (
+              history.map(run => (
+                <div
+                  key={run.id}
+                  onClick={() => setSelectedRun(run)}
+                  className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
+                >
+                  <div className="flex justify-between items-center mb-1 gap-2">
+                    <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate min-w-0">{run.name.split(' - ')[0]}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[10px] text-gray-500">{serverDate(run.timestamp).toLocaleString()}</span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setPendingDeleteRun(run); }}
+                        title="Delete run"
+                        className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-opacity"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center space-x-2">
-                    {selectedRun.type === 'Spreadsheet' && (
-                        <button 
-                            onClick={() => downloadRunDataCSV(selectedRun)}
-                            className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
-                        >
-                          <Download className="w-4 h-4" />
-                          <span>Export Data</span>
-                        </button>
-                    )}
-                    <button 
-                        onClick={() => downloadRunLogCSV(selectedRun)}
-                        className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
+                    {run.variables.length} variables • {run.rows.length} rows
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col relative z-0 min-w-0 overflow-hidden">
+          {selectedRun ? (
+            <>
+              <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+                <div className="flex items-center space-x-3">
+                  <Database className="w-5 h-5 text-indigo-500" />
+                  <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">{selectedRun.name.split(' - ')[0]}</h2>
+                  {selectedRun.deckVersion != null && (
+                    <span
+                      title="The version of the instruments' schema this run executed against (Instruments → deck history)"
+                      className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"
+                    >
+                      deck v{selectedRun.deckVersion}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center space-x-2">
+                  {selectedRun.variables?.length > 0 && (
+                    <button
+                      onClick={() => downloadRunDataCSV(selectedRun)}
+                      className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
                     >
                       <Download className="w-4 h-4" />
-                      <span>Export Log</span>
+                      <span>Export Data</span>
                     </button>
-                  </div>
-                </header>
-                <div className="p-8 flex-1 overflow-y-auto overflow-x-hidden pb-24 min-w-0 w-full relative">
-                  <div className="max-w-5xl mx-auto space-y-4 w-full min-w-0">
-                      {selectedRun.type === 'Optimization' && selectedRun.config && (
-                          <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-5 shadow-sm min-w-0">
-                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Configuration</h3>
-                              <div className="flex flex-wrap gap-x-8 gap-y-3 mb-4">
-                                  <div>
-                                      <div className="text-[10px] uppercase font-bold text-gray-400">Optimizer</div>
-                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.optimizer || '—'}</div>
-                                  </div>
-                                  <div>
-                                      <div className="text-[10px] uppercase font-bold text-gray-400">Budget</div>
-                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.budget ?? '—'}</div>
-                                  </div>
-                                  <div>
-                                      <div className="text-[10px] uppercase font-bold text-gray-400">Error Recovery</div>
-                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.error_recovery || '—'}</div>
-                                  </div>
-                                  {Object.entries(selectedRun.config.optimizer_config || {}).map(([stepKey, stepDef]: [string, any]) => (
-                                      <div key={stepKey}>
-                                          <div className="text-[10px] uppercase font-bold text-gray-400">{stepKey.replace('_', ' ')}</div>
-                                          <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{stepDef?.model}{stepDef?.num_samples !== undefined ? ` (${stepDef.num_samples})` : ''}</div>
-                                      </div>
-                                  ))}
-                              </div>
-                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                                  {selectedRun.config.parameter_space.map((p: any) => (
-                                      <div key={p.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
-                                          <span className="text-[11px] font-bold text-indigo-500 font-mono truncate">#{p.name}</span>
-                                          <span className="text-xs text-gray-600 dark:text-gray-300">
-                                              {p.type === 'choice' ? `choice: ${(p.bounds || []).join(', ')}` : `range: ${p.bounds?.[0]} – ${p.bounds?.[1]}`}
-                                              <span className="text-gray-400"> ({p.value_type})</span>
-                                          </span>
-                                      </div>
-                                  ))}
-                                  {selectedRun.config.objective_config.map((o: any) => (
-                                      <div key={o.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
-                                          <span className="text-[11px] font-bold text-green-500 font-mono truncate">{o.name}</span>
-                                          <span className="text-xs text-gray-600 dark:text-gray-300">objective — {o.minimize ? 'minimize' : 'maximize'}</span>
-                                      </div>
-                                  ))}
-                              </div>
+                  )}
+                  <button
+                    onClick={() => downloadRunLogCSV(selectedRun)}
+                    className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Export Log</span>
+                  </button>
+                </div>
+              </header>
+              <div className="p-8 flex-1 overflow-y-auto overflow-x-hidden pb-24 min-w-0 w-full relative">
+                <div className="max-w-5xl mx-auto space-y-3 w-full min-w-0">
+                  {selectedRun.type === 'Optimization' && selectedRun.config && (
+                    <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-5 shadow-sm min-w-0">
+                      <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-4">configuration</h3>
+                      <div className="flex flex-wrap gap-x-8 gap-y-3 mb-4">
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Optimizer</div>
+                          <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.optimizer || '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Budget</div>
+                          <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.budget ?? '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Error Recovery</div>
+                          <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.error_recovery || '—'}</div>
+                        </div>
+                        {Object.entries(selectedRun.config.optimizer_config || {}).map(([stepKey, stepDef]: [string, any]) => (
+                          <div key={stepKey}>
+                            <div className="text-[10px] uppercase font-bold text-gray-400">{stepKey.replace('_', ' ')}</div>
+                            <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{stepDef?.model}{stepDef?.num_samples !== undefined ? ` (${stepDef.num_samples})` : ''}</div>
                           </div>
-                      )}
-                      {selectedRun.type === 'Optimization' && (
-                          <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-5 shadow-sm min-w-0">
-                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Optimizer Plots</h3>
-                              {plotsLoading ? (
-                                  <div className="text-sm text-gray-400 dark:text-gray-500">Loading plots…</div>
-                              ) : plotsError ? (
-                                  <div className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.03] border border-gray-100 dark:border-white/5 rounded-lg p-3">
-                                      {plotsError}
-                                      {plotsError.toLowerCase().includes('no optimizer plots available') && (
-                                          <div className="mt-1 text-xs text-gray-400">Plots are only kept in memory for the most recently completed optimization run in this server session — run this optimization again to see fresh plots here.</div>
-                                      )}
-                                  </div>
-                              ) : plots ? (
-                                  <div className="space-y-6">
-                                      {Object.entries(plots).map(([plotName, plotHtml]) => (
-                                          <div key={plotName}>
-                                              <div className="text-[10px] uppercase font-bold text-gray-400 mb-2">{plotName}</div>
-                                              <PlotFrame html={plotHtml} />
-                                          </div>
-                                      ))}
-                                  </div>
-                              ) : (
-                                  <div className="text-sm text-gray-400 dark:text-gray-500">No plots available.</div>
-                              )}
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                        {selectedRun.config.parameter_space.map((p: any) => (
+                          <div key={p.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
+                            <span className="text-[11px] font-bold text-indigo-500 font-mono truncate">#{p.name}</span>
+                            <span className="text-xs text-gray-600 dark:text-gray-300">
+                              {p.type === 'choice' ? `choice: ${(p.bounds || []).join(', ')}` : `range: ${p.bounds?.[0]} – ${p.bounds?.[1]}`}
+                              <span className="text-gray-400"> ({p.value_type})</span>
+                            </span>
                           </div>
-                      )}
-                      <ExecutionTimeline
-                          iterationLabel={selectedRun.type === 'Optimization' ? 'Trial' : 'Row'}
-                          steps={selectedRun.type === 'Sequence'
-                              ? (selectedRun.steps || [])
-                              // Carry the row/trial number onto each step. Flattening without it
-                              // left every repeated run as one undifferentiated band of bars.
-                              : selectedRun.rows.flatMap((r: any) =>
-                                  (r.details || []).map((d: any) => ({ ...d, iteration: r.row })))}
-                      />
-                      {selectedRun.type === 'Sequence' ? (
-                          <div className="space-y-4 min-w-0">
-                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Execution Steps</h3>
-                              {selectedRun.steps?.map((step: any, idx: number) => {
-                                    const isFlowControl = step.instrument === 'Flow_Control' || step.instrument === 'Flow Control';
-                                    const paramsWithoutPhase = { ...(step.parameters || {}) };
-                                    const phase = paramsWithoutPhase._phase;
-                                    delete paramsWithoutPhase._phase;
-
-                                    // Return pointers read better as "name <- field" than as raw
-                                    // JSON, and the flat _return_var list is redundant beside them.
-                                    const bindings = paramsWithoutPhase._return_bindings;
-                                    if (Array.isArray(bindings) && bindings.length > 0) {
-                                        delete paramsWithoutPhase._return_bindings;
-                                        delete paramsWithoutPhase._return_var;
-                                        paramsWithoutPhase.saves = bindings
-                                            .map((b: any) => (b.path ? `${b.var} \u2190 ${b.path}` : b.var))
-                                            .join(', ');
-                                    }
-                                    
-                                    const prevPhase = idx > 0 ? selectedRun.steps[idx - 1].parameters?._phase : null;
-                                    const showPhaseDivider = phase && phase !== prevPhase;
-                                    
-                                    const hasParams = Object.keys(paramsWithoutPhase).length > 0;
-                                    const hasResult = step.outputs && Object.keys(step.outputs).length > 0 && !(Object.keys(step.outputs).length === 1 && step.outputs.result === null);
-                                    
-                                    return (
-                                        <div key={idx}>
-                                            {showPhaseDivider && (
-                                                <div className="flex items-center space-x-4 my-6">
-                                                    <div className="flex-1 border-t border-gray-200 dark:border-white/10"></div>
-                                                    <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">{phase} Phase</span>
-                                                    <div className="flex-1 border-t border-gray-200 dark:border-white/10"></div>
-                                                </div>
-                                            )}
-                                            <div className={`bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 ${(!isFlowControl && (hasParams || hasResult || step.error)) ? 'p-4' : 'px-4 py-3'} shadow-sm min-w-0 mb-3`}>
-                                                <div className={`flex items-center justify-between ${(!isFlowControl && (hasParams || hasResult || step.error)) ? 'mb-3' : ''}`}>
-                                                    <div className="flex items-center space-x-3">
-                                                        <span className="text-gray-400 font-mono text-xs">[{idx + 1}]</span>
-                                                        <span className="font-bold text-indigo-600 dark:text-indigo-400 break-words">
-                                                            {isFlowControl ? step.method : `${step.instrument}.${step.method}`}
-                                                            {isFlowControl && step.method === 'If' && <span className="ml-2 font-mono text-xs text-indigo-500 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded border border-indigo-100 dark:border-indigo-500/30">condition: {paramsWithoutPhase.condition}</span>}
-                                                            {isFlowControl && step.method === 'While' && <span className="ml-2 font-mono text-xs text-indigo-500 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded border border-indigo-100 dark:border-indigo-500/30">condition: {paramsWithoutPhase.condition}</span>}
-                                                            {isFlowControl && step.method === 'Sleep' && <span className="ml-2 font-mono text-xs text-indigo-500 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded border border-indigo-100 dark:border-indigo-500/30">{paramsWithoutPhase.duration_seconds}s</span>}
-                                                        </span>
-                                                    </div>
-                                                    <div className="flex items-center space-x-4">
-                                                        <span className="text-[10px] text-gray-400 hidden sm:block">
-                                                            {step.start_time && `${new Date(step.start_time).toLocaleTimeString()}`}
-                                                            {step.end_time && ` - ${new Date(step.end_time).toLocaleTimeString()}`}
-                                                        </span>
-                                                        <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
-                                                            step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 
-                                                            step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 
-                                                            step.status === 'running' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' :
-                                                            'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-                                                        }`}>
-                                                            {step.status}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                
-                                                {!isFlowControl && (hasParams || hasResult || step.error) && (
-                                                    <div className="grid grid-cols-2 gap-4 min-w-0 mt-3">
-                                                        {hasParams && (
-                                                            <div className="min-w-0 col-span-2 md:col-span-1">
-                                                                <div className="text-[10px] uppercase font-bold text-gray-400 mb-1">Parameters</div>
-                                                                <pre className="text-xs bg-gray-50 dark:bg-white/[0.02] p-2 rounded border border-gray-100 dark:border-white/5 overflow-hidden text-gray-600 dark:text-gray-300 max-w-full whitespace-pre-wrap break-all" style={{overflowWrap: 'anywhere'}}>
-                                                                    {Object.entries(paramsWithoutPhase).map(([key, val]) => `${key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}: ${typeof val === 'object' ? JSON.stringify(val) : val}`).join('\n')}
-                                                                </pre>
-                                                            </div>
-                                                        )}
-                                                        {(hasResult || step.error) && (
-                                                            <div className={`min-w-0 ${!hasParams ? 'col-span-2' : 'col-span-2 md:col-span-1'}`}>
-                                                                <div className="text-[10px] uppercase font-bold text-gray-400 mb-1">Result / Output</div>
-                                                                {step.error ? (
-                                                                  <pre className="text-xs p-2 rounded border overflow-hidden max-w-full whitespace-pre-wrap break-all bg-red-50 dark:bg-red-900/10 border-red-100 dark:border-red-500/20 text-red-600 dark:text-red-400" style={{overflowWrap: 'anywhere'}}>
-                                                                    {step.error}
-                                                                  </pre>
-                                                                ) : (
-                                                                  <div className="text-xs p-2 rounded border overflow-hidden max-w-full bg-gray-50 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-600 dark:text-gray-300">
-                                                                    <ResultView value={stepResultValue(step.outputs)} />
-                                                                  </div>
-                                                                )}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                )}
-                                                
-
-                                            </div>
-                                        </div>
-                                    );
-                                })}
+                        ))}
+                        {selectedRun.config.objective_config.map((o: any) => (
+                          <div key={o.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
+                            <span className="text-[11px] font-bold text-green-500 font-mono truncate">{o.name}</span>
+                            <span className="text-xs text-gray-600 dark:text-gray-300">objective — {o.minimize ? 'minimize' : 'maximize'}</span>
                           </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedRun.type === 'Optimization' && (
+                    <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 p-5 shadow-sm min-w-0">
+                      <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-4">optimizer plots</h3>
+                      {plotsLoading ? (
+                        <div className="text-sm text-gray-400 dark:text-gray-500">Loading plots…</div>
+                      ) : plotsError ? (
+                        <div className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.03] border border-gray-100 dark:border-white/5 rounded-lg p-3">
+                          {plotsError}
+                          {plotsError.toLowerCase().includes('no optimizer plots available') && (
+                            <div className="mt-1 text-xs text-gray-400">Plots are only kept in memory for the most recently completed optimization run in this server session — run this optimization again to see fresh plots here.</div>
+                          )}
+                        </div>
+                      ) : plots ? (
+                        <div className="space-y-6">
+                          {Object.entries(plots).map(([plotName, plotHtml]) => (
+                            <div key={plotName}>
+                              <div className="text-[10px] uppercase font-bold text-gray-400 mb-2">{plotName}</div>
+                              <PlotFrame html={plotHtml} />
+                            </div>
+                          ))}
+                        </div>
                       ) : (
-                          selectedRun.rows.map((row: any, idx: number) => {
-                          const dataCols = row.data.split(',');
-                          const isExpanded = expandedRow === idx;
-                          return (
-                              <div key={idx} className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden shadow-sm transition-all hover:border-gray-300 dark:hover:border-white/20 min-w-0">
-                                  <div 
-                                     onClick={() => setExpandedRow(isExpanded ? null : idx)}
-                                     className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.02]"
-                                  >
-                                      <div className="flex items-center space-x-6 min-w-0">
-                                          <div className="flex flex-col items-center justify-center w-12 shrink-0">
-                                              <span className="text-[10px] uppercase font-bold text-gray-400 dark:text-gray-500 mb-0.5">Row</span>
-                                              <span className="text-lg font-mono font-bold text-gray-700 dark:text-gray-300">{row.row}</span>
-                                          </div>
-                                          <div className="h-8 w-px bg-gray-200 dark:bg-white/10 shrink-0"></div>
-                                          <span className={`px-2.5 py-1 rounded text-xs font-bold uppercase tracking-wider ${row.status === 'success' || row.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : row.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'}`}>
-                                             {row.status}
-                                          </span>
-                                      </div>
-                                      <div className="flex items-center space-x-4 text-gray-500">
-                                          <span className="text-sm font-medium hidden sm:block">{selectedRun.variables.length} Variables</span>
-                                          <div className="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-white/10">
-                                            {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-                                          </div>
-                                      </div>
-                                  </div>
-                                  
-                                  {isExpanded && (
-                                      <div className="p-6 bg-gray-50/50 dark:bg-white/[0.02] border-t border-gray-100 dark:border-white/5 min-w-0 overflow-hidden">
-                                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 mb-6 min-w-0">
-                                              {selectedRun.variables.map((v: string, i: number) => (
-                                                  <div key={v} className="flex flex-col space-y-1.5 min-w-0">
-                                                      <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wider truncate">{v}</span>
-                                                      <div className="text-sm font-mono text-gray-800 dark:text-gray-200 p-2.5 bg-white dark:bg-black/50 rounded-lg border border-gray-200 dark:border-white/10 break-all shadow-sm overflow-hidden">
-                                                          {dataCols[i]}
-                                                      </div>
-                                                  </div>
-                                              ))}
-                                          </div>
-                                          
-                                          {row.details && row.details.length > 0 && (
-                                              <div className="space-y-3 w-full min-w-0">
-                                                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider border-b border-gray-100 dark:border-white/5 pb-2">Execution Steps</h4>
-                                                  {row.details.map((step: any, sIdx: number) => (
-                                                      <div key={sIdx} className="bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg p-3 text-sm shadow-sm w-full min-w-0 overflow-hidden">
-                                                           <div className="flex justify-between items-center mb-1 min-w-0">
-                                                              <div className="flex items-center space-x-2 min-w-0">
-                                                                  <span className="text-gray-400 font-mono text-[10px] shrink-0">[{sIdx + 1}]</span>
-                                                                  <span className="font-bold text-indigo-600 dark:text-indigo-400 text-xs truncate">{step.instrument}.{step.method}</span>
-                                                              </div>
-                                                              <span className={`px-2 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold shrink-0 ml-2 ${step.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : step.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-100 text-gray-500'}`}>{step.status}</span>
-                                                           </div>
-                                                           {(step.result || step.error) && (
-                                                              step.error ? (
-                                                                <pre className="mt-2 p-2 rounded text-xs overflow-hidden w-full max-w-full whitespace-pre-wrap break-all bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 border border-red-100 dark:border-red-500/20" style={{overflowWrap: 'anywhere'}}>
-                                                                  {step.error}
-                                                                </pre>
-                                                              ) : (
-                                                                <div className="mt-2 p-2 rounded text-xs overflow-hidden w-full max-w-full bg-gray-50 dark:bg-white/[0.02] text-gray-600 dark:text-gray-300 border border-gray-100 dark:border-white/5">
-                                                                  <ResultView value={stepResultValue(step.result)} />
-                                                                </div>
-                                                              )
-                                                           )}
-                                                      </div>
-                                                  ))}
-                                              </div>
-                                          )}
-                                      </div>
-                                  )}
-                              </div>
-                          );
-                      })
+                        <div className="text-sm text-gray-400 dark:text-gray-500">No plots available.</div>
                       )}
-                  </div>
+                    </div>
+                  )}
+                  {/* Timeline, then data, then steps: when it ran, what it produced, how. */}
+                  {(() => {
+                    const batches = batchOfRows(selectedRun);
+                    return (
+                  <ExecutionTimeline
+                    iterationLabel={batches ? 'Batch' : iterationLabelOf(selectedRun)}
+                    steps={[
+                        ...(selectedRun.prep || []).map((d: any) => ({ ...d, iteration: 'prep' as const })),
+                        ...selectedRun.rows.flatMap((r: any) =>
+                          (r.details || []).map((d: any) => ({ ...d, iteration: batches ? (batches.get(r.row) ?? r.row) : r.row }))),
+                        ...(selectedRun.cleanup || []).map((d: any) => ({ ...d, iteration: 'cleanup' as const })),
+                      ]}
+                  />
+                    );
+                  })()}
+                  <RunDataTable run={selectedRun} />
+                    <LogCard title="steps">
+                      <LogGroup label="Prep" summary="ran once" steps={selectedRun.prep || []} muted />
+                      {selectedRun.rows.map((row: any) => (
+                        <LogGroup
+                          key={`${selectedRun.id}-${row.row}`}
+                          defaultOpen={selectedRun.rows.length === 1}
+                          label={selectedRun.rows.length === 1 && selectedRun.type === 'Sequence'
+                            ? 'Run'
+                            : `${iterationLabelOf(selectedRun)} ${row.row}`}
+                          summary={selectedRun.variables
+                            .map((v: string, i: number) => `${v}=${cellText(row.values?.[i])}`)
+                            .join('  ')}
+                          steps={row.details || []}
+                        />
+                      ))}
+                      <LogGroup label="Cleanup" summary="ran once" steps={selectedRun.cleanup || []} muted />
+                    </LogCard>
                 </div>
-                </>
-            ) : (
-                <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
-                    Select a run from the history list to view details.
-                </div>
-            )}
-         </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
+              Select a run from the history list to view details.
+            </div>
+          )}
+        </div>
       </main>
     </div>
   );

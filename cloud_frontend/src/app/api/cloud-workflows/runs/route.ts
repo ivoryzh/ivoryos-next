@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
+import { experimentName, workflowSourcesFor } from '@/lib/runSources';
 import { getStore } from '@/lib/store';
 import { planRun } from '@/lib/dag';
+import { buildRunTasks, resolveGraphForDispatch } from '@/lib/planTasks';
 
 // Replaces orchestrator.ts's in-memory startRun — that Map never survived a dev-server reload and
 // couldn't be read by daemon.js (a separate process) at all, which is exactly why dispatch never
@@ -15,6 +17,11 @@ import { planRun } from '@/lib/dag';
 // graph can arrive here having never been drawn in this session at all — restored from
 // localStorage, loaded from the Library, or POSTed directly — and an invalid graph used to be
 // accepted and then hang partway through with no terminal state and no explanation.
+//
+// It is also where each node's run payload is built (`buildRunTasks`), rather than at dispatch
+// time: `daemon.js` has no build step and cannot import the TypeScript that produces one, and a
+// payload that is going to reach real hardware should be validated while someone is still looking
+// at the screen that produced it.
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -22,7 +29,10 @@ export async function POST(req: Request) {
     const edges: any[] = body.edges || [];
     const runId = `run_${Date.now()}`;
 
-    const { errors, tasks } = planRun(runId, nodes, edges);
+    // Values first, then plan: `planRun` rejects a single-step node still holding a `#name`,
+    // so the graph has to arrive at it already resolved. See resolveGraphForDispatch.
+    const resolved = resolveGraphForDispatch(nodes);
+    const { errors, tasks } = planRun(runId, resolved, edges);
     if (errors.length > 0) {
       // `error` is the single string the Orchestrator canvas already surfaces; `errors` keeps the
       // per-problem codes for a caller that wants to do something better than an alert().
@@ -32,28 +42,23 @@ export async function POST(req: Request) {
       );
     }
 
+    const name = await experimentName(body.name, body.base);
+    const built = buildRunTasks(tasks, resolved, name, await workflowSourcesFor(resolved));
+    if (built.problems.length > 0) {
+      return NextResponse.json({ error: built.problems.join('\n') }, { status: 400 });
+    }
+
     const store = getStore();
     await store.insertRun({
       id: runId,
-      name: body.name || 'Distributed Run',
+      name,
       status: 'running',
-      nodes,
+      // The resolved graph, so the stored run records what ran rather than what was drawn.
+      nodes: resolved,
       edges,
     });
 
-    if (tasks.length > 0) {
-      // `deps` is derived state, recomputed from runs.edges on every advance — it travels with
-      // the plan for logging but is deliberately not a column, so there is only ever one copy of
-      // the graph.
-      const rows = tasks.map(t => ({
-        run_id: t.run_id,
-        node_id: t.node_id,
-        device_id: t.device_id,
-        block: t.block,
-        status: t.status,
-      }));
-      await store.insertTasks(rows);
-    }
+    if (built.rows.length > 0) await store.insertTasks(built.rows);
 
     return NextResponse.json({ runId });
   } catch (error: any) {

@@ -28,6 +28,8 @@ export {
   newBlockId,
   reuseWorkflow,
   scanDynamicParams,
+  scanLiveInputVars,
+  scanReturnVars,
   toSavedBlock,
   toSavedBlocks,
   toSequenceBlock,
@@ -40,3 +42,36 @@ export {
   toDiffStep,
 } from './workflowBody';
 export type { ReuseMode, SavedBlock, SavedWorkflowBody, DiffRow, DiffStep, StepChange } from './workflowBody';
+export { RunConfigError, resolveBlockParams, resolveFixedBlock, toWireBlock } from './runConfig';
+export type { ResolveOptions, ResolvedStep } from './runConfig';
+export {
+  isRowActive,
+  groupSizeFor,
+  chunkRowGroups,
+  expandSpreadsheet,
+  buildSpreadsheetParameters,
+  toSubmittedStep,
+} from './spreadsheetRun';
+export type { SpreadsheetRow, RowGroup, ExpandedSpreadsheetStep, ExpandOptions } from './spreadsheetRun';
+export { SpreadsheetTable } from './SpreadsheetTable';
+export type { SpreadsheetTableProps } from './SpreadsheetTable';
+export {
+  emptyOptimizeConfig,
+  getVarMode,
+  getVarModeType,
+  isPerIteration,
+  getIterationValue,
+  partitionVariables,
+  buildOptimizationParameters,
+} from './optimizerConfig';
+export type { OptimizeConfig, VarBound, ObjectiveConfig, BuildOptimizationOptions } from './optimizerConfig';
+export { formatDuration, estimateRunSeconds, runtimeSummary } from './workflowRuntime';
+export type { WorkflowRuntime } from './workflowRuntime';
+
+export {
+  formatRun, datasheetCsv, phaseOf, toDetail, cellText, csvField, isFlowStep, templateOf,
+  namedOutputsOf, isUserInputStep, userInputVarsOf, userInputValue, aggregateStatus,
+} from './runRecord';
+export type { FormattedRun, RunRow } from './runRecord';
+export { RunDataTable, SectionTitle } from './RunDataTable';
+export { parseServerTime, serverDate } from './serverTime';

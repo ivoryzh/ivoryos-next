@@ -91,6 +91,8 @@ client.on('connect', () => {
     client.subscribe(`${TOPIC_PREFIX}/+/schema`);
     client.subscribe(`${TOPIC_PREFIX}/+/sequences/+`);
     client.subscribe(`${TOPIC_PREFIX}/+/task-status`);
+    // A finished Cloud task's run record (edge queue.build_cloud_result), sent once at the end.
+    client.subscribe(`${TOPIC_PREFIX}/+/task-result`);
     // Retained messages replay immediately on subscribe — this is the entire "catch up on
     // reconnect" mechanism, for both this daemon restarting AND an edge device reconnecting.
     // No polling, no explicit sync request needed on either side.
@@ -133,7 +135,32 @@ client.on('message', async (topic, message) => {
 
     try {
         if (kind === 'status') {
-            await store.upsertDeviceStatus(deviceId, payload.online ? 'online' : 'offline');
+            const prev = deviceState.get(deviceId);
+            // An edge too old to report `busy` is never assumed idle, or its tasks could be failed
+            // as lost while they wait in its queue.
+            const idle = !!payload.online && 'busy' in (payload || {}) && !payload.busy;
+            deviceState.set(deviceId, {
+                online: !!payload.online,
+                session: payload.session || null,
+                busy: !!payload.busy,
+                at: Date.now(),
+                // When it last became idle, for spotting a task that was sent and never arrived.
+                idleSince: idle ? (prev && prev.idleSince) || Date.now() : null,
+            });
+            await store.upsertDeviceStatus(deviceId, payload.online ? 'online' : 'offline', !!payload.busy);
+            // Back from offline (or first heard since this process started): tell it what Cloud
+            // is holding for it, since it missed every update while away.
+            // `session` changes on every edge (re)connect: the retained heartbeat alone cannot
+            // show a restart, so a summary sent to the previous process would never be resent.
+            if (payload.online && (!(prev && prev.online) || (payload.session && prev.session !== payload.session))) {
+                lastCloudQueue.delete(deviceId);
+            }
+        } else if (kind === 'task-result') {
+            if (payload && payload.runId && payload.nodeId && payload.result) {
+                await store.setTaskResult(payload.runId, payload.nodeId, payload.result);
+                const steps = (payload.result.steps || []).length;
+                console.log(`[Daemon] Results for ${payload.runId}/${payload.nodeId} stored (${steps} steps${payload.result.truncated ? ', truncated' : ''}).`);
+            }
         } else if (kind === 'schema') {
             await store.upsertDeviceSchema(deviceId, payload);
             const count = Object.keys((payload && payload.instruments) || {}).length;
@@ -196,6 +223,13 @@ writeHeartbeat();
 async function handleTaskStatus(payload) {
     const { runId, nodeId, status } = payload;
     if (!runId || !nodeId || !status) return;
+    // A progress update: the task is still running, only how far it has got changed. Stored with
+    // the same terminal guard, so one landing after "completed" is dropped like a late "running".
+    const progress = payload.progress && typeof payload.progress === 'object' ? payload.progress : undefined;
+    if (progress) {
+        await store.updateTaskStatusIfNotTerminal(runId, nodeId, status, TERMINAL_TASK_STATUSES, progress);
+        return;
+    }
 
     // MQTT QoS 1 only guarantees at-least-once, in-order delivery per publisher connection — but
     // a "running" message sent moments before "completed" can still arrive after it (observed
@@ -215,6 +249,24 @@ async function handleTaskStatus(payload) {
     // 'error' can strand them permanently. The error case used to just stamp the run 'error' and
     // return, which left every downstream task sitting at 'blocked' forever — safe (they never
     // ran) but indistinguishable in the UI from a run still making progress.
+    if (status === 'completed') {
+        // A node with a cadence is not finished when one occurrence finishes — it is due again
+        // later. Scheduling the next occurrence deliberately does NOT advance the run: nothing
+        // downstream of a repeating node may start until it has run the number of times it was
+        // asked to, which is what makes "every 20 minutes, 12 times" mean a sequence of 12 runs
+        // rather than one run and eleven stragglers racing whatever came after it.
+        try {
+            if (await store.scheduleTaskRepeat(runId, nodeId)) {
+                console.log(`[Daemon] Task ${runId}/${nodeId} repeats — next occurrence scheduled.`);
+                return;
+            }
+        } catch (e) {
+            // Falling through to advanceRun is the safe direction: the run finishes early rather
+            // than hanging on an occurrence that was never scheduled.
+            console.error(`[Daemon] Failed to schedule repeat for ${runId}/${nodeId}:`, e.message);
+        }
+    }
+
     if (status === 'completed' || status === 'error') {
         await advanceRun(runId);
     }
@@ -272,18 +324,78 @@ async function advanceRun(runId) {
 // which is what this did originally — leaves a window where the same task can be sent to a real
 // instrument twice. If the publish then fails, the claim is released back to 'pending' so the
 // next tick retries it rather than leaving it stuck at 'queued' forever.
+//
+// One Cloud task per device at a time. Most instruments are single-threaded, and a task handed to
+// a busy device only waits in that device's own queue, where Cloud can no longer reorder it,
+// cancel it, or tell "waiting" from "lost". So a ready task stays 'pending' here until its device
+// has nothing of ours in flight; the once-a-second sweep below offers it again. A task is one
+// whole node -- a bare step, or a workflow with its prep, iterations and cleanup -- so this is
+// "one workflow at a time per device", not one step.
+const claimingFor = new Set(); // device ids with a check-and-claim in progress in this process
+
+// Each device's latest heartbeat: `{online, busy, at}`. `busy` is the device's own answer -- any
+// run in progress or queued there, including ones started at the bench, which Cloud's task table
+// cannot see. Kept in memory: this process is the only dispatcher and hears every heartbeat, and
+// the retained status replays the moment it (re)subscribes.
+const deviceState = new Map();
+const HEARTBEAT_STALE_MS = 15000;
+
+/** Why a task for this device must wait, or null when it may go now. */
+function deviceNotReady(deviceId) {
+    const state = deviceState.get(deviceId);
+    if (!state) return 'no heartbeat yet';
+    if (!state.online) return 'offline';
+    if (Date.now() - state.at > HEARTBEAT_STALE_MS) return 'heartbeat is stale';
+    if (state.busy) return 'busy';
+    return null;
+}
+
 async function dispatchTask(task) {
     if (!task || task.status !== 'pending') return;
 
-    const claimed = await store.updateTaskStatusFrom(
-        task.run_id, task.node_id, 'pending', 'queued', { dispatched: true },
-    );
+    // The busy check and the claim must not interleave for one device: two ready tasks arriving
+    // together would both see it idle and both be sent. The daemon is a single process, so an
+    // in-memory guard is enough; the DB state takes over once the claim has landed.
+    const device = String(task.device_id || '');
+    // Held in Cloud -- scheduled runs and repeats included, since they all come through here --
+    // while the device is offline or busy with anything, so nothing waits in the device's queue.
+    if (deviceNotReady(device)) return;
+    if (claimingFor.has(device)) return;
+    claimingFor.add(device);
+    let claimed = false;
+    try {
+        if (await store.deviceHasActiveTask(device)) return; // offered again by the next sweep
+        claimed = await store.updateTaskStatusFrom(
+            task.run_id, task.node_id, 'pending', 'queued', { dispatched: true },
+        );
+    } finally {
+        claimingFor.delete(device);
+    }
     if (!claimed) return; // someone else already took it
 
     const execTopic = `${TOPIC_PREFIX}/${task.device_id}/execute`;
-    const execPayload = JSON.stringify({
-        block: task.block, runId: task.run_id, nodeId: task.node_id,
-    });
+    // Two shapes, and the edge accepts both (see handle_cloud_task in server.py). A step that is
+    // one call still goes as a bare `block`: that is the original wire shape, and wrapping every
+    // ordinary instrument call in a run envelope would grow the payload for nothing on a broker
+    // that meters in 5KB increments. A spreadsheet or an optimization campaign cannot be
+    // expressed as one block, so those carry a whole `run` instead.
+    // A bare block carries no run name of its own, and the edge used to fall back to Cloud's ids
+    // ("Cloud Node node_... (run_...)"), which mean nothing at the bench. Send the name the run
+    // has here, plus which step this is.
+    const block = task.block || {};
+    const stepLabel = block.instrument === 'Library Workflows'
+        ? String(block.method || '')
+        : [block.instrument, block.method].filter(Boolean).join('.');
+    let runName = '';
+    try { runName = (await store.getRun(task.run_id))?.name || ''; } catch { /* the edge has a fallback */ }
+    const execPayload = JSON.stringify(
+        task.run
+            ? { run: task.run, runId: task.run_id, nodeId: task.node_id }
+            : {
+                block: task.block, runId: task.run_id, nodeId: task.node_id,
+                name: [runName, stepLabel].filter(Boolean).join(' · ') || undefined,
+            },
+    );
     client.publish(execTopic, execPayload, { qos: 1 }, async (err) => {
         if (err) {
             console.error(`[Daemon] Failed to publish task ${task.run_id}/${task.node_id}:`, err.message);
@@ -375,6 +487,167 @@ async function drainSequencePushes({ includeUnacked = false } = {}) {
 // (a device that was offline, or a publish the broker dropped).
 setInterval(() => drainSequencePushes(), 1000);
 setInterval(() => drainSequencePushes({ includeUnacked: true }), 15000);
+
+// --- Schedules: firing a whole run on a cadence ---------------------------------------------
+// The other half of "trigger this at the right moment". A per-node cadence (above) repeats one
+// step inside a run; a schedule starts the whole run again, which is what a standing experiment
+// looks like — every hour, overnight, twice a day.
+//
+// A schedule stores its run ALREADY PLANNED: the same task rows `planRun` produced when it was
+// created, with their run payloads built and validated then. Firing is therefore a pure copy, and
+// this process needs no ability to build a payload — which is just as well, since it has no build
+// step and cannot import the TypeScript that does it.
+
+function nextFireAfter(schedule, from) {
+    if (schedule.trigger_type === 'once') return null;
+    const every = Number(schedule.every_ms) || 0;
+    if (every <= 0) return null;
+    // Counted from now rather than from the scheduled time, so a daemon that was down for an hour
+    // resumes the cadence instead of firing the backlog it missed all at once.
+    const fired = Number(schedule.runs_fired) || 0;
+    const max = Number(schedule.max_runs) || 0;
+    if (max && fired + 1 >= max) return null; // this firing is the last one
+    return new Date(from + every).toISOString();
+}
+
+async function fireSchedule(schedule) {
+    const runId = `run_${Date.now()}_${schedule.id.slice(-6)}`;
+    const nextAt = nextFireAfter(schedule, Date.now());
+
+    // Claim before inserting anything, for the same reason dispatch claims before it publishes:
+    // two ticks landing together would otherwise both start this occurrence, and a scheduled run
+    // reaches real instruments.
+    const claimed = await store.claimScheduleFiring(
+        schedule.id, schedule.next_fire_at, nextAt, runId,
+    );
+    if (!claimed) return;
+
+    try {
+        await store.insertRun({
+            id: runId,
+            name: schedule.name ? `${schedule.name} (scheduled)` : 'Scheduled Run',
+            status: 'running',
+            nodes: schedule.nodes,
+            edges: schedule.edges,
+        });
+        // The stored plan carries each task's original status, so a graph whose second step waits
+        // on its first still waits on this firing too.
+        await store.insertTasks((schedule.tasks || []).map(t => ({ ...t, run_id: runId })));
+        console.log(`[Daemon] Schedule ${schedule.id} fired as ${runId}`
+            + (nextAt ? `; next at ${nextAt}.` : '; no further occurrences.'));
+    } catch (e) {
+        // The firing is already counted and cannot be un-claimed, so say loudly that this
+        // occurrence produced nothing rather than leaving a gap nobody can explain later.
+        console.error(`[Daemon] Schedule ${schedule.id} claimed but failed to start:`, e.message);
+    }
+}
+
+async function tickSchedules() {
+    try {
+        const due = await store.listDueSchedules(new Date().toISOString());
+        for (const schedule of due) await fireSchedule(schedule);
+    } catch (e) {
+        console.error('[Daemon] Schedule sweep failed:', e.message);
+    }
+}
+// A second is far finer than any real cadence here (the smallest one the UI offers is a minute)
+// and keeps a schedule from drifting visibly past the time it says it will fire.
+setInterval(tickSchedules, 1000);
+tickSchedules();
+
+// A repeating task becomes due by the clock, not by anything arriving — Realtime has nothing to
+// deliver when a `not_before` simply passes, and the LAN poll only re-reads rows it already
+// skipped. This sweep is what actually picks those up.
+// A task that was sent but never reached its device -- a dropped publish, or a device that
+// restarted before starting it -- used to stay 'queued' forever, and now that Cloud holds a
+// device's next task until the current one finishes, it would also block that device for good.
+// The device reports `busy` the instant anything is queued there, so a task still 'queued' after
+// the device has said "idle" continuously for a while is not in its queue. It is failed, never
+// re-sent: if it did run and only its report was lost, sending it again would move the hardware
+// twice.
+const LOST_AFTER_DISPATCH_MS = 30000;
+const LOST_AFTER_IDLE_MS = 20000;
+
+async function failLostTasks() {
+    const now = Date.now();
+    for (const task of await store.listTasksByStatus('queued')) {
+        const state = deviceState.get(String(task.device_id || ''));
+        const sentAt = Date.parse(task.dispatched_at || '') || 0;
+        if (!state || !state.online || !state.idleSince) continue;
+        if (now - sentAt < LOST_AFTER_DISPATCH_MS || now - state.idleSince < LOST_AFTER_IDLE_MS) continue;
+        const moved = await store.updateTaskStatusIfNotTerminal(
+            task.run_id, task.node_id, 'error', TERMINAL_TASK_STATUSES,
+        );
+        if (moved) {
+            console.warn(`[Daemon] Task ${task.run_id}/${task.node_id} never reached ${task.device_id}; marked error.`);
+            await advanceRun(task.run_id);
+        }
+    }
+}
+
+// --- What Cloud is holding for each device -------------------------------------------------
+// Tasks are never queued on a device (see dispatchTask), so a bench operator has no way to know
+// that Cloud has three more waiting for this instrument, or a scheduled run due at 14:00. Each
+// device is told, for awareness only: nothing on the device acts on it. Sent when the summary
+// changes and when the device comes back online -- not periodically, and not retained (a retained
+// publish needs iot:RetainPublish on the daemon's own AWS policy, whose absence is the silent
+// disconnect loop AGENTS.md section 0 describes).
+const lastCloudQueue = new Map();
+const CLOUD_QUEUE_ITEMS = 5;
+
+function taskLabel(task) {
+    const block = task.block || {};
+    const step = block.instrument === 'Library Workflows'
+        ? String(block.method || '')
+        : [block.instrument, block.method].filter(Boolean).join('.');
+    return [task.run_name, step].filter(Boolean).join(' · ') || task.node_id;
+}
+
+async function publishCloudQueues() {
+    if (!client.connected) return;
+    const waiting = await store.listWaitingTasks();
+    const schedules = (await store.listSchedules()).filter(s => s.enabled && s.next_fire_at);
+    const devices = new Set([...deviceState.keys()].filter(id => deviceState.get(id).online));
+    for (const t of waiting) devices.add(String(t.device_id));
+
+    for (const deviceId of devices) {
+        const mine = waiting.filter(t => String(t.device_id) === deviceId);
+        const nextSchedule = schedules
+            .filter(s => (s.tasks || []).some(t => String(t.device_id) === deviceId))
+            .map(s => ({ name: s.name, at: s.next_fire_at }))
+            .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))[0] || null;
+        const summary = {
+            waiting: mine.length,
+            // 'ready' = could run now but held until this device is free; 'blocked' = waiting on
+            // another step (maybe on another device) to finish first.
+            ready: mine.filter(t => t.status === 'pending').length,
+            items: mine.slice(0, CLOUD_QUEUE_ITEMS).map(t => ({
+                label: taskLabel(t),
+                status: t.status === 'pending' ? 'ready' : 'waiting',
+                ...(t.not_before ? { due: t.not_before } : {}),
+            })),
+            nextSchedule,
+        };
+        const key = JSON.stringify(summary);
+        if (lastCloudQueue.get(deviceId) === key) continue;
+        lastCloudQueue.set(deviceId, key);
+        client.publish(
+            `${TOPIC_PREFIX}/${deviceId}/cloud-queue`,
+            JSON.stringify({ ...summary, ts: Date.now() }),
+            { qos: 1 },
+        );
+    }
+}
+setInterval(() => publishCloudQueues().catch(e => console.error('[Daemon] Cloud queue summary failed:', e.message)), 3000);
+
+setInterval(async () => {
+    try {
+        await failLostTasks();
+        for (const task of await store.listTasksByStatus('pending')) await dispatchTask(task);
+    } catch (e) {
+        console.error('[Daemon] Due-task sweep failed:', e.message);
+    }
+}, 1000);
 
 // --- Broker reconfiguration ----------------------------------------------------------------
 // The broker host is chosen in /settings and stored, so this process has to notice it changing

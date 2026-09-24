@@ -36,6 +36,8 @@ type Props = {
   /** Opens the linked workflow itself for editing. Host-provided: only the page knows how to
    *  deal with whatever is currently unsaved on the canvas. */
   onEdit?: () => void;
+  /** Replaces the default read-only note, which talks about detaching (a Designer action). */
+  note?: React.ReactNode;
 };
 
 const PHASES: { key: 'prep' | 'script' | 'cleanup'; label: string }[] = [
@@ -65,7 +67,7 @@ function resolved(value: any, params: Record<string, any>) {
 }
 
 export function WorkflowPeek({
-  target, body, isLoading, error, latestVersion, onClose, onDetach, onUpdate, onEdit,
+  target, body, isLoading, error, latestVersion, onClose, onDetach, onUpdate, onEdit, note,
 }: Props) {
   useEffect(() => {
     if (!target) return;
@@ -115,8 +117,12 @@ export function WorkflowPeek({
           </div>
 
           <p className="mt-2.5 text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.03] border border-gray-200 dark:border-white/10 rounded-lg px-2 py-1.5">
-            These steps belong to <strong className="font-semibold">{target.name}</strong> and are read-only
-            here. Editing that workflow changes this one too — detach to get an editable copy.
+            {note ?? (
+              <>
+                These steps belong to <strong className="font-semibold">{target.name}</strong> and are read-only
+                here. Editing that workflow changes this one too — detach to get an editable copy.
+              </>
+            )}
           </p>
 
           {isStale && (

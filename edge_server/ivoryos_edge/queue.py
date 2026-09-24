@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import uuid
 from datetime import datetime
@@ -99,6 +100,168 @@ def substitute_workflow_vars(obj, context: Dict[str, Any]):
     return obj
 
 
+# Longest While history kept on the step. A loop that polls a sensor can run thousands of times;
+# the log needs to show how it went, not every evaluation of it.
+MAX_CONDITION_HISTORY = 50
+
+
+def step_row(step) -> Optional[int]:
+    """The spreadsheet row a step belongs to (`_row`, stamped by the Configure page), or None."""
+    row = (step.parameters or {}).get("_row") if isinstance(step.parameters, dict) else None
+    return row if isinstance(row, int) else None
+
+
+def scoped_context(context: Dict[str, Any], row_contexts: Dict[int, Dict[str, Any]], step) -> Dict[str, Any]:
+    """What a step reads `#name`s and conditions from: its own row's values over the run-wide ones.
+
+    A batch groups rows and walks the sequence block by block, so `measure(r1) measure(r2)` both run
+    before either row's `If absorbance > 1.5`. With one flat context every row's If read the *last*
+    row's absorbance. Values a step produces are recorded under its row as well as run-wide (see
+    `bind_values`), so a per-sample step sees its own sample's result, while a value no row has
+    produced -- a batch step's, a prep step's -- still comes from the run-wide context.
+    """
+    row = step_row(step)
+    if row is None or row not in row_contexts:
+        return context
+    return {**context, **row_contexts[row]}
+
+
+def bind_values(context: Dict[str, Any], row_contexts: Dict[int, Dict[str, Any]], step, values: Dict[str, Any]) -> None:
+    context.update(values)
+    row = step_row(step)
+    if row is not None:
+        row_contexts.setdefault(row, {}).update(values)
+
+
+def condition_record(condition: str, result: Any, context: Dict[str, Any], previous: Any = None) -> Dict[str, Any]:
+    """What an If/While step logs: the expression, the values it read, and what it came to.
+
+    Without this a finished run said only "If: completed" -- which branch ran had to be inferred from
+    which steps were skipped, and the value that decided it was not recorded anywhere. A While keeps
+    the outcome of every evaluation (capped), since "looped 3 times, then stopped" is the question.
+    """
+    names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(condition)))
+    variables = {}
+    for name in sorted(names):
+        if name in context:
+            value = context[name]
+            variables[name] = value if isinstance(value, (int, float, str, bool, type(None))) else repr(value)
+    history = list((previous or {}).get("history") or []) if isinstance(previous, dict) else []
+    history = (history + [bool(result)])[-MAX_CONDITION_HISTORY:]
+    return {"result": bool(result), "condition": str(condition), "variables": variables, "history": history}
+
+
+# Progress messages to Cloud: at most one per run every this many seconds. A step finishing every
+# 200ms would otherwise be five messages a second, all but the last already out of date on
+# arrival; a long step in between still gets its update, via the trailing send below.
+PROGRESS_MIN_INTERVAL_S = 2.0
+_DONE_STEP_STATUSES = ("completed", "skipped")
+
+
+def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Where a run is up to, in as few bytes as will say it (~150-250 B of JSON).
+
+    Sent to Cloud on the existing task-status topic. It is a *summary*, not the step list: AWS IoT
+    meters in 5KB units, and a 60-step run's full state is several of those per update, while this
+    is a fraction of one. Absent keys mean "not applicable" (no rows, not an optimization).
+    """
+    steps = sorted(run.get("steps") or [], key=lambda s: (s.get("sequence_index") or 0, s.get("id") or 0))
+    params = run.get("parameters") or {}
+    phase = lambda s: (s.get("parameters") or {}).get("_phase") or "main"
+    main = [s for s in steps if phase(s) == "main"]
+    done = sum(1 for s in steps if s.get("status") in _DONE_STEP_STATUSES)
+
+    summary: Dict[str, Any] = {"done": done, "total": len(steps), "state": run.get("status")}
+
+    current = next((s for s in steps if s.get("status") in ("running", "waiting_input", "error")), None) \
+        or next((s for s in steps if s.get("status") == "pending"), None)
+    if current:
+        summary["phase"] = phase(current)
+        flow = current.get("instrument") in ("Flow_Control", "Flow Control")
+        summary["step"] = current.get("method") if flow else f"{current.get('instrument')}.{current.get('method')}"
+        row = (current.get("parameters") or {}).get("_row")
+        if isinstance(row, int):
+            summary["row"] = row + 1
+
+    if params.get("type") == "Optimization":
+        # Trial steps are generated an iteration at a time, so the plan comes from the template.
+        per_trial = len(params.get("sequence_template") or []) or 1
+        budget = int(params.get("budget") or 0)
+        main_done = sum(1 for s in main if s.get("status") in _DONE_STEP_STATUSES)
+        planned_main = max(budget * per_trial, len(main))
+        summary["total"] = len(steps) - len(main) + planned_main
+        summary["iteration"] = min(budget, main_done // per_trial + (0 if run.get("status") == "completed" else 1))
+        summary["budget"] = budget
+    else:
+        rows = sorted({(s.get("parameters") or {}).get("_row") for s in main} - {None})
+        if len(rows) > 1:
+            by_row = {r: [s for s in main if (s.get("parameters") or {}).get("_row") == r] for r in rows}
+            summary["rows_total"] = len(rows)
+            summary["rows_done"] = sum(
+                1 for r in rows if all(s.get("status") in _DONE_STEP_STATUSES for s in by_row[r])
+            )
+    return summary
+
+
+# AWS IoT refuses a message over 128KB; leave room for the envelope.
+MAX_RESULT_BYTES = 100_000
+_RESULT_STEP_KEYS = ("id", "sequence_index", "instrument", "method", "parameters", "outputs",
+                     "status", "error", "start_time", "end_time")
+
+
+def build_cloud_result(run: Dict[str, Any]) -> Dict[str, Any]:
+    """A finished Cloud-dispatched run's record, for Cloud to keep a copy of.
+
+    The same shape `/api/queue/runs` serves (parameters + steps), because Cloud reads it with the
+    same `formatRun` Data History uses -- so the datasheet Cloud shows is the one the bench shows.
+    Sent once per run, at the end. Bench runs are never sent: this is the data of runs Cloud asked
+    for, not a mirror of the device's history.
+
+    Past MAX_RESULT_BYTES it degrades rather than failing: first the per-step error text and
+    timings go, then the steps themselves (`truncated: true`), and the full record stays on the
+    device under `edgeRunId`.
+    """
+    params = {k: v for k, v in (run.get("parameters") or {}).items() if k not in ("cloud_run_id", "cloud_node_id")}
+    steps = [{k: s.get(k) for k in _RESULT_STEP_KEYS} for s in run.get("steps") or []]
+    record = {
+        "edgeRunId": run.get("id"), "name": run.get("name"), "status": run.get("status"),
+        "start_time": run.get("start_time"), "end_time": run.get("end_time"),
+        "parameters": params, "steps": steps,
+    }
+    size = lambda r: len(json.dumps(r, default=str))
+    if size(record) > MAX_RESULT_BYTES:
+        record["steps"] = [{k: v for k, v in s.items() if k not in ("error", "start_time", "end_time")} for s in steps]
+        record["trimmed"] = True
+    if size(record) > MAX_RESULT_BYTES:
+        record["steps"] = []
+        record["truncated"] = True
+    return record
+
+
+def report_run_finished(run) -> None:
+    """Everything that has to happen once a run reaches its final status, for every kind of run.
+
+    Called from both the plain and the optimization paths. It used to live inline in the plain
+    path only, so a Cloud-dispatched *optimization* never told Cloud it had finished: the task sat
+    'queued' forever, and since Cloud now holds a device's next task until the current one is
+    done, it also blocked every later Cloud task for that device.
+    """
+    params = run.parameters or {}
+    # Imported lazily: server.py imports this module at load time.
+    from ivoryos_edge.server import notify_status_changed, publish_task_status, republish_changed_runtimes
+    if params.get("cloud_run_id"):
+        publish_task_status(params["cloud_run_id"], params.get("cloud_node_id"), run.status)
+    # Possibly free now, so a task Cloud is holding for this device can go without waiting.
+    notify_status_changed()
+    if run.status == "completed":
+        # A finished run can move a workflow's typical duration; tell Cloud off the event loop,
+        # since recomputing reads the run history synchronously.
+        try:
+            asyncio.get_running_loop().run_in_executor(None, republish_changed_runtimes)
+        except RuntimeError:
+            pass
+
+
 def interpolate_message(text: str, context: Dict[str, Any]) -> str:
     """Replaces every '#varname' found inside free text (a Comment message or a User_Input
     prompt) with that variable's current value — a lightweight f-string using the same '#name'
@@ -154,6 +317,16 @@ class WorkflowQueueManager:
         self.cancelled = False
         self.pause_event: Optional[asyncio.Event] = None
         self.error_action: Optional[str] = None
+        # Cloud tasks whose runs a restart abandoned (see cleanup_zombies): reported to Cloud as
+        # errors once the broker is connected, since Cloud would otherwise wait on them forever.
+        self.abandoned_cloud_tasks: List[Dict[str, Any]] = []
+        # Cloud progress reporting (report_cloud_progress): which runs came from Cloud, and the
+        # per-run throttle state.
+        self._cloud_run_ids: Dict[int, bool] = {}
+        # What Cloud is holding for this device (daemon.js publishCloudQueues), for awareness on
+        # the Queue page only -- nothing here acts on it.
+        self.cloud_queue: Optional[Dict[str, Any]] = None
+        self._progress_state: Dict[int, Dict[str, Any]] = {}
         
         self.current_task: Optional[asyncio.Task] = None
         self.current_step_task: Optional[asyncio.Future] = None
@@ -183,13 +356,20 @@ class WorkflowQueueManager:
         from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
         from datetime import datetime
         async with async_session() as session:
-            # Fix stuck and pending runs
+            # Fix stuck and pending runs. 'waiting_input' too: the prompt's answer is awaited on an
+            # in-memory event, so after a restart nothing can ever resume it -- yet it went on
+            # reading as "in progress", which now also tells Cloud this device is busy, forever.
             runs = await session.execute(
-                select(WorkflowRun).where(WorkflowRun.status.in_(["running", "pending"]))
+                select(WorkflowRun).where(WorkflowRun.status.in_(["running", "pending", "waiting_input", "paused"]))
             )
             for run in runs.scalars():
                 run.status = "error"
                 run.end_time = datetime.utcnow()
+                params = run.parameters or {}
+                if params.get("cloud_run_id"):
+                    self.abandoned_cloud_tasks.append(
+                        {"runId": params["cloud_run_id"], "nodeId": params.get("cloud_node_id")}
+                    )
 
             # A run that stopped on a failed step is marked 'error' but deliberately left without
             # an end_time: the execution loop is still sitting on it, waiting for a retry / skip /
@@ -207,7 +387,7 @@ class WorkflowQueueManager:
 
             # Fix stuck and pending steps
             steps = await session.execute(
-                select(WorkflowStep).where(WorkflowStep.status.in_(["running", "pending"]))
+                select(WorkflowStep).where(WorkflowStep.status.in_(["running", "pending", "waiting_input"]))
             )
             for step in steps.scalars():
                 step.status = "error"
@@ -291,6 +471,9 @@ class WorkflowQueueManager:
                 self.current_task = asyncio.create_task(self._execution_loop())
                 
             await self.broadcast_global_queue()
+            # The device just became busy; tell Cloud now rather than on the next heartbeat.
+            from ivoryos_edge.server import notify_status_changed
+            notify_status_changed()
             return run_id
             
     def pause(self):
@@ -362,7 +545,8 @@ class WorkflowQueueManager:
             "status": {
                 "status": "running", 
                 "active_workflow_id": self.active_run_id,
-                "queue_paused": self.paused
+                "queue_paused": self.paused,
+                "cloud_queue": self.cloud_queue,
             }
         }
         
@@ -397,7 +581,73 @@ class WorkflowQueueManager:
         """Helper to broadcast both run status and global queue"""
         if run_id is not None:
             await self.broadcast_run_status(run_id)
+            await self.report_cloud_progress(run_id)
         await self.broadcast_global_queue()
+
+    async def publish_cloud_result(self, run_id: int) -> None:
+        """Send a finished Cloud-dispatched run's record to Cloud (see build_cloud_result).
+
+        Before the final status, on the same connection at QoS 1, so Cloud already holds the data
+        when it learns the task is done.
+        """
+        try:
+            run = await self.get_run_status(run_id)
+            params = (run or {}).get("parameters") or {}
+            if not params.get("cloud_run_id"):
+                return
+            from ivoryos_edge.server import publish_task_result
+            publish_task_result(params["cloud_run_id"], params.get("cloud_node_id"), build_cloud_result(run))
+        except Exception as e:
+            print(f"[Run {run_id}] Could not send results to Cloud: {e}")
+
+    async def report_cloud_progress(self, run_id: int) -> None:
+        """Tell Cloud how far a Cloud-dispatched run has got (see run_progress_summary).
+
+        Throttled to one message per PROGRESS_MIN_INTERVAL_S per run, with a trailing send so the
+        last change before a long step is never the one that gets dropped. Bench runs are looked up
+        once and then skipped. Sent at QoS 0: each message supersedes the last, so a lost one costs
+        nothing a later one does not fix, and the final completed/error status still goes at QoS 1
+        from report_run_finished. A late progress message after that is refused by Cloud's
+        terminal-status guard, the same as a late "running".
+        """
+        if self._cloud_run_ids.get(run_id) is False:
+            return
+        try:
+            run = await self.get_run_status(run_id)
+        except Exception:
+            return
+        if not run:
+            return
+        params = run.get("parameters") or {}
+        if not params.get("cloud_run_id"):
+            self._cloud_run_ids[run_id] = False
+            return
+        self._cloud_run_ids[run_id] = True
+        state = self._progress_state.setdefault(run_id, {"sent_at": 0.0, "sent": None, "timer": None})
+        if run.get("status") in ("completed", "cancelled") or (run.get("status") == "error" and run.get("end_time")):
+            # Finished: report_run_finished sends the final status. Nothing more to say.
+            if state["timer"]:
+                state["timer"].cancel()
+            self._progress_state.pop(run_id, None)
+            return
+
+        summary = run_progress_summary(run)
+        if summary == state["sent"]:
+            return
+        loop = asyncio.get_running_loop()
+        wait = state["sent_at"] + PROGRESS_MIN_INTERVAL_S - loop.time()
+        if wait > 0:
+            if not state["timer"]:
+                def flush():
+                    state["timer"] = None
+                    asyncio.ensure_future(self.report_cloud_progress(run_id))
+                state["timer"] = loop.call_later(wait, flush)
+            return
+
+        from ivoryos_edge.server import publish_task_status
+        publish_task_status(params["cloud_run_id"], params.get("cloud_node_id"), "running", progress=summary)
+        state["sent_at"] = loop.time()
+        state["sent"] = summary
 
     async def _execution_loop(self):
         while True:
@@ -423,6 +673,11 @@ class WorkflowQueueManager:
                     self.cancelled = False
                     
                     if run.parameters and run.parameters.get("type") == "Optimization":
+                        if run.parameters.get("cloud_run_id"):
+                            from ivoryos_edge.server import publish_task_status
+                            publish_task_status(
+                                run.parameters["cloud_run_id"], run.parameters.get("cloud_node_id"), "running",
+                            )
                         await self._execute_optimization_run(run_id, session, run.parameters)
                         continue
                         
@@ -432,6 +687,8 @@ class WorkflowQueueManager:
                     steps = [s[0] for s in steps_query]
                     
                     workflow_context = {}
+                    # Per spreadsheet row, see scoped_context.
+                    row_contexts: Dict[int, Dict[str, Any]] = {}
                     index = 0
                     while index < len(steps):
                         step = steps[index]
@@ -459,25 +716,15 @@ class WorkflowQueueManager:
                             run.status = "running"
                             await session.commit()
                             await self.broadcast_updates(run_id)
-                            try:
-                                if run.parameters and run.parameters.get("cloud_run_id"):
-                                    from ivoryos_edge.server import global_broker, global_topic_prefix
-                                    if global_broker:
-                                        payload = {
-                                            "runId": run.parameters["cloud_run_id"],
-                                            "nodeId": run.parameters["cloud_node_id"],
-                                            "status": "running"
-                                        }
-                                        # A dedicated topic, NOT .../status — that one is the plain
-                                        # {online, ts} device heartbeat daemon.js reads with
-                                        # `payload.online`, which is undefined (falsy) on this
-                                        # payload shape; publishing there was incorrectly flipping
-                                        # the device to "offline" in Supabase every time a cloud
-                                        # run started or finished. task-status is its own topic so
-                                        # daemon.js can tell the two apart.
-                                        global_broker.publish(f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload, qos=1)
-                            except Exception as e:
-                                print(f"Failed to emit cloud running status: {e}")
+                            if run.parameters and run.parameters.get("cloud_run_id"):
+                                # Imported lazily: server.py imports this module at load time, so a
+                                # module-level import here would be circular.
+                                from ivoryos_edge.server import publish_task_status
+                                publish_task_status(
+                                    run.parameters["cloud_run_id"],
+                                    run.parameters.get("cloud_node_id"),
+                                    "running",
+                                )
                         else:
                             await session.commit()
                             await self.broadcast_updates(run_id)
@@ -498,7 +745,7 @@ class WorkflowQueueManager:
                                     continue
 
                                 elif method == "Comment":
-                                    message = interpolate_message(str(args.get("message", "")), workflow_context)
+                                    message = interpolate_message(str(args.get("message", "")), scoped_context(workflow_context, row_contexts, step))
                                     print(f"[Run {run_id}] {message}")
                                     step.status = "completed"
                                     step.outputs = {"message": message}
@@ -512,7 +759,7 @@ class WorkflowQueueManager:
                                     var_name = (args.get("variable_name") or "").strip()
                                     if not var_name:
                                         raise Exception("User Input step is missing a variable name")
-                                    prompt = interpolate_message(str(args.get("prompt", "Input required")), workflow_context)
+                                    prompt = interpolate_message(str(args.get("prompt", "Input required")), scoped_context(workflow_context, row_contexts, step))
                                     input_type = str(args.get("input_type") or "str").strip().lower()
                                     if input_type not in ("str", "int", "float", "bool"):
                                         input_type = "str"
@@ -540,7 +787,7 @@ class WorkflowQueueManager:
 
                                     value = coerce_input_value(value, input_type)
 
-                                    workflow_context[var_name] = value
+                                    bind_values(workflow_context, row_contexts, step, {var_name: value})
                                     step.status = "completed"
                                     step.outputs = {"result": value, "input_type": input_type}
                                     step.end_time = datetime.utcnow()
@@ -554,10 +801,12 @@ class WorkflowQueueManager:
                                     condition = args.get("condition", "False")
                                     try:
                                         # Safe evaluation using only workflow variables
-                                        result = eval(condition, {"__builtins__": {}}, workflow_context)
+                                        scope = scoped_context(workflow_context, row_contexts, step)
+                                        result = eval(condition, {"__builtins__": {}}, scope)
                                     except Exception as e:
                                         raise Exception(f"Failed to evaluate If condition: {e}")
-                                        
+                                    step.outputs = condition_record(condition, result, scope)
+
                                     if result:
                                         # True: just proceed into the block normally
                                         step.status = "completed"
@@ -633,10 +882,14 @@ class WorkflowQueueManager:
                                 elif method == "While":
                                     condition = args.get("condition", "False")
                                     try:
-                                        result = eval(condition, {"__builtins__": {}}, workflow_context)
+                                        scope = scoped_context(workflow_context, row_contexts, step)
+                                        result = eval(condition, {"__builtins__": {}}, scope)
                                     except Exception as e:
                                         raise Exception(f"Failed to evaluate While condition: {e}")
-                                        
+                                    # Accumulates across iterations: End_While resets this step's
+                                    # status for the next pass but leaves its outputs alone.
+                                    step.outputs = condition_record(condition, result, scope, step.outputs)
+
                                     if result:
                                         # Enter loop
                                         step.status = "completed"
@@ -714,7 +967,7 @@ class WorkflowQueueManager:
                             # resolve_callable, not getattr: a property getter/setter is a real
                             # step in the designer but isn't a callable attribute on its own.
                             method = resolve_callable(instance, step.method)
-                            args = substitute_workflow_vars(step.parameters or {}, workflow_context)
+                            args = substitute_workflow_vars(step.parameters or {}, scoped_context(workflow_context, row_contexts, step))
 
                             args = cast_arguments(method, args)
                             
@@ -732,7 +985,7 @@ class WorkflowQueueManager:
                             step.outputs = {"result": serialized_res}
                             
                             if step.parameters and (step.parameters.get("_return_bindings") or step.parameters.get("_return_var")):
-                                workflow_context.update(extract_return_values(
+                                bind_values(workflow_context, row_contexts, step, extract_return_values(
                                     step.parameters.get("_return_bindings"),
                                     step.parameters.get("_return_var"),
                                     serialized_res,
@@ -800,20 +1053,8 @@ class WorkflowQueueManager:
                         run.status = "completed"
                     run.end_time = datetime.utcnow()
                     await session.commit()
-                    
-                    try:
-                        if run.parameters and run.parameters.get("cloud_run_id"):
-                            from ivoryos_edge.server import global_broker, global_topic_prefix
-                            if global_broker:
-                                payload = {
-                                    "runId": run.parameters["cloud_run_id"],
-                                    "nodeId": run.parameters["cloud_node_id"],
-                                    "status": run.status
-                                }
-                                global_broker.publish(f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload, qos=1)
-                                print(f"Published cloud status for {run.parameters['cloud_node_id']}: {run.status}")
-                    except Exception as e:
-                        print(f"Failed to emit cloud completion status: {e}")
+                    await self.publish_cloud_result(run.id)
+                    report_run_finished(run)
                     
                     if not self.cancelled:
                         await self.pause_event.wait()
@@ -1189,6 +1430,8 @@ class WorkflowQueueManager:
             run.status = "completed"
         run.end_time = datetime.utcnow()
         await session.commit()
+        await self.publish_cloud_result(run.id)
+        report_run_finished(run)
         
         if not self.cancelled:
             await self.pause_event.wait()

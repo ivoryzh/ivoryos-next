@@ -224,3 +224,76 @@ test('Flow Control params are not policed — it is never dispatched', () => {
   const edges = [e('start_node', 's1'), e('s1', 'A')];
   assert.deepStrictEqual(dag.validateGraph(nodes, edges), []);
 });
+
+// --- Every step is its own task -----------------------------------------------------------------
+// Cloud owns the ordering between steps. A line of three steps on one device is three tasks, each
+// released only when the one before it completes -- never handed to the device early to wait in
+// its queue. (There used to be an opt-in "merge chains" that sent such a line as one run.)
+
+const iterating = (id, dev = 'dev1') => ({
+  id,
+  data: {
+    targetDeviceId: dev,
+    runConfig: { mode: 'spreadsheet' },
+    block: { instrument: 'Pump', method: 'dose', schema: { parameters: { rate: {} } }, params: { rate: '#rate' } },
+  },
+});
+
+test('a same-device line plans one task per step, each waiting on the one before', () => {
+  const nodes = [start, inst('A'), inst('B'), inst('C')];
+  const edges = [e('start_node', 'A'), e('A', 'B'), e('B', 'C')];
+  const { errors, tasks } = dag.planRun('r', nodes, edges);
+  assert.deepStrictEqual(errors, []);
+  const t = byNode(tasks);
+  assert.deepStrictEqual(Object.keys(t).sort(), ['A', 'B', 'C']);
+  assert.deepStrictEqual([t.A.status, t.B.status, t.C.status], ['pending', 'blocked', 'blocked']);
+  assert.deepStrictEqual(t.B.deps, ['A']);
+  assert.deepStrictEqual(t.C.deps, ['B']);
+  for (const task of tasks) assert.deepStrictEqual(task.members, [task.node_id]);
+});
+
+test('a join is released only once both branches complete', () => {
+  const nodes = [start, inst('A', 'dev1'), inst('B', 'dev2'), inst('C', 'dev1')];
+  const edges = [e('start_node', 'A'), e('start_node', 'B'), e('A', 'C'), e('B', 'C')];
+  const { tasks } = dag.planRun('r', nodes, edges);
+  const rows = tasks.map(t => ({ node_id: t.node_id, members: t.members, status: t.status }));
+  assert.strictEqual(rows.find(r => r.node_id === 'C').status, 'blocked');
+
+  rows.find(r => r.node_id === 'A').status = 'completed';
+  assert.deepStrictEqual(dag.computeAdvance(nodes, edges, rows).unblock, [], 'one branch is not enough');
+
+  rows.find(r => r.node_id === 'B').status = 'completed';
+  assert.deepStrictEqual(dag.computeAdvance(nodes, edges, rows).unblock, ['C']);
+});
+
+test('a graph holding a single step dispatches it as one task', () => {
+  const nodes = [start, inst('A')];
+  const { errors, tasks } = dag.planRun('r', nodes, [e('start_node', 'A')]);
+  assert.deepStrictEqual(errors, []);
+  assert.strictEqual(tasks.length, 1);
+  assert.strictEqual(tasks[0].status, 'pending');
+});
+
+test('a run planned with a merged chain still advances its dependents', () => {
+  // Stored before merging was removed: one task row covering A and B. It may still be in flight.
+  const nodes = [start, inst('A', 'dev1'), inst('B', 'dev1'), inst('C', 'dev2')];
+  const edges = [e('start_node', 'A'), e('A', 'B'), e('B', 'C')];
+  const rows = [
+    { node_id: 'A', members: ['A', 'B'], status: 'completed' },
+    { node_id: 'C', members: ['C'], status: 'blocked' },
+  ];
+  const { unblock, runStatus } = dag.computeAdvance(nodes, edges, rows);
+  assert.deepStrictEqual(unblock, ['C']);
+  assert.strictEqual(runStatus, 'running');
+});
+
+// --- Iterating nodes keep their placeholders ---------------------------------------------------
+
+test('a spreadsheet step may still carry #names at dispatch', () => {
+  // The opposite of the single-step rule: these are supplied per row by the run payload, so
+  // demanding them resolved up front would make spreadsheet mode impossible to submit at all.
+  const nodes = [start, iterating('A')];
+  const edges = [e('start_node', 'A')];
+  const { errors } = dag.planRun('r', nodes, edges);
+  assert.deepStrictEqual(codes(errors), []);
+});

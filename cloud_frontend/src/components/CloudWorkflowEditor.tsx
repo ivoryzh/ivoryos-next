@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { ReactFlow, MiniMap, Controls, Background, Connection, Edge, NodeTypes, Node, BackgroundVariant, Handle, Position, getOutgoers } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Settings2, ChevronDown, ChevronUp, Cloud } from 'lucide-react';
+import { Settings2, ChevronDown, ChevronUp, Cloud, Table2 } from 'lucide-react';
 import { LIBRARY_INSTRUMENT } from '@ivoryos/shared-ui';
 
 interface CloudWorkflowEditorProps {
@@ -20,10 +20,51 @@ interface CloudWorkflowEditorProps {
   onEdgesChange: any;
   onConnect: (params: Connection | Edge) => void;
   header?: React.ReactNode;
+  /** A click on a node's card (not on a field or button inside it). */
+  onNodeClick?: (node: Node) => void;
 }
 
+/**
+ * A rough picture of where a running node's loop is -- samples or optimizer iterations -- from the
+ * device's progress summary. One cell per iteration up to 30, a plain bar beyond that.
+ */
+const IterationStrip = ({ progress }: { progress: any }) => {
+  const total = progress.budget || progress.rows_total || 0;
+  if (total < 2) return null;
+  const done = progress.budget ? Math.max(0, (progress.iteration || 1) - 1) : (progress.rows_done || 0);
+  const label = progress.budget ? 'iterations' : 'samples';
+  if (total > 30) {
+    return (
+      <div className="mb-1.5" title={`${done} of ${total} ${label} done`}>
+        <div className="h-1 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
+          <div className="h-full bg-green-500" style={{ width: `${(done / total) * 100}%` }} />
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-1.5 flex gap-0.5" title={`${done} of ${total} ${label} done`}>
+      {Array.from({ length: total }, (_, i) => (
+        <span
+          key={i}
+          className={`h-1.5 flex-1 rounded-sm ${i < done ? 'bg-green-500' : i === done ? 'bg-yellow-400 animate-pulse' : 'bg-gray-200 dark:bg-white/10'}`}
+        />
+      ))}
+    </div>
+  );
+};
+
+/**
+ * The live, aggregated schema. A node's `data.statusData` is a snapshot taken when it was dropped
+ * and saved with the canvas, so anything learned since -- a workflow's outputs, a method added to
+ * a driver -- never reached it. Nodes read this first and fall back to their snapshot.
+ */
+const LiveSchema = createContext<any>(null);
+
 const CustomCloudNode = ({ data, id }: any) => {
-  const { block, updateNodeData, statusData, cloudDevices, targetDeviceId, taskStatus, isInvalid } = data;
+  const { block, updateNodeData, cloudDevices, targetDeviceId, taskStatus, isInvalid } = data;
+  const live = useContext(LiveSchema);
+  const statusData = live?.instruments && Object.keys(live.instruments).length ? live : data.statusData;
   const isMissing = !statusData?.instruments?.[block.instrument] || !statusData?.instruments?.[block.instrument]?.[block.method];
 
   const handleParamChange = (paramKey: string, val: any) => {
@@ -59,6 +100,17 @@ const CustomCloudNode = ({ data, id }: any) => {
 
   const isStartNode = block.instrument === 'Flow Control' && block.method === 'Start';
   const hasBottomSection = !isStartNode && (allParams.length > 0 || (block.schema?.return_type && block.schema.return_type !== 'None' && block.schema.return_type !== 'NoneType'));
+  // Collapsed, a node is its title, device, a one-line summary of its inputs, and what it saves:
+  // enough to read the graph, without a column of text boxes per step.
+  const collapsed = !!data.collapsed;
+  // What running this node saves. A linked workflow's come from its body (read live, so a node
+  // dragged out before this existed still shows them); a plain step's are its "Save Output" names.
+  const outputs: string[] = block.instrument === 'Library Workflows'
+    ? (statusData?.instruments?.[block.instrument]?.[block.method]?.outputs || block.schema?.outputs || [])
+    : String(block.returnVar || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+  const inputSummary = allParams
+    .map((k) => `${k}=${block.params?.[k] ?? block.schema.parameters[k]?.default ?? ''}`)
+    .join(' · ');
 
   return (
     <div className={`bg-white dark:bg-[#1a1a1a] rounded-xl p-0 shadow-md ${borderClass} ${isStartNode ? 'min-w-[150px]' : 'min-w-[250px]'}`} style={{ borderStyle: 'solid', borderWidth: '2px' }}>
@@ -70,9 +122,20 @@ const CustomCloudNode = ({ data, id }: any) => {
           </div>
         ) : (
           <>
-            <div className="w-full mb-2">
-              <div className="text-xs font-bold text-blue-400 uppercase tracking-wider">{block.instrument === 'Library Workflows' ? 'Sequence' : block.instrument}</div>
-              <div className="text-sm font-semibold">{block.method.replace(/_/g, ' ')}</div>
+            <div className="w-full mb-2 flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-blue-400 uppercase tracking-wider">{block.instrument === 'Library Workflows' ? 'Sequence' : block.instrument}</div>
+                <div className="text-sm font-semibold">{block.method.replace(/_/g, ' ')}</div>
+              </div>
+              {hasBottomSection && (
+                <button
+                  onClick={() => updateNodeData(id, { collapsed: !collapsed })}
+                  title={collapsed ? 'Show inputs' : 'Collapse'}
+                  className="nodrag shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10"
+                >
+                  {collapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                </button>
+              )}
             </div>
             <div className="w-full mt-1">
               {block.instrument === 'Flow Control' ? null : (
@@ -85,10 +148,59 @@ const CustomCloudNode = ({ data, id }: any) => {
                 </div>
               )}
             </div>
+            {/* Live progress from the device while this node's task runs (edge queue.py's
+                run_progress_summary, at most every 2 s). One line and a bar; the device's own
+                Queue page has the full picture. */}
+            {taskStatus?.status === 'running' && taskStatus.progress && (() => {
+              const pr = taskStatus.progress;
+              const pct = pr.total ? Math.min(100, Math.round((pr.done / pr.total) * 100)) : 0;
+              const where = pr.state === 'waiting_input' ? 'waiting for input'
+                : pr.state === 'paused' ? 'paused'
+                : pr.state === 'error' ? 'stopped on an error'
+                : pr.step ? String(pr.step).replace(/_/g, ' ') : '';
+              const loop = pr.budget ? `iteration ${pr.iteration}/${pr.budget}`
+                : pr.rows_total ? `sample ${Math.min(pr.rows_done + 1, pr.rows_total)}/${pr.rows_total}` : '';
+              return (
+                <div className="w-full mt-2" title={`${pr.done} of ${pr.total} steps done${pr.phase ? ` · ${pr.phase}` : ''}${pr.row ? ` · row ${pr.row}` : ''}`}>
+                  <IterationStrip progress={pr} />
+                  <div className="h-1.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-500 ${['waiting_input', 'paused'].includes(pr.state) ? 'bg-amber-400' : pr.state === 'error' ? 'bg-red-500' : 'bg-yellow-400'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-400">
+                    <span className="truncate">{[loop, where].filter(Boolean).join(' · ')}</span>
+                    <span className="shrink-0 font-bold tabular-nums">{pr.done}/{pr.total}</span>
+                  </div>
+                </div>
+              );
+            })()}
+            {taskStatus?.hasResult && ['completed', 'error'].includes(taskStatus.status) && (
+              <a
+                href={`/results?runId=${encodeURIComponent(taskStatus.runId)}&nodeId=${encodeURIComponent(taskStatus.nodeId)}`}
+                className="nodrag mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
+              >
+                <Table2 className="w-3 h-3" /> view data
+              </a>
+            )}
+            {collapsed && inputSummary && (
+              // Fixed width: the node sizes to its content, so an unconstrained one-liner would
+              // stretch it sideways instead of truncating.
+              <div className="mt-2 w-[226px] text-[11px] font-mono text-gray-400 truncate" title={inputSummary}>{inputSummary}</div>
+            )}
+            {outputs.length > 0 && (collapsed || block.instrument === 'Library Workflows') && (
+              <div className="mt-2 max-w-[226px] flex flex-wrap items-center gap-1" title="Saved by this step when it runs">
+                <span className="text-[10px] text-gray-400">saves</span>
+                {outputs.map((o) => (
+                  <span key={o} className="px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/30">{o}</span>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>
-      {hasBottomSection && (
+      {hasBottomSection && !collapsed && (
         <div className="p-3 flex flex-col gap-2" style={{ background: 'var(--input-bg)', borderBottomLeftRadius: '0.75rem', borderBottomRightRadius: '0.75rem' }}>
           {allParams.map((paramKey) => {
             const pData = block.schema.parameters[paramKey];
@@ -191,10 +303,22 @@ export default function CloudWorkflowEditor({
   onNodesChange,
   onEdgesChange,
   onConnect,
-  header
+  header,
+  onNodeClick,
 }: CloudWorkflowEditorProps) {
   const [expandedToolbox, setExpandedToolbox] = useState<Record<string, boolean>>({});
   const [rfInstance, setRfInstance] = useState<any>(null);
+  // #auto: while on, a card dropped on the canvas arrives with every field set to `#<field name>`,
+  // so a step meant to be iterated or optimized needs no typing before it shows up in the run
+  // panel. Read after hydration, never in the initializer (AGENTS.md section 11).
+  const [autoFill, setAutoFill] = useState(false);
+  useEffect(() => {
+    try { setAutoFill(localStorage.getItem('cloud_auto_fill') === '1'); } catch { }
+  }, []);
+  const toggleAutoFill = () => setAutoFill(on => {
+    try { localStorage.setItem('cloud_auto_fill', on ? '0' : '1'); } catch { }
+    return !on;
+  });
 
   useEffect(() => {
     if (statusData && statusData.instruments) {
@@ -295,10 +419,15 @@ export default function CloudWorkflowEditor({
         m_schema = statusData.instruments[instrument][method];
       }
 
+      // Cloud Logic steps (Sleep, ...) run here rather than on a device, and nothing substitutes
+      // a `#name` into them, so #auto leaves them alone.
+      const prefill = autoFill && instrument !== 'Flow Control';
       const defaultParams: Record<string, any> = {};
       if (m_schema.parameters) {
         Object.entries(m_schema.parameters).forEach(([key, param]: [string, any]) => {
-          if (param.default !== undefined) {
+          if (prefill) {
+            defaultParams[key] = `#${key}`;
+          } else if (param.default !== undefined) {
             defaultParams[key] = param.default;
           }
         });
@@ -318,16 +447,17 @@ export default function CloudWorkflowEditor({
             params: defaultParams,
             returnVar: "",
             // A node on this canvas is dispatched to a device as a single unit, so reuse here is
-            // always a link — there is no "inline it here" for something that executes on another
-            // machine. Pinning the version it was built against is what keeps a distributed run
-            // reproducible: without it the edge would resolve the name against whatever its local
-            // library happens to hold at dispatch time.
+            // always a link. It follows the workflow's latest version: an edit saved on the edge
+            // is what the next run does, and clicking the node shows exactly those steps. (It used
+            // to pin the version it was dropped at, so edge edits never reached an existing node
+            // while the Library already showed the new version -- and Cloud only has the latest
+            // body, so it could not even show what a pinned node would run.)
             ...(instrument === LIBRARY_INSTRUMENT ? {
               ref: {
                 name: method,
                 version: (m_schema as any)?.version,
                 body_hash: (m_schema as any)?.body_hash,
-                mode: 'pinned' as const,
+                mode: 'latest' as const,
               }
             } : {})
           },
@@ -339,7 +469,7 @@ export default function CloudWorkflowEditor({
 
       setNodes((nds) => nds.concat(newNode));
     },
-    [setNodes, statusData, updateNodeData, cloudDevices]
+    [setNodes, statusData, updateNodeData, cloudDevices, autoFill]
   );
 
   useEffect(() => {
@@ -395,9 +525,24 @@ export default function CloudWorkflowEditor({
               ].filter(Boolean).join('\n');
 
               return (
-                <div className="flex items-center gap-2 min-w-0" title={detail || undefined}>
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
-                  <span className="text-xs font-medium truncate text-gray-600 dark:text-gray-300">{label}</span>
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0 flex-1" title={detail || undefined}>
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+                    <span className="text-xs font-medium truncate text-gray-600 dark:text-gray-300">{label}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={toggleAutoFill}
+                    aria-pressed={autoFill}
+                    title={autoFill
+                      ? '#auto is on: dropped cards fill every field with #<field name>. Click to turn off.'
+                      : 'Turn on #auto: dropped cards fill every field with #<field name>, ready to configure in the run panel.'}
+                    className={`shrink-0 px-2 py-0.5 rounded-md border font-mono text-[11px] font-semibold transition-colors ${autoFill
+                      ? 'bg-indigo-600 border-indigo-600 text-white'
+                      : 'bg-white border-gray-200 text-gray-500 hover:text-gray-800 dark:bg-white/5 dark:border-white/10 dark:text-gray-400 dark:hover:text-gray-200'}`}
+                  >
+                    #auto
+                  </button>
                 </div>
               );
             })()}
@@ -435,6 +580,14 @@ export default function CloudWorkflowEditor({
                       ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]'
                       : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
                     <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200">{deviceId}</h3>
+                    {device.schema?.deck_version != null && (
+                      <span
+                        className="text-[10px] font-medium text-gray-400"
+                        title="Version of this device's instrument schema; it changes when its drivers change"
+                      >
+                        deck v{device.schema.deck_version}
+                      </span>
+                    )}
                     {!isOnline && (
                       <span className="text-[10px] font-semibold uppercase tracking-wide text-red-400">offline</span>
                     )}
@@ -531,6 +684,7 @@ export default function CloudWorkflowEditor({
 
         <div className="flex-1 flex flex-col relative bg-transparent border-t" style={{ borderColor: 'var(--panel-border)' }}>
           <div className="flex-1 w-full h-full" onDrop={onDrop} onDragOver={onDragOver}>
+            <LiveSchema.Provider value={statusData}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -539,6 +693,11 @@ export default function CloudWorkflowEditor({
               onConnect={onConnect}
               isValidConnection={isValidConnection}
               onInit={setRfInstance}
+              onNodeClick={(e, node) => {
+                // Typing into a field or pressing a button inside the card is not "open it".
+                if ((e.target as HTMLElement).closest('input, select, textarea, button, a')) return;
+                onNodeClick?.(node);
+              }}
               nodeTypes={nodeTypes}
               fitView
             >
@@ -546,6 +705,7 @@ export default function CloudWorkflowEditor({
               <Controls />
               <MiniMap />
             </ReactFlow>
+            </LiveSchema.Provider>
           </div>
         </div>
       </div>

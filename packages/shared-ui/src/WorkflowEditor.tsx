@@ -1283,6 +1283,10 @@ export default function WorkflowEditor({
                   // Duplicating a closing/branching half on its own would orphan it — only the
                   // opener (If/While) can be copied, and it copies the whole construct.
                   const isClosingFlowBlock = isFlowBlock && ['End_If', 'End_While', 'Else'].includes(block.method);
+                  // User Input is laid out like a method card rather than like the other flow
+                  // blocks: what it produces (the variable) sits where a step's Save sits, it can be
+                  // per-sample or batch like any step, and its prompt and type are the body.
+                  const isUserInputBlock = isFlowBlock && block.method === 'User_Input';
                   const availableVars = getVariablesBefore(listId, index);
                   // On a Library Workflows block the "method" is a saved workflow's name, which the
                   // user typed — it must not be prettified the way a Python identifier is.
@@ -1546,8 +1550,8 @@ export default function WorkflowEditor({
 
                                   {/* Top Row: Info & Controls */}
                                   <div
-                                    onClick={() => !isFlowBlock && (hasBody || usesOutputPanel) && toggleExpand(block.id, listId)}
-                                    className={`px-3 py-1.5 flex items-center justify-between ${!isFlowBlock && (hasBody || usesOutputPanel) ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
+                                    onClick={() => ((!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock) && toggleExpand(block.id, listId)}
+                                    className={`px-3 py-1.5 flex items-center justify-between ${(!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
                                   >
                                     <div className="flex items-center min-w-0 flex-1">
                                       {/* Only in select mode, so the cards stay uncluttered the rest
@@ -1577,7 +1581,7 @@ export default function WorkflowEditor({
                                             </span>
                                           )}
                                         </span>
-                                        {isFlowBlock && block.schema?.parameters && (
+                                        {isFlowBlock && !isUserInputBlock && block.schema?.parameters && (
                                           <div className="flex items-center space-x-2 ml-2">
                                             {Object.keys(block.schema.parameters).map(paramKey => {
                                               const pData = block.schema!.parameters[paramKey];
@@ -1683,9 +1687,24 @@ export default function WorkflowEditor({
                                         );
                                       })()}
 
+                                      {isUserInputBlock && (
+                                        <div className="flex items-center space-x-2 mr-2">
+                                          <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">Save</span>
+                                          <input
+                                            type="text"
+                                            value={block.params?.variable_name ?? ''}
+                                            placeholder="variable"
+                                            title="The answer is stored under this name, for later steps to use as #name"
+                                            onClick={(e) => e.stopPropagation()}
+                                            onChange={(e) => handleParamChange(block.id, 'variable_name', e.target.value, 'str', listId)}
+                                            className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                                          />
+                                        </div>
+                                      )}
+
                                       {/* Action Buttons */}
                                       <div className="flex items-center space-x-1 border-l border-gray-200 dark:border-white/10 pl-3">
-                                        {!isFlowBlock && listId === 'canvas' && (
+                                        {(!isFlowBlock || isUserInputBlock) && listId === 'canvas' && (
                                           <button
                                             type="button"
                                             onClick={(e) => { e.stopPropagation(); toggleBatchAction(block.id, listId); }}
@@ -1736,6 +1755,39 @@ export default function WorkflowEditor({
                                       </div>
                                     </div>
                                   )}
+
+                                  {isExpanded && isUserInputBlock && (() => {
+                                    const typeOptions: string[] = block.schema?.parameters?.input_type?.options?.map(String)
+                                      || ['str', 'int', 'float', 'bool'];
+                                    const currentType = String(block.params?.input_type || 'str');
+                                    return (
+                                      // Same field boxes as a method's arguments (see renderParam below).
+                                      <div className="px-3 pb-2 pt-0 flex flex-wrap gap-2 items-center">
+                                        <div className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1">
+                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 font-medium whitespace-nowrap">prompt</label>
+                                          <input
+                                            type="text"
+                                            value={block.params?.prompt ?? ''}
+                                            placeholder="str"
+                                            onChange={(e) => handleParamChange(block.id, 'prompt', e.target.value, 'str', listId)}
+                                            className="w-44 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700"
+                                          />
+                                        </div>
+                                        <div className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1">
+                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 font-medium whitespace-nowrap">type</label>
+                                          {/* A select, not a datalist: the choices are fixed, and a datalist filters them by
+                                              whatever is already typed -- with "str" chosen it offered only "str". */}
+                                          <select
+                                            value={typeOptions.includes(currentType) ? currentType : 'str'}
+                                            onChange={(e) => handleParamChange(block.id, 'input_type', e.target.value, 'str', listId)}
+                                            className="w-16 bg-transparent border-l border-gray-200 dark:border-white/10 pl-1.5 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none"
+                                          >
+                                            {typeOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                          </select>
+                                        </div>
+                                      </div>
+                                    );
+                                  })()}
 
                                   {/* Bottom Row: Params */}
                                   {isExpanded && !isFlowBlock && (

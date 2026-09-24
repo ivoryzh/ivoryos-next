@@ -4,6 +4,7 @@ import { API_BASE } from '@/config';
 import { useState, useEffect, useRef } from 'react';
 import { Sun, Moon, Info, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import DeckHistory from '@/components/DeckHistory';
 import { ExtraArguments, ResultView, confirmDialog } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
@@ -299,6 +300,7 @@ export default function InstrumentsPage() {
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Connected Instruments</h2>
           <div className="ml-auto flex items-center gap-3">
+            <DeckHistory />
             {(busyState.running || busyState.paused) && (
               <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-500/30">
                 {busyState.running ? 'Workflow running' : 'Workflow paused'}

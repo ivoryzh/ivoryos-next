@@ -261,3 +261,27 @@ test('runs are numbered after the name they share, never called "Distributed Run
   await store.insertRun({ id: 'c', name: 'Screening #1' });
   assert.strictEqual(await store.countRunsNamed('Screen'), 2, 'a longer name that starts the same is not counted');
 });
+
+test('a Cloud User_Input takes one answer only, and only while it is waiting', async (t) => {
+  const store = freshStore(t);
+  const cloud = '@cloud';
+  await store.insertTasks([
+    task({ node_id: 'Q', device_id: cloud, block: { instrument: 'Flow Control', method: 'User_Input' }, status: 'blocked' }),
+  ]);
+  // Not started yet: nothing is being asked, so there is nothing to answer.
+  assert.strictEqual(await store.answerTaskInput('r1', 'Q', cloud, { state: 'answered', answer: 'early' }), false);
+
+  await store.updateTaskStatusFrom('r1', 'Q', 'blocked', 'running');
+  assert.strictEqual(await store.answerTaskInput('r1', 'Q', cloud, { state: 'answered', answer: '5' }), true);
+  // A second answer inside the second before the daemon completes the step must not replace
+  // the first: the first is what the person who answered first was told went through.
+  assert.strictEqual(await store.answerTaskInput('r1', 'Q', cloud, { state: 'answered', answer: '9' }), false);
+  const [q] = await store.listRunTasks('r1');
+  assert.strictEqual(q.progress.answer, '5');
+});
+
+test('a skipped task does not keep its device busy', async (t) => {
+  const store = freshStore(t);
+  await store.insertTasks([task({ status: 'skipped' })]);
+  assert.strictEqual(await store.deviceHasActiveTask('dev1'), false);
+});

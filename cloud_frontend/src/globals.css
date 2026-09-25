@@ -199,10 +199,12 @@
   height: 10px;
   border: 2px solid #0d0f12;
 }
-.react-flow__minimap {
+/* Dark only: React Flow's own colorMode styles the light minimap. These used to apply in both
+   themes, which left a black minimap on the light canvas. */
+.react-flow.dark .react-flow__minimap {
   background-color: rgba(13, 15, 18, 0.8) !important;
   mask: none;
 }
-.react-flow__minimap-mask {
+.react-flow.dark .react-flow__minimap-mask {
   fill: rgba(255, 255, 255, 0.1) !important;
 }

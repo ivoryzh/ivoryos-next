@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from 'react';
-import { X, Copy, Play, AlertCircle, Repeat, Rows3, Hash, FlaskConical, CalendarClock } from 'lucide-react';
+import { X, Copy, Play, AlertCircle, Repeat, Rows3, Hash, FlaskConical, CalendarClock, CheckCircle2 } from 'lucide-react';
 import {
   SpreadsheetTable,
   estimateRunSeconds,
@@ -670,7 +670,10 @@ export default function RunConfigPanel({
           })}
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-200 px-5 py-3 dark:border-gray-700">
+        {/* One row, fixed columns: the status message is the only part whose text changes, so it
+            takes the flexible middle and truncates. With flex-wrap, the longer "all supplied"
+            message pushed the buttons onto a second line and the whole dialog jumped. */}
+        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-t border-gray-200 px-5 py-3 dark:border-gray-700">
           {/* One name for the whole experiment: it is what every step's run is called on its
               device, and what the experiment is listed under in Results. */}
           <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
@@ -683,13 +686,20 @@ export default function RunConfigPanel({
               className={`${input} w-56`}
             />
           </label>
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-            {unfilled > 0 && <AlertCircle size={14} className="text-red-500" />}
+          <div
+            className="flex min-w-0 items-center justify-end gap-1.5 text-xs text-gray-500 dark:text-gray-400"
+            title={unfilled > 0 ? undefined : 'All values supplied. They are saved with the workflow.'}
+          >
             {unfilled > 0
-              ? `${unfilled} value${unfilled === 1 ? '' : 's'} still needed`
-              : 'All values supplied. Saved with the workflow.'}
+              ? <AlertCircle size={14} className="shrink-0 text-red-500" />
+              : <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />}
+            <span className="truncate">
+              {unfilled > 0
+                ? `${unfilled} value${unfilled === 1 ? '' : 's'} still needed`
+                : 'All values supplied'}
+            </span>
           </div>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
             <button
               onClick={onCancel}
               className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-600"

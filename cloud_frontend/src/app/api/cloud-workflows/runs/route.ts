@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { experimentName, workflowSourcesFor } from '@/lib/runSources';
 import { getStore } from '@/lib/store';
-import { planRun } from '@/lib/dag';
+import { planRun, CLOUD_DEVICE_ID } from '@/lib/dag';
 import { buildRunTasks, resolveGraphForDispatch } from '@/lib/planTasks';
 
 // Replaces orchestrator.ts's in-memory startRun — that Map never survived a dev-server reload and
@@ -42,13 +42,30 @@ export async function POST(req: Request) {
       );
     }
 
+    // Refused while a target device is offline. Accepted, the run would be recorded as started and
+    // its steps for that device held in Cloud until it came back -- which could be never -- with
+    // nothing on the canvas saying why. (Schedules are deliberately not checked: a device being
+    // down when a schedule is created says nothing about when it next fires.)
+    const store = getStore();
+    const targets = new Set(tasks.map((t: any) => String(t.device_id)).filter((d: string) => d && d !== CLOUD_DEVICE_ID));
+    if (targets.size) {
+      const devices = await store.listDevices() as any[];
+      const offline = Array.from(targets).filter(id =>
+        !String(devices.find((d: any) => String(d.id) === id)?.status || '').includes('online'));
+      if (offline.length) {
+        return NextResponse.json(
+          { error: `${offline.join(', ')} ${offline.length === 1 ? 'is' : 'are'} offline, so this run cannot start.`, offline },
+          { status: 409 },
+        );
+      }
+    }
+
     const name = await experimentName(body.name, body.base);
     const built = buildRunTasks(tasks, resolved, name, await workflowSourcesFor(resolved));
     if (built.problems.length > 0) {
       return NextResponse.json({ error: built.problems.join('\n') }, { status: 400 });
     }
 
-    const store = getStore();
     await store.insertRun({
       id: runId,
       name,

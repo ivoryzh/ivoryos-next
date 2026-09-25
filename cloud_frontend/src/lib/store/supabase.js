@@ -101,7 +101,7 @@ function createSupabaseStore(url, serviceRoleKey) {
     /** Every task of one Cloud run with whatever its device sent back -- one experiment's record. */
     async listRunTaskRecords(runId) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('node_id, device_id, status, dispatched_at, updated_at, result')
+        .select('node_id, device_id, status, dispatched_at, updated_at, result, progress')
         .eq('run_id', runId);
       if (error) fail(`Failed to fetch the tasks of run ${runId}`, error);
       return data || [];
@@ -228,7 +228,7 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listRunTasks(runId) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('node_id, status, members, repeat_every_ms, repeat_total, repeat_done')
+        .select('node_id, status, members, repeat_every_ms, repeat_total, repeat_done, progress')
         .eq('run_id', runId);
       if (error) fail(`Failed to fetch tasks for run ${runId}`, error);
       return (data || []).map(withMembers);
@@ -245,7 +245,7 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listTasksByStatus(status) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at').eq('status', status)
+        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress').eq('status', status)
         .order('updated_at', { ascending: true });
       if (error) fail(`Failed to fetch ${status} tasks`, error);
       return (data || []).filter((t) => isDue(t));
@@ -255,7 +255,7 @@ function createSupabaseStore(url, serviceRoleKey) {
     async deviceHasActiveTask(deviceId) {
       const { data, error } = await supabase.from('run_tasks').select('node_id')
         .eq('device_id', deviceId)
-        .not('status', 'in', '(pending,blocked,completed,error,cancelled)')
+        .not('status', 'in', '(pending,blocked,completed,error,cancelled,skipped)')
         .limit(1);
       if (error) fail('Failed to check whether the device is busy', error);
       return (data || []).length > 0;
@@ -295,6 +295,17 @@ function createSupabaseStore(url, serviceRoleKey) {
         .not('status', 'in', `(${terminalStatuses.join(',')})`)
         .select('status');
       if (error) fail(`Failed to update run_task ${runId}/${nodeId}`, error);
+      return (data || []).length > 0;
+    },
+
+    /** See the LAN backend: only a waiting cloud User_Input step takes an answer. */
+    async answerTaskInput(runId, nodeId, cloudDeviceId, progress) {
+      const { data, error } = await supabase.from('run_tasks')
+        .update({ progress, updated_at: nowIso() })
+        .eq('run_id', runId).eq('node_id', nodeId).eq('device_id', cloudDeviceId).eq('status', 'running')
+        .or('progress.is.null,progress->>state.neq.answered')
+        .select('node_id');
+      if (error) fail(`Failed to record the answer for ${runId}/${nodeId}`, error);
       return (data || []).length > 0;
     },
 

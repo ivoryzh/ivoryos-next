@@ -53,11 +53,84 @@ test('Flow Control is transparent, not an already-met dependency', () => {
   assert.strictEqual(advanced.runStatus, 'running');
 });
 
-test('a chain of Flow Control nodes is contracted away entirely', () => {
-  const nodes = [start, inst('A'), fc('if1', 'If'), fc('sleep1'), inst('B')];
-  const edges = [e('start_node', 'A'), e('A', 'if1'), e('if1', 'sleep1'), e('sleep1', 'B')];
+test('a chain of structural Flow Control nodes is contracted away entirely', () => {
+  const nodes = [start, inst('A'), fc('c1', 'Comment'), fc('sleep1'), inst('B')];
+  const edges = [e('start_node', 'A'), e('A', 'c1'), e('c1', 'sleep1'), e('sleep1', 'B')];
   const { tasks } = dag.planRun('r', nodes, edges);
   assert.deepStrictEqual(byNode(tasks).B.deps, ['A']);
+});
+
+// --- Cloud Logic: steps Cloud runs itself ------------------------------------------------------
+const logic = (id, method, params) => ({
+  id, data: { targetDeviceId: '', block: { instrument: 'Flow Control', method, params, schema: dag.CLOUD_LOGIC[method] } },
+});
+const branch = (source, target, sourceHandle) => ({ source, target, sourceHandle });
+
+test('Cloud Logic steps are real tasks on the cloud pseudo-device, with no device needed', () => {
+  const nodes = [start, inst('A'), logic('w', 'Wait', { seconds: 5 }), inst('B')];
+  const edges = [e('start_node', 'A'), e('A', 'w'), e('w', 'B')];
+  const { errors, tasks } = dag.planRun('r', nodes, edges);
+  assert.deepStrictEqual(errors, []);
+  const t = byNode(tasks);
+  assert.strictEqual(t.w.device_id, dag.CLOUD_DEVICE_ID);
+  assert.deepStrictEqual(t.w.deps, ['A']);
+  assert.deepStrictEqual(t.B.deps, ['w'], 'B waits for the Wait, not straight for A');
+});
+
+test('a Cloud Logic step that is not set up is refused at submit', () => {
+  const nodes = [start, logic('w', 'Wait', { seconds: 'soon' }), logic('i', 'If', { variable: '', operator: '>', value: '1' })];
+  const edges = [e('start_node', 'w'), e('w', 'i')];
+  const problems = dag.validateGraph(nodes, edges);
+  assert.ok(codes(problems).includes('logic_config'));
+  assert.match(problems.find(p => p.code === 'logic_config').message, /seconds.*variable/s);
+});
+
+test("an If's untaken branch is skipped, all the way down, and the run still completes", () => {
+  const nodes = [start, inst('A'), logic('if', 'If', { variable: 'y', operator: '>', value: '5' }),
+    inst('T'), inst('F'), inst('F2')];
+  const edges = [e('start_node', 'A'), e('A', 'if'), branch('if', 'T', 'true'), branch('if', 'F', 'false'), e('F', 'F2')];
+  const tasks = [
+    { node_id: 'A', status: 'completed' },
+    { node_id: 'if', status: 'completed', progress: { branch: 'true' } },
+    { node_id: 'T', status: 'blocked' }, { node_id: 'F', status: 'blocked' }, { node_id: 'F2', status: 'blocked' },
+  ];
+  const adv = dag.computeAdvance(nodes, edges, tasks);
+  assert.deepStrictEqual(adv.unblock, ['T']);
+  assert.deepStrictEqual(adv.skip.sort(), ['F', 'F2'], 'skipping F settles F2 in the same pass');
+  assert.strictEqual(adv.runStatus, 'running');
+
+  const done = dag.computeAdvance(nodes, edges, tasks.map(t => (
+    t.node_id === 'T' ? { ...t, status: 'completed' } : t.node_id.startsWith('F') ? { ...t, status: 'skipped' } : t)));
+  assert.strictEqual(done.runStatus, 'completed', 'a skipped branch is not a failure');
+});
+
+test('a join fed by both branches of an If runs once the taken branch reaches it', () => {
+  const nodes = [start, logic('if', 'If', { variable: 'y', operator: '>', value: '5' }), inst('T'), inst('F'), inst('J')];
+  const edges = [e('start_node', 'if'), branch('if', 'T', 'true'), branch('if', 'F', 'false'), e('T', 'J'), e('F', 'J')];
+  const adv = dag.computeAdvance(nodes, edges, [
+    { node_id: 'if', status: 'completed', progress: { branch: 'false' } },
+    { node_id: 'T', status: 'blocked' }, { node_id: 'F', status: 'completed' }, { node_id: 'J', status: 'blocked' },
+  ]);
+  assert.deepStrictEqual(adv.skip, ['T']);
+  assert.deepStrictEqual(adv.unblock, ['J'], 'J does not wait on the skipped branch');
+});
+
+test('a branch handle survives a transparent node between the If and the step', () => {
+  const nodes = [start, logic('if', 'If', { variable: 'y', operator: '==', value: 'ok' }), fc('c', 'Comment'), inst('F')];
+  const edges = [e('start_node', 'if'), branch('if', 'c', 'false'), e('c', 'F')];
+  const adv = dag.computeAdvance(nodes, edges, [
+    { node_id: 'if', status: 'completed', progress: { branch: 'true' } }, { node_id: 'F', status: 'blocked' },
+  ]);
+  assert.deepStrictEqual(adv.skip, ['F']);
+});
+
+test('evaluateCondition compares numbers as numbers and text case-insensitively', () => {
+  assert.strictEqual(dag.evaluateCondition('10', '>', '9'), true, 'not the string comparison "10" < "9"');
+  assert.strictEqual(dag.evaluateCondition(72.5, '>=', '72.5'), true);
+  assert.strictEqual(dag.evaluateCondition('Yes', '==', 'yes'), true);
+  assert.strictEqual(dag.evaluateCondition('pass: clear', 'contains', 'CLEAR'), true);
+  assert.strictEqual(dag.evaluateCondition('', '==', '0'), false, 'an empty answer is not zero');
+  assert.throws(() => dag.evaluateCondition(1, '=~', 1));
 });
 
 test('both spellings of the Flow Control instrument are recognised', () => {

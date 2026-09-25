@@ -203,6 +203,7 @@ function hydrateTask(r) {
     ...r,
     block: jsonParse(r.block, {}),
     run: r.run ? jsonParse(r.run, null) : null,
+    progress: r.progress ? jsonParse(r.progress, null) : null,
   };
 }
 
@@ -342,10 +343,10 @@ function createSqliteStore(filePath) {
     /** Every task of one Cloud run with whatever its device sent back -- one experiment's record. */
     async listRunTaskRecords(runId) {
       return all(
-        `select node_id, device_id, status, dispatched_at, updated_at, result
+        `select node_id, device_id, status, dispatched_at, updated_at, result, progress
          from run_tasks where run_id = ?`,
         runId,
-      ).map(r => ({ ...r, result: r.result ? jsonParse(r.result, null) : null }));
+      ).map(r => ({ ...r, result: r.result ? jsonParse(r.result, null) : null, progress: r.progress ? jsonParse(r.progress, null) : null }));
     },
 
     async getTaskResult(runId, nodeId) {
@@ -490,10 +491,10 @@ function createSqliteStore(filePath) {
 
     async listRunTasks(runId) {
       return all(
-        `select node_id, status, members, repeat_every_ms, repeat_total, repeat_done
+        `select node_id, status, members, repeat_every_ms, repeat_total, repeat_done, progress
          from run_tasks where run_id = ?`,
         runId,
-      ).map(r => ({ ...r, members: jsonParse(r.members, [r.node_id]) }));
+      ).map(r => ({ ...r, members: jsonParse(r.members, [r.node_id]), progress: r.progress ? jsonParse(r.progress, null) : null }));
     },
 
     async listRecentTasks(limit) {
@@ -509,7 +510,7 @@ function createSqliteStore(filePath) {
       // Oldest first: tasks now wait their turn per device (see deviceHasActiveTask), so the
       // order they are offered in is the order a device works through them.
       return all(
-        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at
+        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress
          from run_tasks where status = ? order by updated_at asc`,
         status,
       ).map(hydrateTask).filter((t) => isDue(t));
@@ -519,7 +520,7 @@ function createSqliteStore(filePath) {
     async deviceHasActiveTask(deviceId) {
       return !!get(
         `select 1 as busy from run_tasks
-         where device_id = ? and status not in ('pending','blocked','completed','error','cancelled') limit 1`,
+         where device_id = ? and status not in ('pending','blocked','completed','error','cancelled','skipped') limit 1`,
         deviceId,
       );
     },
@@ -575,6 +576,22 @@ function createSqliteStore(filePath) {
     },
 
     /** Compare-and-set, for the unblock / cancel / dispatch races. */
+    /**
+     * Record someone's answer to a Cloud User_Input step. Only a step that is actually waiting
+     * (running, on the cloud pseudo-device, not yet answered) takes it -- the first answer is the
+     * answer, even inside the second before the daemon's sweep completes the step. The daemon
+     * does that completing, so it stays the only process that advances a run.
+     */
+    async answerTaskInput(runId, nodeId, cloudDeviceId, progress) {
+      const res = run(
+        `update run_tasks set progress = ?, updated_at = ?
+         where run_id = ? and node_id = ? and device_id = ? and status = 'running'
+           and (progress is null or json_extract(progress, '$.state') is not 'answered')`,
+        JSON.stringify(progress), nowIso(), runId, nodeId, cloudDeviceId,
+      );
+      return res.changes > 0;
+    },
+
     async updateTaskStatusFrom(runId, nodeId, fromStatus, toStatus, extra) {
       // A dispatch starts the task afresh (a repeat's next occurrence included), so the previous
       // occurrence's progress must not show against it.

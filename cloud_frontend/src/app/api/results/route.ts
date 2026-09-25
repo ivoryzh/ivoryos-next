@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic';
 //   GET /api/results?runId=        -> one experiment: every task, its device, and its record
 //   GET /api/results?runId=&nodeId -> one task's record (kept for older links)
 
-const SEVERITY = ['error', 'cancelled', 'running', 'queued', 'waiting_input', 'pending', 'blocked', 'completed'];
+const SEVERITY = ['error', 'cancelled', 'running', 'queued', 'waiting_input', 'pending', 'blocked', 'completed', 'skipped'];
 const worst = (statuses: string[]) =>
   SEVERITY.find((s) => statuses.includes(s)) || statuses[0] || 'unknown';
 

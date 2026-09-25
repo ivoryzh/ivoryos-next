@@ -11,13 +11,13 @@
  * independently wrong, which is the failure mode AGENTS.md section 3 warns about. Hence: plain
  * CommonJS, `require`-able from the daemon and importable from the app.
  *
- * Two rules define the semantics:
+ * Four rules define the semantics:
  *
  * 1. **Edges are the only ordering.** A task runs when every task it depends on has completed —
  *    never before. Nodes with no dependencies start together; independent branches run in
  *    parallel. That is the whole point of authoring on a canvas instead of a list.
  *
- * 2. **Flow Control nodes are transparent, not satisfied.** They get no `run_tasks` row (they
+ * 2. **Structural Flow Control nodes are transparent, not satisfied.** They get no `run_tasks` row (they
  *    are not dispatched to any device), so it is tempting to treat them as an already-met
  *    dependency — which is exactly what both copies of the old logic did. That silently deleted
  *    ordering: in `A -> Sleep -> B`, B's only dependency is the Sleep node, "already satisfied",
@@ -26,6 +26,18 @@
  *    out of the graph and its dependents inherit *its* dependencies, so B waits for A.
  *    The seeded `Start` node is the degenerate case of this and keeps working: it has no
  *    predecessors, so everything hanging off it inherits an empty dependency set and runs first.
+ *
+ * 3. **Cloud Logic nodes are real steps that Cloud runs itself** (`CLOUD_LOGIC`: Wait, User_Input,
+ *    If). They get a `run_tasks` row on the pseudo-device `CLOUD_DEVICE_ID`, and daemon.js carries
+ *    them out instead of publishing them: a Wait holds its branch, a User_Input holds it until
+ *    someone answers on the canvas, and an If picks a branch. Rule 2 still covers every other Flow
+ *    Control method (Start, and whatever a legacy graph carries), so old graphs mean what they did.
+ *
+ * 4. **An If's untaken branch is skipped, not failed.** An edge leaving an If carries the branch it
+ *    belongs to (`sourceHandle`: 'true' | 'false'). A step whose dependencies all finished without
+ *    one of them leading to it live ends `skipped`, and that propagates down the branch. A join
+ *    fed by both branches runs once the taken one reaches it, so "if ... else ... then continue"
+ *    draws the obvious way.
  */
 
 // The shapes below are annotated in JSDoc rather than a parallel dag.d.ts: `allowJs` means the
@@ -34,8 +46,8 @@
 /**
  * @typedef {{ code: string, message: string }} GraphProblem
  * @typedef {{ run_id: string, node_id: string, device_id: string, block: any, status: string, deps: string[] }} PlannedTask
- * @typedef {{ node_id: string, status: string }} TaskRow
- * @typedef {{ unblock: string[], cancel: {nodeId: string, reason: string}[], runStatus: string, stalled: boolean }} AdvanceDecision
+ * @typedef {{ node_id: string, status: string, progress?: any }} TaskRow
+ * @typedef {{ unblock: string[], cancel: {nodeId: string, reason: string}[], skip: string[], runStatus: string, stalled: boolean }} AdvanceDecision
  */
 
 // Both spellings are live across this stack (`packages/shared-ui/src/flowControl.ts`, `queue.py`
@@ -45,9 +57,44 @@
 const FLOW_CONTROL_INSTRUMENTS = ['Flow_Control', 'Flow Control'];
 const START_METHOD = 'Start';
 
+// The pseudo-device a Cloud Logic task is assigned to. daemon.js checks for it before any broker
+// traffic, so it never reaches an MQTT topic.
+const CLOUD_DEVICE_ID = '@cloud';
+
+// Steps Cloud executes itself rather than sending to a device. Same schema shape as a device
+// method, so the canvas renders these with the code it already has.
+const IF_OPERATORS = ['==', '!=', '>', '>=', '<', '<=', 'contains'];
+const CLOUD_LOGIC = {
+  Wait: {
+    description: 'Hold this branch for a while, doing nothing, then continue.',
+    parameters: { seconds: { type: 'float', required: true, default: 60 } },
+    return_type: 'None',
+  },
+  User_Input: {
+    description: 'Hold this branch until someone answers on the canvas. The answer can be saved for an If to test.',
+    parameters: {
+      prompt: { type: 'str', required: true, default: 'Continue?' },
+      save_as: { type: 'str', required: false, default: '' },
+    },
+    return_type: 'None',
+  },
+  If: {
+    description: 'Continue down the true or the false branch, depending on a value an earlier step saved.',
+    parameters: {
+      variable: { type: 'str', required: true, default: '' },
+      operator: { type: 'str', required: true, default: '>', options: IF_OPERATORS },
+      value: { type: 'str', required: true, default: '' },
+    },
+    return_type: 'None',
+  },
+};
+// The branch handles on an If node. An edge from any other node has no handle: unconditional.
+const IF_BRANCHES = ['true', 'false'];
+
 // A task that will never change again on its own. Shared with daemon.js's out-of-order-message
 // guard so "what counts as finished" has one definition.
-const TERMINAL_TASK_STATUSES = ['completed', 'error', 'cancelled'];
+// 'skipped' is an If's untaken branch: finished, never run, and not a failure.
+const TERMINAL_TASK_STATUSES = ['completed', 'error', 'cancelled', 'skipped'];
 // A task the run is still actively waiting on. 'blocked' is deliberately NOT here: a run where
 // every remaining task is blocked is making no progress, which is a stall, not activity.
 const ACTIVE_TASK_STATUSES = ['pending', 'queued', 'running'];
@@ -59,6 +106,69 @@ function blockOf(node) {
 
 function isFlowControlNode(node) {
   return FLOW_CONTROL_INSTRUMENTS.indexOf(String(blockOf(node).instrument || '')) !== -1;
+}
+
+/** A Flow Control step Cloud carries out itself (Wait, User_Input, If). Gets a task. */
+function isCloudLogicNode(node) {
+  return isFlowControlNode(node)
+    && Object.prototype.hasOwnProperty.call(CLOUD_LOGIC, String(blockOf(node).method || ''));
+}
+
+/** A Flow Control node that only shapes the graph (Start, legacy methods). Contracted away. */
+function isTransparentNode(node) {
+  return isFlowControlNode(node) && !isCloudLogicNode(node);
+}
+
+/** A step sent to a real device: needs a target device and complete params. */
+function isDeviceNode(node) {
+  return !isFlowControlNode(node);
+}
+
+const stripHash = (v) => String(v === undefined || v === null ? '' : v).trim().replace(/^#/, '');
+
+/**
+ * What is wrong with one Cloud Logic node's settings, as short phrases. Its own check rather than
+ * `blankParamsOf`: `save_as` is legitimately empty, and a Wait of "abc" seconds is not a value.
+ */
+function logicProblemsOf(node) {
+  const block = blockOf(node);
+  const method = String(block.method || '');
+  const value = (k) => effectiveParamValue(block, k);
+  const problems = [];
+  if (method === 'Wait') {
+    const seconds = Number(value('seconds'));
+    if (!Number.isFinite(seconds) || seconds <= 0) problems.push('needs a number of seconds greater than 0');
+  } else if (method === 'User_Input') {
+    if (!String(value('prompt') ?? '').trim()) problems.push('needs a prompt');
+  } else if (method === 'If') {
+    if (!stripHash(value('variable'))) problems.push('needs a variable to test');
+    if (IF_OPERATORS.indexOf(String(value('operator') || '')) === -1) problems.push('needs a comparison');
+    else if (!String(value('value') ?? '').trim()) problems.push('needs a value to compare with');
+  }
+  return problems;
+}
+
+/**
+ * An If's comparison. Numbers compare as numbers when both sides are numeric, otherwise as
+ * case-insensitive text. Pure, so the daemon and the tests share one definition.
+ * @returns {boolean}
+ */
+function evaluateCondition(actual, operator, expected) {
+  const a = typeof actual === 'string' ? actual.trim() : actual;
+  const b = typeof expected === 'string' ? expected.trim() : expected;
+  const numeric = a !== '' && b !== '' && a !== null && typeof a !== 'boolean'
+    && Number.isFinite(Number(a)) && Number.isFinite(Number(b));
+  const [x, y] = numeric ? [Number(a), Number(b)] : [String(a).toLowerCase(), String(b).toLowerCase()];
+  switch (operator) {
+    case '==': return x === y;
+    case '!=': return x !== y;
+    case '>': return x > y;
+    case '>=': return x >= y;
+    case '<': return x < y;
+    case '<=': return x <= y;
+    case 'contains': return String(a).toLowerCase().includes(String(b).toLowerCase());
+    default: throw new Error(`Unknown comparison '${operator}'.`);
+  }
 }
 
 // `#name` means "supply this when the run starts" — the same convention the edge Designer uses
@@ -136,16 +246,20 @@ function buildGraph(nodes, edges) {
 
   const incoming = new Map();
   const outgoing = new Map();
+  // The same edges as `incoming`, with the If branch each leaves its source by (null = none).
+  const incomingEdges = new Map();
   for (const e of edges) {
     const source = String(e && e.source);
     const target = String(e && e.target);
     if (!nodeById.has(source) || !nodeById.has(target)) continue; // reported by validateGraph
     if (!incoming.has(target)) incoming.set(target, []);
     if (!outgoing.has(source)) outgoing.set(source, []);
+    if (!incomingEdges.has(target)) incomingEdges.set(target, []);
     incoming.get(target).push(source);
     outgoing.get(source).push(target);
+    incomingEdges.get(target).push({ source, handle: e && e.sourceHandle ? String(e.sourceHandle) : null });
   }
-  return { nodeById, incoming, outgoing };
+  return { nodeById, incoming, outgoing, incomingEdges };
 }
 
 /**
@@ -174,17 +288,36 @@ function representativesFromTasks(nodes, tasks) {
  * `seen` keeps this terminating even on a graph that has not been validated yet.
  */
 function effectiveDependencies(nodeId, incoming, isFlowControlId, reps) {
+  return new Set(dependencyBranches(nodeId, incoming, isFlowControlId, reps).keys());
+}
+
+/**
+ * `effectiveDependencies`, keeping the branch each dependency is reached through: a map of
+ * dependency -> set of If handles, `null` meaning an unconditional edge. A dependency reached
+ * more than one way carries every way it is reached.
+ *
+ * Takes either `incoming` (plain source ids) or `incomingEdges` (`{source, handle}`), so callers
+ * that do not care about branches keep passing what they always passed.
+ */
+function dependencyBranches(nodeId, incoming, isFlowControlId, reps) {
   const repOf = (id) => (reps && reps.get(String(id))) || String(id);
   const self = repOf(nodeId);
-  const deps = new Set();
-  const seen = new Set([String(nodeId)]);
-  const stack = (incoming.get(String(nodeId)) || []).slice();
+  const deps = new Map();
+  const edgesInto = (id) => (incoming.get(String(id)) || [])
+    .map((x) => (x !== null && typeof x === 'object' ? x : { source: String(x), handle: null }));
+  // Keyed on node and branch together: one transparent node reached through both branches of an
+  // If has to be explored both ways, or one branch would silently vanish.
+  const seen = new Set();
+  const stack = edgesInto(nodeId);
   while (stack.length) {
-    const parent = String(stack.pop());
-    if (seen.has(parent)) continue;
-    seen.add(parent);
+    const { source, handle } = stack.pop();
+    const parent = String(source);
+    const key = `${parent}\u0000${handle}`;
+    if (parent === String(nodeId) || seen.has(key)) continue;
+    seen.add(key);
     if (isFlowControlId(parent)) {
-      for (const grandparent of (incoming.get(parent) || [])) stack.push(grandparent);
+      // A path through a transparent node stays on whichever branch it arrived by.
+      for (const up of edgesInto(parent)) stack.push({ source: up.source, handle: up.handle || handle });
       continue;
     }
     // Only reachable for a run planned when chains could be merged: a step in the same task as
@@ -192,10 +325,11 @@ function effectiveDependencies(nodeId, incoming, isFlowControlId, reps) {
     // task would depend on itself and stay blocked forever.
     const rep = repOf(parent);
     if (rep === self) {
-      for (const grandparent of (incoming.get(parent) || [])) stack.push(grandparent);
+      for (const up of edgesInto(parent)) stack.push(up);
       continue;
     }
-    deps.add(rep);
+    if (!deps.has(rep)) deps.set(rep, new Set());
+    deps.get(rep).add(handle);
   }
   return deps;
 }
@@ -308,8 +442,12 @@ function validateGraph(nodes, edges, opts) {
   // an error rather than a warning. (If it proves too strict for real graphs, it is this block
   // and nothing else — downgrading it does not touch the scheduler.)
   const startIds = nodes.filter(isStartNode).map(n => String(n.id));
-  const dispatchable = nodes.filter(n => !isFlowControlNode(n));
-  if (dispatchable.length > 0) {
+  // Sent to a device: needs a device and complete params.
+  const dispatchable = nodes.filter(isDeviceNode);
+  // Everything that becomes a task, Cloud Logic included: an unwired Wait or User_Input would
+  // start the instant the run does, exactly like an unwired instrument step.
+  const executable = nodes.filter(n => !isTransparentNode(n));
+  if (executable.length > 0) {
     if (startIds.length === 0) {
       errors.push({
         code: 'no_start',
@@ -326,7 +464,7 @@ function validateGraph(nodes, edges, opts) {
           stack.push(next);
         }
       }
-      const orphans = dispatchable.filter(n => !reachable.has(String(n.id))).map(n => String(n.id));
+      const orphans = executable.filter(n => !reachable.has(String(n.id))).map(n => String(n.id));
       if (orphans.length) {
         errors.push({
           code: 'unreachable',
@@ -370,6 +508,14 @@ function validateGraph(nodes, edges, opts) {
         + '. Fill them in, or write #name to supply the value when the run starts.',
     });
   }
+  const logic = [];
+  for (const node of nodes.filter(isCloudLogicNode)) {
+    const p = logicProblemsOf(node);
+    if (p.length) logic.push(`${String(blockOf(node).method).replace(/_/g, ' ')} ${node.id} ${p.join(', ')}`);
+  }
+  if (logic.length) {
+    errors.push({ code: 'logic_config', message: 'Cloud Logic step(s) not set up: ' + logic.join('; ') + '.' });
+  }
   if (unresolved.length) {
     // Only checked for callers that have already substituted (the run route). Reaching dispatch
     // with a literal "#temperature" would hand an instrument that string as if it were a number.
@@ -405,20 +551,20 @@ function planRun(runId, nodes, edges) {
   if (errors.length) return { errors, tasks: [] };
 
   const { incoming } = buildGraph(nodes, edges);
-  const flowControlIds = new Set(nodes.filter(isFlowControlNode).map(n => String(n.id)));
+  const flowControlIds = new Set(nodes.filter(isTransparentNode).map(n => String(n.id)));
   const isFlowControlId = (id) => flowControlIds.has(id);
   // One task per step, each dispatched on its own. Cloud owns the ordering between them: a join
   // (C after both A and B) is C staying blocked here until both report, not C being handed to a
   // device queue early to wait there. That keeps every task standalone -- it can be retried,
   // cancelled or reported on by itself -- and is why straight lines are no longer merged into
   // one run.
-  const tasks = nodes.filter((n) => !isFlowControlNode(n)).map((node) => {
+  const tasks = nodes.filter((n) => !isTransparentNode(n)).map((node) => {
     const id = String(node.id);
     const deps = effectiveDependencies(id, incoming, isFlowControlId);
     return {
       run_id: runId,
       node_id: id,
-      device_id: deviceIdOf(node),
+      device_id: isCloudLogicNode(node) ? CLOUD_DEVICE_ID : deviceIdOf(node),
       // The bare block, for the single-step wire shape. A node that iterates carries its real
       // content in `run` instead, attached by the caller -- see src/lib/runPayload.ts.
       block: blockOf(node),
@@ -443,41 +589,63 @@ function planRun(runId, nodes, edges) {
  * @returns {AdvanceDecision}
  */
 function computeAdvance(nodes, edges, tasks) {
-  const { incoming } = buildGraph(nodes || [], edges || []);
-  const flowControlIds = new Set((nodes || []).filter(isFlowControlNode).map(n => String(n.id)));
+  const { incomingEdges } = buildGraph(nodes || [], edges || []);
+  const flowControlIds = new Set((nodes || []).filter(isTransparentNode).map(n => String(n.id)));
   const isFlowControlId = (id) => flowControlIds.has(id);
 
   const reps = representativesFromTasks(nodes, tasks);
 
   const statusByNode = new Map((tasks || []).map(t => [String(t.node_id), t.status]));
+  // The branch each finished If took; the daemon records it in the task's progress.
+  const branchByNode = new Map((tasks || [])
+    .filter(t => t.progress && typeof t.progress === 'object' && t.progress.branch)
+    .map(t => [String(t.node_id), String(t.progress.branch)]));
 
   const unblock = [];
   const cancel = [];
-  for (const task of (tasks || [])) {
-    if (task.status !== 'blocked') continue;
-    const deps = Array.from(effectiveDependencies(task.node_id, incoming, isFlowControlId, reps));
-    // A dependency that errored or was itself cancelled can never complete, so this task can
-    // never legally run. Leaving it 'blocked' was safe (it does stay unrun) but left the run
-    // parked at 'running' with no terminal state and nothing in the UI explaining the stall.
-    const deadDep = deps.find(d => {
-      const s = statusByNode.get(d);
-      return s === 'error' || s === 'cancelled';
-    });
-    if (deadDep) {
-      cancel.push({ nodeId: String(task.node_id), reason: 'upstream ' + deadDep + ' did not complete' });
-      continue;
-    }
-    if (deps.every(d => statusByNode.get(d) === 'completed')) {
-      unblock.push(String(task.node_id));
+  const skip = [];
+  // Decisions are projected as they are made and the pass repeats until nothing moves: skipping
+  // one step can settle the next one, and a whole untaken branch should resolve at once rather
+  // than one step per incoming message. Projecting also means a run that finishes on this very
+  // pass is recognised now rather than waiting for a message that will never arrive.
+  const projected = new Map(statusByNode);
+  let moved = true;
+  while (moved) {
+    moved = false;
+    for (const task of (tasks || [])) {
+      const nodeId = String(task.node_id);
+      if (projected.get(nodeId) !== 'blocked') continue;
+      const deps = dependencyBranches(nodeId, incomingEdges, isFlowControlId, reps);
+      const depIds = Array.from(deps.keys());
+      // A dependency that errored or was itself cancelled can never complete, so this task can
+      // never legally run. Leaving it 'blocked' was safe (it does stay unrun) but left the run
+      // parked at 'running' with no terminal state and nothing in the UI explaining the stall.
+      const deadDep = depIds.find(d => projected.get(d) === 'error' || projected.get(d) === 'cancelled');
+      if (deadDep) {
+        cancel.push({ nodeId, reason: 'upstream ' + deadDep + ' did not complete' });
+        projected.set(nodeId, 'cancelled');
+        moved = true;
+        continue;
+      }
+      if (depIds.some(d => TERMINAL_TASK_STATUSES.indexOf(projected.get(d)) === -1)) continue;
+      // Everything it waits on has finished. It runs when at least one of those leads here live:
+      // completed, and either unconditionally or through the branch its If actually took.
+      const live = depIds.length === 0 || depIds.some((d) => {
+        if (projected.get(d) !== 'completed') return false;
+        const taken = branchByNode.get(d);
+        const handles = deps.get(d);
+        return !taken || handles.has(null) || handles.has(taken);
+      });
+      if (live) {
+        unblock.push(nodeId);
+        projected.set(nodeId, 'pending');
+      } else {
+        skip.push(nodeId);
+        projected.set(nodeId, 'skipped');
+      }
+      moved = true;
     }
   }
-
-  // Project the decisions above onto the statuses before judging the run as a whole, so a run
-  // that finishes on this very pass is recognised now rather than waiting for a message that
-  // will never arrive.
-  const projected = new Map(statusByNode);
-  for (const nodeId of unblock) projected.set(nodeId, 'pending');
-  for (const c of cancel) projected.set(c.nodeId, 'cancelled');
   const statuses = Array.from(projected.values());
 
   let runStatus = 'running';
@@ -492,11 +660,21 @@ function computeAdvance(nodes, edges, tasks) {
     stalled = true;
   }
 
-  return { unblock, cancel, runStatus, stalled };
+  return { unblock, cancel, skip, runStatus, stalled };
 }
 
 module.exports = {
   FLOW_CONTROL_INSTRUMENTS,
+  CLOUD_DEVICE_ID,
+  CLOUD_LOGIC,
+  IF_OPERATORS,
+  IF_BRANCHES,
+  isCloudLogicNode,
+  isTransparentNode,
+  isDeviceNode,
+  logicProblemsOf,
+  evaluateCondition,
+  dependencyBranches,
   TERMINAL_TASK_STATUSES,
   ACTIVE_TASK_STATUSES,
   isFlowControlNode,

@@ -1,7 +1,11 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cpu } from 'lucide-react';
+import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cpu, AlertTriangle } from 'lucide-react';
+import { graphProblems } from '@/lib/libraryCheck';
+import { runtimeSummary, type WorkflowRuntime } from '@ivoryos/shared-ui';
+
+type Problem = { where?: string; message: string };
 
 // Two distinct kinds of saved workflow live here side by side: a 'distributed' one is a
 // multi-device Orchestrator graph (nodes/edges), browser-local only (cloud_saved_workflows) since
@@ -16,6 +20,8 @@ type DistributedWorkflowItem = {
   updated_at: number;
   nodes: any[];
   edges: any[];
+  /** Checked here, against each device's published schema -- see src/lib/libraryCheck.js. */
+  problems: Problem[];
 };
 type EdgeSequenceItem = {
   type: 'edge';
@@ -24,14 +30,46 @@ type EdgeSequenceItem = {
   created_at: number;
   updated_at: number;
   device_id: string;
+  /** The device's own verdict, published with the body -- see `published_sequence` on the edge. */
+  problems: Problem[];
+  problemCount: number;
+  /** Typical duration from the device's own runs of it (edge runtime.py). */
+  runtime: WorkflowRuntime | null;
 };
 type WorkflowItem = DistributedWorkflowItem | EdgeSequenceItem;
+
+/**
+ * One line when a workflow will not run as saved, with the reasons on hover. The same treatment as
+ * the edge Library's IncompatibleLine, so a broken workflow reads the same in both places.
+ */
+function ProblemLine({ lead, count, problems }: { lead: string; count: number; problems: Problem[] }) {
+  return (
+    <div className="group/compat relative mt-3 flex items-center gap-1.5 text-[11px] rounded-lg px-2 py-1.5 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/40">
+      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">
+        {lead} — <strong>{count === 1 ? '1 problem' : `${count} problems`}</strong>
+      </span>
+      <div className="hidden group-hover/compat:block absolute left-0 bottom-full mb-1.5 z-50 w-max max-w-[300px] p-2.5 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-[11px] shadow-xl pointer-events-none">
+        <ul className="space-y-1">
+          {problems.map((p, i) => (
+            <li key={i} className="break-words">
+              {p.where ? <span className="font-mono opacity-60">{p.where} </span> : null}
+              {p.message}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
 
 export default function CloudLibraryPage() {
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'created_at' | 'updated_at'>('updated_at');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  // Workflows with problems go after the ones that will run, whatever the sort.
+  const [workingFirst, setWorkingFirst] = useState(true);
 
   useEffect(() => {
     fetchWorkflows();
@@ -40,31 +78,38 @@ export default function CloudLibraryPage() {
   const fetchWorkflows = async () => {
     const items: WorkflowItem[] = [];
 
+    const [sequences, devices] = await Promise.all([
+      fetch('/api/edge-sequences').then(r => r.json()).catch(e => { console.error('Failed to fetch edge sequences', e); return []; }),
+      fetch('/api/devices').then(r => r.json()).catch(e => { console.error('Failed to fetch devices', e); return []; }),
+    ]);
+    const sequenceRows: any[] = Array.isArray(sequences) ? sequences : [];
+    const deviceRows: any[] = Array.isArray(devices) ? devices : [];
+
     const saved = localStorage.getItem('cloud_saved_workflows');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        for (const w of parsed) items.push({ ...w, type: 'distributed' });
+        for (const w of parsed) {
+          items.push({ ...w, type: 'distributed', problems: graphProblems(w.nodes || [], deviceRows, sequenceRows) });
+        }
       } catch (e) {
         console.error("Failed to parse saved workflows", e);
       }
     }
 
-    try {
-      const res = await fetch('/api/edge-sequences');
-      const sequences = await res.json();
-      for (const s of (Array.isArray(sequences) ? sequences : [])) {
-        items.push({
-          type: 'edge',
-          name: s.name,
-          description: s.description || '',
-          created_at: s.created_at ? new Date(s.created_at).getTime() : 0,
-          updated_at: s.updated_at ? new Date(s.updated_at).getTime() : 0,
-          device_id: s.device_id,
-        });
-      }
-    } catch (e) {
-      console.error("Failed to fetch edge sequences", e);
+    for (const s of sequenceRows) {
+      const verdict = s.body?.compatibility;
+      items.push({
+        type: 'edge',
+        name: s.name,
+        description: s.description || '',
+        created_at: s.created_at ? new Date(s.created_at).getTime() : 0,
+        updated_at: s.updated_at ? new Date(s.updated_at).getTime() : 0,
+        device_id: s.device_id,
+        problems: verdict?.status === 'broken' ? (verdict.errors || []) : [],
+        problemCount: verdict?.status === 'broken' ? (verdict.error_count || 0) : 0,
+        runtime: s.body?.runtime || null,
+      });
     }
 
     setWorkflows(items);
@@ -74,6 +119,10 @@ export default function CloudLibraryPage() {
     w.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     w.description.toLowerCase().includes(searchQuery.toLowerCase())
   ).sort((a, b) => {
+     if (workingFirst) {
+       const broken = (w: WorkflowItem) => ((w.problems?.length ?? 0) > 0 ? 1 : 0);
+       if (broken(a) !== broken(b)) return broken(a) - broken(b);
+     }
      let valA = a[sortBy];
      let valB = b[sortBy];
      if (typeof valA === 'string') valA = valA.toLowerCase();
@@ -144,6 +193,14 @@ export default function CloudLibraryPage() {
                   >
                       <ArrowUpDown className="w-4 h-4 text-gray-500" />
                   </button>
+                  <label
+                      title="List workflows with problems after the ones that will run"
+                      className="flex items-center gap-1.5 text-sm cursor-pointer select-none whitespace-nowrap"
+                      style={{ color: 'var(--text-secondary)' }}
+                  >
+                      <input type="checkbox" checked={workingFirst} onChange={(e) => setWorkingFirst(e.target.checked)} />
+                      working first
+                  </label>
               </div>
           </div>
       </div>
@@ -173,6 +230,18 @@ export default function CloudLibraryPage() {
                           <p className="text-sm mt-2 line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{workflow.description}</p>
                       ) : (
                           <p className="text-xs mt-2 italic text-gray-400">No description provided.</p>
+                      )}
+                      {workflow.type === 'edge' && workflow.problemCount > 0 && (
+                          <ProblemLine lead={`Won't run on ${workflow.device_id}`} count={workflow.problemCount} problems={workflow.problems} />
+                      )}
+                      {workflow.type === 'edge' && workflow.runtime?.runs ? (
+                          <div className="mt-2 flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                              <Clock className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">{runtimeSummary(workflow.runtime)}</span>
+                          </div>
+                      ) : null}
+                      {workflow.type === 'distributed' && workflow.problems.length > 0 && (
+                          <ProblemLine lead="Needs fixing before it can run" count={workflow.problems.length} problems={workflow.problems} />
                       )}
                   </div>
                   <div className="mt-4 space-y-2">

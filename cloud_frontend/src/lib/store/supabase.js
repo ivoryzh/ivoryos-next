@@ -23,6 +23,20 @@ const { createClient } = require('@supabase/supabase-js');
 
 const nowIso = () => new Date().toISOString();
 
+/** Older rows predate the column; a task with no members list covers exactly its own node. */
+const withMembers = (t) => ({ ...t, members: t.members && t.members.length ? t.members : [t.node_id] });
+
+/**
+ * A pending task that is not yet due - the next occurrence of a repeating node. Mirrors the LAN
+ * backend's predicate exactly: "ready" has to mean the same thing in both modes, or a cadence
+ * fires early in one of them.
+ */
+const isDue = (task, now = Date.now()) => {
+  if (!task || !task.not_before) return true;
+  const at = Date.parse(task.not_before);
+  return Number.isNaN(at) || at <= now;
+};
+
 function createSupabaseStore(url, serviceRoleKey) {
   const supabase = createClient(url, serviceRoleKey);
   const fail = (what, error) => { throw new Error(`${what}: ${error.message}`); };
@@ -42,9 +56,9 @@ function createSupabaseStore(url, serviceRoleKey) {
     // --- devices -------------------------------------------------------------------------
     // Separate status/schema upserts: they arrive on different MQTT topics and a status ping
     // carries no schema, so a combined write would blank the schema column every 5 seconds.
-    async upsertDeviceStatus(deviceId, status) {
+    async upsertDeviceStatus(deviceId, status, busy = false) {
       const { error } = await supabase.from('devices')
-        .upsert({ id: deviceId, status, last_seen: nowIso() }, { onConflict: 'id' });
+        .upsert({ id: deviceId, status, busy: !!busy, last_seen: nowIso() }, { onConflict: 'id' });
       if (error) fail(`Failed to upsert device status for ${deviceId}`, error);
     },
 
@@ -62,10 +76,56 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listDevices() {
       const { data, error } = await supabase.from('devices')
-        .select('id, name, status, last_seen, schema')
+        .select('id, name, status, busy, last_seen, schema')
         .order('last_seen', { ascending: false });
       if (error) fail('Failed to fetch devices', error);
       return data;
+    },
+
+    /** Cloud tasks not yet sent anywhere: ready but held (`pending`) or waiting on others (`blocked`). */
+    async listWaitingTasks() {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('run_id, node_id, device_id, status, block, not_before, runs(name)')
+        .in('status', ['pending', 'blocked'])
+        .order('updated_at', { ascending: true });
+      if (error) fail('Failed to fetch waiting tasks', error);
+      return (data || []).map(({ runs, ...t }) => ({ ...t, run_name: runs?.name || null }));
+    },
+
+    async setTaskResult(runId, nodeId, result) {
+      const { error } = await supabase.from('run_tasks')
+        .update({ result: result ?? null }).eq('run_id', runId).eq('node_id', nodeId);
+      if (error) fail(`Failed to store the result of ${runId}/${nodeId}`, error);
+    },
+
+    /** Every task of one Cloud run with whatever its device sent back -- one experiment's record. */
+    async listRunTaskRecords(runId) {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('node_id, device_id, status, dispatched_at, updated_at, result')
+        .eq('run_id', runId);
+      if (error) fail(`Failed to fetch the tasks of run ${runId}`, error);
+      return data || [];
+    },
+
+    async getTaskResult(runId, nodeId) {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('run_id, node_id, device_id, status, updated_at, result, runs(name)')
+        .eq('run_id', runId).eq('node_id', nodeId).maybeSingle();
+      if (error) fail(`Failed to fetch the result of ${runId}/${nodeId}`, error);
+      if (!data) return null;
+      const { runs, ...t } = data;
+      return { ...t, run_name: runs?.name || null };
+    },
+
+    /** Recent tasks that have a synced result, newest first -- summaries only, not the steps. */
+    async listTaskResults(limit) {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('run_id, node_id, device_id, status, updated_at, runs(name), name:result->>name, edge_run_id:result->>edgeRunId, result_status:result->>status, end_time:result->>end_time')
+        .not('result', 'is', null)
+        .order('updated_at', { ascending: false })
+        .limit(limit);
+      if (error) fail('Failed to fetch results', error);
+      return (data || []).map(({ runs, ...t }) => ({ ...t, run_name: runs?.name || null }));
     },
 
     async markStaleDevicesOffline(staleBeforeIso) {
@@ -144,6 +204,15 @@ function createSupabaseStore(url, serviceRoleKey) {
       return data;
     },
 
+    /** How many runs are already called `base` or `base #N`, for numbering the next one. */
+    async countRunsNamed(base) {
+      const { count, error } = await supabase.from('runs')
+        .select('id', { count: 'exact', head: true })
+        .or(`name.eq.${JSON.stringify(base)},name.like.${JSON.stringify(`${base} #%`)}`);
+      if (error) fail('Failed to count runs', error);
+      return count || 0;
+    },
+
     async updateRunStatus(runId, status) {
       const { error } = await supabase.from('runs')
         .update({ status, updated_at: nowIso() }).eq('id', runId);
@@ -159,25 +228,37 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listRunTasks(runId) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('node_id, status').eq('run_id', runId);
+        .select('node_id, status, members, repeat_every_ms, repeat_total, repeat_done')
+        .eq('run_id', runId);
       if (error) fail(`Failed to fetch tasks for run ${runId}`, error);
-      return data;
+      return (data || []).map(withMembers);
     },
 
     async listRecentTasks(limit) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, status, updated_at')
+        .select('run_id, node_id, device_id, status, members, progress, updated_at, edge_run_id:result->>edgeRunId')
         .order('updated_at', { ascending: false })
         .limit(limit);
       if (error) fail('Failed to fetch run tasks', error);
-      return data;
+      return (data || []).map(withMembers);
     },
 
     async listTasksByStatus(status) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, device_id, block, status').eq('status', status);
+        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at').eq('status', status)
+        .order('updated_at', { ascending: true });
       if (error) fail(`Failed to fetch ${status} tasks`, error);
-      return data;
+      return (data || []).filter((t) => isDue(t));
+    },
+
+    /** True while a Cloud task is on this device: sent, running, or waiting for input there. */
+    async deviceHasActiveTask(deviceId) {
+      const { data, error } = await supabase.from('run_tasks').select('node_id')
+        .eq('device_id', deviceId)
+        .not('status', 'in', '(pending,blocked,completed,error,cancelled)')
+        .limit(1);
+      if (error) fail('Failed to check whether the device is busy', error);
+      return (data || []).length > 0;
     },
 
     /**
@@ -192,16 +273,23 @@ function createSupabaseStore(url, serviceRoleKey) {
       const channel = supabase.channel('run_tasks_dispatch').on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'run_tasks', filter: 'status=eq.pending' },
-        ({ new: task }) => onTask(task),
+        // A repeating node's next occurrence is inserted as pending with a future `not_before`.
+        // Realtime delivers it immediately, so the readiness predicate has to be applied here too
+        // or the repeat fires the instant it is scheduled instead of when it is due. The LAN
+        // backend applies the identical filter; see its `isDue`.
+        ({ new: task }) => { if (isDue(task)) onTask(task); },
       ).subscribe((status) => {
         if (status === 'SUBSCRIBED' && onReady) onReady();
       });
       return () => { supabase.removeChannel(channel); };
     },
 
-    async updateTaskStatusIfNotTerminal(runId, nodeId, status, terminalStatuses) {
+    /** `progress`, when given, replaces the task's progress summary; omitted, it is left alone. */
+    async updateTaskStatusIfNotTerminal(runId, nodeId, status, terminalStatuses, progress) {
+      const patch = { status, updated_at: nowIso() };
+      if (progress !== undefined) patch.progress = progress;
       const { data, error } = await supabase.from('run_tasks')
-        .update({ status, updated_at: nowIso() })
+        .update(patch)
         .eq('run_id', runId)
         .eq('node_id', nodeId)
         .not('status', 'in', `(${terminalStatuses.join(',')})`)
@@ -212,7 +300,8 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async updateTaskStatusFrom(runId, nodeId, fromStatus, toStatus, extra) {
       const patch = { status: toStatus, updated_at: nowIso() };
-      if (extra && extra.dispatched) patch.dispatched_at = nowIso();
+      // A dispatch starts the task afresh, so the previous occurrence's progress must not show.
+      if (extra && extra.dispatched) { patch.dispatched_at = nowIso(); patch.progress = null; }
       const { data, error } = await supabase.from('run_tasks')
         .update(patch)
         .eq('run_id', runId)
@@ -221,6 +310,108 @@ function createSupabaseStore(url, serviceRoleKey) {
         .select('status');
       if (error) fail(`Failed to move ${runId}/${nodeId} ${fromStatus}->${toStatus}`, error);
       return (data || []).length > 0;
+    },
+
+    /**
+     * Turn a just-completed repeating task back into the next occurrence. See the LAN backend for
+     * the full reasoning; the guard on `status = 'completed'` is the same compare-and-set, with
+     * `repeat_done` added to it so two concurrent status messages cannot both claim one occurrence
+     * (Postgres has no single-statement conditional increment through this client).
+     */
+    async scheduleTaskRepeat(runId, nodeId) {
+      const { data: rows, error: readErr } = await supabase.from('run_tasks')
+        .select('repeat_every_ms, repeat_total, repeat_done')
+        .eq('run_id', runId).eq('node_id', nodeId).limit(1);
+      if (readErr) fail(`Failed to read repeat state for ${runId}/${nodeId}`, readErr);
+      const row = (rows || [])[0];
+      // The count makes a task repeat; the interval is only the wait (none = back to back).
+      if (!row || !(row.repeat_total > 1)) return false;
+      if (row.repeat_done + 1 >= row.repeat_total) return false;
+
+      const { data, error } = await supabase.from('run_tasks')
+        .update({
+          status: 'pending',
+          repeat_done: row.repeat_done + 1,
+          not_before: new Date(Date.now() + (row.repeat_every_ms || 0)).toISOString(),
+          updated_at: nowIso(),
+        })
+        .eq('run_id', runId).eq('node_id', nodeId)
+        .eq('status', 'completed')
+        .eq('repeat_done', row.repeat_done)
+        .select('status');
+      if (error) fail(`Failed to schedule repeat for ${runId}/${nodeId}`, error);
+      return (data || []).length > 0;
+    },
+
+    // --- schedules -----------------------------------------------------------------------
+    async insertSchedule(schedule) {
+      const { error } = await supabase.from('schedules').insert({
+        id: schedule.id,
+        name: schedule.name || '',
+        enabled: schedule.enabled !== false,
+        trigger_type: schedule.trigger_type || 'interval',
+        every_ms: schedule.every_ms || 0,
+        nodes: schedule.nodes ?? [],
+        edges: schedule.edges ?? [],
+        tasks: schedule.tasks ?? [],
+        max_runs: schedule.max_runs || 0,
+        next_fire_at: schedule.next_fire_at || null,
+      });
+      if (error) fail('Failed to create schedule', error);
+    },
+
+    async listSchedules() {
+      const { data, error } = await supabase.from('schedules')
+        .select('*').order('created_at', { ascending: false });
+      if (error) fail('Failed to list schedules', error);
+      return data || [];
+    },
+
+    async getSchedule(id) {
+      const { data, error } = await supabase.from('schedules').select('*').eq('id', id).single();
+      if (error) return null;
+      return data;
+    },
+
+    async setScheduleEnabled(id, enabled, nextFireAt) {
+      const { error } = await supabase.from('schedules')
+        .update({ enabled: !!enabled, next_fire_at: nextFireAt || null, updated_at: nowIso() })
+        .eq('id', id);
+      if (error) fail(`Failed to update schedule ${id}`, error);
+    },
+
+    async deleteSchedule(id) {
+      const { data, error } = await supabase.from('schedules').delete().eq('id', id).select('id');
+      if (error) fail(`Failed to delete schedule ${id}`, error);
+      return (data || []).length > 0;
+    },
+
+    async listDueSchedules(nowIsoString) {
+      const { data, error } = await supabase.from('schedules')
+        .select('*')
+        .eq('enabled', true)
+        .not('next_fire_at', 'is', null)
+        .lte('next_fire_at', nowIsoString || nowIso());
+      if (error) fail('Failed to list due schedules', error);
+      return (data || []).filter(s => !s.max_runs || s.runs_fired < s.max_runs);
+    },
+
+    /**
+     * Claim this occurrence with a compare-and-set on the firing time.
+     *
+     * A database function rather than a plain update because the claim has to increment
+     * `runs_fired` in the same statement that moves `next_fire_at` — read-then-write through the
+     * client leaves a window where two daemons both start the same scheduled run.
+     */
+    async claimScheduleFiring(id, expectedFireAt, nextFireAt, runId) {
+      const { data, error } = await supabase.rpc('claim_schedule_firing', {
+        p_id: id,
+        p_expected_fire_at: expectedFireAt,
+        p_next_fire_at: nextFireAt || null,
+        p_run_id: runId,
+      });
+      if (error) fail(`Failed to claim schedule ${id}`, error);
+      return !!data;
     },
 
     // --- broker config -------------------------------------------------------------------

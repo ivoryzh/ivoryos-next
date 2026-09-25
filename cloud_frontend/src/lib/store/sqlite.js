@@ -51,6 +51,8 @@ create table if not exists devices (
     id text primary key,
     name text not null default '',
     status text not null default 'offline',
+    -- 1 while the device reports a run in progress or queued there (bench runs included).
+    busy integer not null default 0,
     last_seen text,
     schema text not null default '{}',
     created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -82,12 +84,61 @@ create table if not exists run_tasks (
     device_id text not null,
     block text not null default '{}',
     status text not null default 'blocked',
+    -- The full run payload for a step that is more than one call: a spreadsheet, an optimization
+    -- campaign, or a merged linear chain. Null means "dispatch the bare block", which keeps an
+    -- ordinary instrument step at its original size on the wire (AWS IoT meters in 5KB steps).
+    run text,
+    -- Every canvas node this one task covers. Length 1 unless a chain was merged; the status
+    -- route fans one status back out over all of them so a merged chain still lights up whole.
+    members text not null default '[]',
+    -- A node re-run on its own cadence inside the run: "every 20 minutes, 12 times". 0 for the
+    -- interval means it runs once, which is every node that has no cadence set.
+    repeat_every_ms integer not null default 0,
+    repeat_total integer not null default 0,
+    repeat_done integer not null default 0,
+    -- Earliest this task may be dispatched. Set when a repeat is scheduled; a pending task whose
+    -- time has not come is simply not picked up yet.
+    not_before text,
     dispatched_at text,
+    -- The device's latest progress summary for this task (JSON, see run_progress_summary in the
+    -- edge's queue.py): steps done/total, current step, row. Cleared when the task is dispatched.
+    progress text,
+    -- The finished run's record as the device sent it (edge queue.build_cloud_result): the same
+    -- parameters + steps shape the edge's Data History reads, so Cloud builds the same datasheet.
+    result text,
     updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     primary key (run_id, node_id)
 );
 
 create index if not exists run_tasks_status_idx on run_tasks(status);
+
+-- Recurring triggers. A schedule stores an ALREADY-PLANNED run — its tasks exactly as planRun
+-- produced them — rather than a graph to re-plan on every firing. Two reasons: daemon.js has no
+-- build step and cannot import the TypeScript that builds run payloads, and a schedule that fires
+-- unattended every ten minutes should replay something a person validated once, not re-derive it
+-- from a canvas nobody is looking at.
+create table if not exists schedules (
+    id text primary key,
+    name text not null default '',
+    enabled integer not null default 1,
+    -- 'interval' (every N ms) or 'once' (at a fixed time).
+    trigger_type text not null default 'interval',
+    every_ms integer not null default 0,
+    -- Graph and plan, stored together so a firing is a pure copy.
+    nodes text not null default '[]',
+    edges text not null default '[]',
+    tasks text not null default '[]',
+    -- 0 means "until it is disabled".
+    max_runs integer not null default 0,
+    runs_fired integer not null default 0,
+    next_fire_at text,
+    last_fire_at text,
+    last_run_id text,
+    created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+create index if not exists schedules_due_idx on schedules(enabled, next_fire_at);
 
 -- The daemon's liveness beacon, read by /api/health. One row, id='daemon'. Deliberately a table
 -- and not a pid file: the Next app may not share a filesystem with the daemon in cloud mode, and
@@ -146,6 +197,36 @@ function jsonParse(value, fallback) {
 
 const nowIso = () => new Date().toISOString();
 
+/** Row -> task, with the two JSON columns parsed. `run` stays null for a plain single-step task. */
+function hydrateTask(r) {
+  return {
+    ...r,
+    block: jsonParse(r.block, {}),
+    run: r.run ? jsonParse(r.run, null) : null,
+  };
+}
+
+/**
+ * A repeating node's next occurrence is pending but not yet due. Filtered here rather than in SQL
+ * so the Supabase backend can apply the identical predicate to rows its own query returns —
+ * "ready" has to mean the same thing in both modes or a repeat fires early in one of them.
+ */
+function hydrateSchedule(row) {
+  return {
+    ...row,
+    enabled: !!row.enabled,
+    nodes: jsonParse(row.nodes, []),
+    edges: jsonParse(row.edges, []),
+    tasks: jsonParse(row.tasks, []),
+  };
+}
+
+function isDue(task, now = Date.now()) {
+  if (!task || !task.not_before) return true;
+  const at = Date.parse(task.not_before);
+  return Number.isNaN(at) || at <= now;
+}
+
 function createSqliteStore(filePath) {
   const resolved = path.resolve(filePath);
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
@@ -162,6 +243,21 @@ function createSqliteStore(filePath) {
   // Lightweight forward-migration for a database file created before store_location existed.
   // `create table if not exists` above does not add columns to an existing table, and a dev
   // machine will already have a file from the previous shape.
+  // Columns added after the first release. `alter table` on a table that already has them throws,
+  // which is the intended no-op — the same shape as the store_location migration below.
+  for (const ddl of [
+    'alter table run_tasks add column run text',
+    "alter table run_tasks add column members text not null default '[]'",
+    'alter table run_tasks add column repeat_every_ms integer not null default 0',
+    'alter table run_tasks add column repeat_total integer not null default 0',
+    'alter table run_tasks add column repeat_done integer not null default 0',
+    'alter table run_tasks add column not_before text',
+    'alter table run_tasks add column progress text',
+    'alter table run_tasks add column result text',
+    'alter table devices add column busy integer not null default 0',
+  ]) {
+    try { db.exec(ddl); } catch { /* column already present */ }
+  }
   try { db.exec("alter table cloud_status add column store_location text not null default ''"); }
   catch { /* column already present */ }
 
@@ -173,6 +269,7 @@ function createSqliteStore(filePath) {
     id: row.id,
     name: row.name,
     status: row.status,
+    busy: !!row.busy,
     last_seen: row.last_seen,
     schema: jsonParse(row.schema, {}),
   });
@@ -199,11 +296,11 @@ function createSqliteStore(filePath) {
     // Status and schema arrive on separate MQTT topics and must not clobber each other: a status
     // ping carries no schema, and writing one row with both fields would blank the schema every
     // 5 seconds. Hence two narrow upserts that each touch only their own column.
-    async upsertDeviceStatus(deviceId, status) {
+    async upsertDeviceStatus(deviceId, status, busy = false) {
       run(
-        `insert into devices (id, status, last_seen) values (?, ?, ?)
-         on conflict(id) do update set status = excluded.status, last_seen = excluded.last_seen`,
-        deviceId, status, nowIso(),
+        `insert into devices (id, status, busy, last_seen) values (?, ?, ?, ?)
+         on conflict(id) do update set status = excluded.status, busy = excluded.busy, last_seen = excluded.last_seen`,
+        deviceId, status, busy ? 1 : 0, nowIso(),
       );
     },
 
@@ -224,8 +321,55 @@ function createSqliteStore(filePath) {
     },
 
     async listDevices() {
-      return all('select id, name, status, last_seen, schema from devices order by last_seen desc')
+      return all('select id, name, status, busy, last_seen, schema from devices order by last_seen desc')
         .map(mapDevice);
+    },
+
+    /** Cloud tasks not yet sent anywhere: ready but held (`pending`) or waiting on others (`blocked`). */
+    async listWaitingTasks() {
+      return all(
+        `select t.run_id, t.node_id, t.device_id, t.status, t.block, t.not_before, r.name as run_name
+         from run_tasks t left join runs r on r.id = t.run_id
+         where t.status in ('pending', 'blocked') order by t.updated_at asc`,
+      ).map(r => ({ ...r, block: jsonParse(r.block, {}) }));
+    },
+
+    async setTaskResult(runId, nodeId, result) {
+      run('update run_tasks set result = ? where run_id = ? and node_id = ?',
+        JSON.stringify(result ?? null), runId, nodeId);
+    },
+
+    /** Every task of one Cloud run with whatever its device sent back -- one experiment's record. */
+    async listRunTaskRecords(runId) {
+      return all(
+        `select node_id, device_id, status, dispatched_at, updated_at, result
+         from run_tasks where run_id = ?`,
+        runId,
+      ).map(r => ({ ...r, result: r.result ? jsonParse(r.result, null) : null }));
+    },
+
+    async getTaskResult(runId, nodeId) {
+      const row = get(
+        `select t.run_id, t.node_id, t.device_id, t.status, t.updated_at, t.result, r.name as run_name
+         from run_tasks t left join runs r on r.id = t.run_id where t.run_id = ? and t.node_id = ?`,
+        runId, nodeId,
+      );
+      return row ? { ...row, result: row.result ? jsonParse(row.result, null) : null } : null;
+    },
+
+    /** Recent tasks that have a synced result, newest first -- summaries only, not the steps. */
+    async listTaskResults(limit) {
+      return all(
+        `select t.run_id, t.node_id, t.device_id, t.status, t.updated_at, r.name as run_name,
+                json_extract(t.result, '$.name') as name,
+                json_extract(t.result, '$.edgeRunId') as edge_run_id,
+                json_extract(t.result, '$.status') as result_status,
+                json_extract(t.result, '$.end_time') as end_time,
+                json_array_length(t.result, '$.steps') as step_count
+         from run_tasks t left join runs r on r.id = t.run_id
+         where t.result is not null order by t.updated_at desc limit ?`,
+        limit,
+      );
     },
 
     async markStaleDevicesOffline(staleBeforeIso) {
@@ -303,6 +447,11 @@ function createSqliteStore(filePath) {
       };
     },
 
+    /** How many runs are already called `base` or `base #N`, for numbering the next one. */
+    async countRunsNamed(base) {
+      return get(`select count(*) as c from runs where name = ? or name like ?`, base, `${base} #%`).c;
+    },
+
     async updateRunStatus(runId, status) {
       run('update runs set status = ?, updated_at = ? where id = ?', status, nowIso(), runId);
     },
@@ -311,15 +460,26 @@ function createSqliteStore(filePath) {
     async insertTasks(tasks) {
       if (!tasks.length) return;
       const stmt = db.prepare(
-        `insert into run_tasks (run_id, node_id, device_id, block, status)
-         values (?, ?, ?, ?, ?)`,
+        `insert into run_tasks
+           (run_id, node_id, device_id, block, run, members, status,
+            repeat_every_ms, repeat_total, not_before)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       // One transaction so a run is either fully planned or not planned at all — a partial insert
       // would leave a run whose graph is missing steps, which would then "complete" early.
       db.exec('begin');
       try {
         for (const t of tasks) {
-          stmt.run(t.run_id, t.node_id, t.device_id, JSON.stringify(t.block ?? {}), t.status);
+          stmt.run(
+            t.run_id, t.node_id, t.device_id,
+            JSON.stringify(t.block ?? {}),
+            t.run ? JSON.stringify(t.run) : null,
+            JSON.stringify(t.members ?? [t.node_id]),
+            t.status,
+            t.repeat_every_ms || 0,
+            t.repeat_total || 0,
+            t.not_before || null,
+          );
         }
         db.exec('commit');
       } catch (e) {
@@ -329,21 +489,39 @@ function createSqliteStore(filePath) {
     },
 
     async listRunTasks(runId) {
-      return all('select node_id, status from run_tasks where run_id = ?', runId);
+      return all(
+        `select node_id, status, members, repeat_every_ms, repeat_total, repeat_done
+         from run_tasks where run_id = ?`,
+        runId,
+      ).map(r => ({ ...r, members: jsonParse(r.members, [r.node_id]) }));
     },
 
     async listRecentTasks(limit) {
       return all(
-        'select run_id, node_id, status from run_tasks order by updated_at desc limit ?',
+        `select run_id, node_id, device_id, status, members, progress, updated_at,
+                json_extract(result, '$.edgeRunId') as edge_run_id
+         from run_tasks order by updated_at desc limit ?`,
         limit,
-      );
+      ).map(r => ({ ...r, members: jsonParse(r.members, [r.node_id]), progress: r.progress ? jsonParse(r.progress, null) : null }));
     },
 
     async listTasksByStatus(status) {
+      // Oldest first: tasks now wait their turn per device (see deviceHasActiveTask), so the
+      // order they are offered in is the order a device works through them.
       return all(
-        'select run_id, node_id, device_id, block, status from run_tasks where status = ?',
+        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at
+         from run_tasks where status = ? order by updated_at asc`,
         status,
-      ).map(r => ({ ...r, block: jsonParse(r.block, {}) }));
+      ).map(hydrateTask).filter((t) => isDue(t));
+    },
+
+    /** True while a Cloud task is on this device: sent, running, or waiting for input there. */
+    async deviceHasActiveTask(deviceId) {
+      return !!get(
+        `select 1 as busy from run_tasks
+         where device_id = ? and status not in ('pending','blocked','completed','error','cancelled') limit 1`,
+        deviceId,
+      );
     },
 
     /**
@@ -364,11 +542,12 @@ function createSqliteStore(filePath) {
         inFlight = true;
         try {
           const rows = all(
-            "select run_id, node_id, device_id, block, status from run_tasks where status = 'pending'",
-          );
+            `select run_id, node_id, device_id, block, run, status, not_before
+             from run_tasks where status = 'pending'`,
+          ).map(hydrateTask).filter((t) => isDue(t));
           for (const r of rows) {
             if (stopped) break;
-            await onTask({ ...r, block: jsonParse(r.block, {}) });
+            await onTask(r);
           }
         } catch (e) {
           console.error('[Store] pending-task poll failed:', e.message);
@@ -382,19 +561,24 @@ function createSqliteStore(filePath) {
     },
 
     /** Terminal-status guard: returns whether a row actually moved. */
-    async updateTaskStatusIfNotTerminal(runId, nodeId, status, terminalStatuses) {
+    /** `progress`, when given, replaces the task's progress summary; omitted, it is left alone. */
+    async updateTaskStatusIfNotTerminal(runId, nodeId, status, terminalStatuses, progress) {
       const placeholders = terminalStatuses.map(() => '?').join(',');
+      const setProgress = progress !== undefined ? ', progress = ?' : '';
+      const progressArg = progress !== undefined ? [progress === null ? null : JSON.stringify(progress)] : [];
       const res = run(
-        `update run_tasks set status = ?, updated_at = ?
+        `update run_tasks set status = ?, updated_at = ?${setProgress}
          where run_id = ? and node_id = ? and status not in (${placeholders})`,
-        status, nowIso(), runId, nodeId, ...terminalStatuses,
+        status, nowIso(), ...progressArg, runId, nodeId, ...terminalStatuses,
       );
       return res.changes > 0;
     },
 
     /** Compare-and-set, for the unblock / cancel / dispatch races. */
     async updateTaskStatusFrom(runId, nodeId, fromStatus, toStatus, extra) {
-      const setDispatched = extra && extra.dispatched ? ', dispatched_at = ?' : '';
+      // A dispatch starts the task afresh (a repeat's next occurrence included), so the previous
+      // occurrence's progress must not show against it.
+      const setDispatched = extra && extra.dispatched ? ', dispatched_at = ?, progress = null' : '';
       const args = extra && extra.dispatched
         ? [toStatus, nowIso(), nowIso(), runId, nodeId, fromStatus]
         : [toStatus, nowIso(), runId, nodeId, fromStatus];
@@ -402,6 +586,96 @@ function createSqliteStore(filePath) {
         `update run_tasks set status = ?, updated_at = ?${setDispatched}
          where run_id = ? and node_id = ? and status = ?`,
         ...args,
+      );
+      return res.changes > 0;
+    },
+
+    /**
+     * Turn a just-completed repeating task back into the next occurrence.
+     *
+     * Returns true when a repeat was scheduled, in which case the run has NOT advanced: a node
+     * with repeats left is not finished, so nothing downstream of it may start. `repeat_total`
+     * of 0 means "no repeat", which falls out of the comparison rather than needing its own case.
+     *
+     * Guarded on `status = 'completed'` so two task-status messages arriving together cannot
+     * schedule the same occurrence twice — the same compare-and-set discipline dispatch uses.
+     */
+    async scheduleTaskRepeat(runId, nodeId) {
+      // The count is what makes a task repeat; the interval is only the wait between runs. A
+      // count with no interval means back to back -- it used to mean "never", so "2 times" with
+      // the minutes box left empty silently ran once.
+      const row = get(
+        'select repeat_every_ms, repeat_total from run_tasks where run_id = ? and node_id = ?', runId, nodeId,
+      );
+      if (!row || !(row.repeat_total > 1)) return false;
+      const res = run(
+        `update run_tasks
+         set status = 'pending', repeat_done = repeat_done + 1, not_before = ?, updated_at = ?
+         where run_id = ? and node_id = ? and status = 'completed'
+           and repeat_total > 1 and repeat_done + 1 < repeat_total`,
+        new Date(Date.now() + (row.repeat_every_ms || 0)).toISOString(), nowIso(), runId, nodeId,
+      );
+      return res.changes > 0;
+    },
+
+    // --- schedules -----------------------------------------------------------------------
+    async insertSchedule(schedule) {
+      run(
+        `insert into schedules
+           (id, name, enabled, trigger_type, every_ms, nodes, edges, tasks, max_runs, next_fire_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        schedule.id, schedule.name || '', schedule.enabled === false ? 0 : 1,
+        schedule.trigger_type || 'interval', schedule.every_ms || 0,
+        JSON.stringify(schedule.nodes ?? []), JSON.stringify(schedule.edges ?? []),
+        JSON.stringify(schedule.tasks ?? []), schedule.max_runs || 0, schedule.next_fire_at || null,
+      );
+    },
+
+    async listSchedules() {
+      return all('select * from schedules order by created_at desc').map(hydrateSchedule);
+    },
+
+    async getSchedule(id) {
+      const row = get('select * from schedules where id = ?', id);
+      return row ? hydrateSchedule(row) : null;
+    },
+
+    async setScheduleEnabled(id, enabled, nextFireAt) {
+      run(
+        'update schedules set enabled = ?, next_fire_at = ?, updated_at = ? where id = ?',
+        enabled ? 1 : 0, nextFireAt || null, nowIso(), id,
+      );
+    },
+
+    async deleteSchedule(id) {
+      const res = run('delete from schedules where id = ?', id);
+      return res.changes > 0;
+    },
+
+    /** Enabled schedules whose time has come and that have firings left. */
+    async listDueSchedules(nowIsoString) {
+      return all(
+        `select * from schedules
+         where enabled = 1 and next_fire_at is not null and next_fire_at <= ?
+           and (max_runs = 0 or runs_fired < max_runs)`,
+        nowIsoString || nowIso(),
+      ).map(hydrateSchedule);
+    },
+
+    /**
+     * Claim a schedule's firing: move `next_fire_at` forward and count the firing, conditional on
+     * the value the caller read. Whoever wins the compare-and-set owns this occurrence — the same
+     * reason dispatch claims a task before publishing, since two daemon instances (or a restart
+     * overlapping a tick) would otherwise both start the same scheduled run.
+     */
+    async claimScheduleFiring(id, expectedFireAt, nextFireAt, runId) {
+      const res = run(
+        `update schedules
+         set runs_fired = runs_fired + 1, last_fire_at = ?, last_run_id = ?,
+             next_fire_at = ?, enabled = case when ? is null then 0 else enabled end,
+             updated_at = ?
+         where id = ? and next_fire_at = ?`,
+        nowIso(), runId, nextFireAt || null, nextFireAt || null, nowIso(), id, expectedFireAt,
       );
       return res.changes > 0;
     },

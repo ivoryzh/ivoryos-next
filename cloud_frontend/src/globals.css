@@ -22,6 +22,8 @@
   }
 
   .dark {
+    /* Native scrollbars and form controls follow the app's dark toggle, not only the OS setting. */
+    color-scheme: dark;
     --bg-color: #0d0f12;
     --bg-gradient: linear-gradient(135deg, #0d0f12 0%, #171a21 100%);
     --panel-bg: rgba(255, 255, 255, 0.03);

@@ -2,7 +2,8 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Menu, Cloud, HandHelping } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
+import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { lastRunTabHref, runTabForPath, samePath } from './RunTabs';
@@ -43,7 +44,9 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   const currentRunTab = runTabForPath(pathname);
   const runEntryHref = currentRunTab ? currentRunTab.href : runHref;
 
-  const [waitingRun, setWaitingRun] = useState<{ id: number; prompt: string; inputType: string } | null>(null);
+  const [waitingRun, setWaitingRun] = useState<{ id: number; stepId?: number; prompt: string; inputType: string } | null>(null);
+  // Put aside by the operator (see inputPrompt.ts); the status bar brings it back.
+  const [promptMinimized, setPromptMinimizedState] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const [submittingInput, setSubmittingInput] = useState(false);
   const lastWaitingRunId = useRef<number | null>(null);
@@ -89,7 +92,8 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
             lastWaitingRunId.current = active.id;
             setInputValue(inputType === 'bool' ? 'false' : '');
           }
-          setWaitingRun({ id: active.id, prompt, inputType });
+          setWaitingRun({ id: active.id, stepId: step?.id, prompt, inputType });
+          setPromptMinimizedState(isPromptMinimized(promptKey(active.id, step?.id)));
         } else {
           lastWaitingRunId.current = null;
           setWaitingRun(null);
@@ -98,6 +102,15 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
     };
     return () => ws.close();
   }, []);
+
+  useEffect(() => {
+    if (!waitingRun) return;
+    const key = promptKey(waitingRun.id, waitingRun.stepId);
+    const sync = () => setPromptMinimizedState(isPromptMinimized(key));
+    sync();
+    window.addEventListener(INPUT_PROMPT_EVENT, sync);
+    return () => window.removeEventListener(INPUT_PROMPT_EVENT, sync);
+  }, [waitingRun?.id, waitingRun?.stepId]);
 
   const submitWaitingInput = async () => {
     if (!waitingRun) return;
@@ -151,17 +164,26 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
 
   return (
     <>
-    {waitingRun && (
+    {waitingRun && !promptMinimized && (
       <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
         <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-pink-200 dark:border-pink-500/30 rounded-2xl shadow-2xl p-6">
           <div className="flex items-center gap-3 mb-4">
             <div className="w-9 h-9 rounded-lg bg-pink-50 dark:bg-pink-500/10 flex items-center justify-center shrink-0">
               <HandHelping className="w-5 h-5 text-pink-600 dark:text-pink-400" />
             </div>
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Input needed to continue</h2>
               <p className="text-[11px] text-gray-400 dark:text-gray-500">The workflow is paused and waiting for you</p>
             </div>
+            {/* Answering can need a look at the workflow, the data, or the bench first. The run
+                stays paused; the status bar's "answer" button brings this back. */}
+            <button
+              onClick={() => setPromptMinimized(promptKey(waitingRun.id, waitingRun.stepId))}
+              title="Answer later: minimize to the status bar (the run stays paused)"
+              className="shrink-0 p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10"
+            >
+              <Minimize2 className="w-4 h-4" />
+            </button>
           </div>
           <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">{waitingRun.prompt}</p>
           {waitingRun.inputType === 'bool' ? (

@@ -167,3 +167,19 @@ async def test_the_listing_says_which_saved_workflows_no_longer_fit_the_deck(api
     assert "method_that_was_removed" in broken["errors"][0]["message"]
     # The hint names what the instrument does have, which is the next thing anyone asks.
     assert "test_method" in broken["errors"][0]["hint"]
+
+
+def test_the_verdict_travels_with_the_body_cloud_mirrors(monkeypatch, api_workflows_dir):
+    """Cloud has no HTTP path to a device, so its Library can only flag a broken workflow if the
+    verdict rides along on the retained `sequences/{name}` message it already mirrors."""
+    from ivoryos_edge import server
+
+    monkeypatch.setattr(app.state, "instrument_schemas", _schema(), raising=False)
+    monkeypatch.setattr(app.state, "schema_fingerprint", "fp-publish", raising=False)
+
+    body = _body([_step("pump", "dispense", {"volume_millilitres": 1.0})], body_hash="pub1")
+    message = server.published_sequence("renamed", body)
+
+    assert message["compatibility"]["status"] == "broken"
+    assert message["script"] == body["script"], "the body itself goes out unchanged"
+    assert "compatibility" not in body, "the saved body is not modified"

@@ -1,7 +1,8 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
-import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo } from 'lucide-react';
+import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo, HandHelping } from 'lucide-react';
+import { setPromptMinimized } from '@/inputPrompt';
 
 export default function GlobalQueueBar() {
   const [activeRun, setActiveRun] = useState<any>(null);
@@ -145,21 +146,33 @@ export default function GlobalQueueBar() {
 
         {/* Header */}
         <div 
-           className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.02] transition-colors"
+           className="px-4 py-3 flex items-center gap-2 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.02] transition-colors"
            onClick={() => setExpanded(!expanded)}
         >
-            <div className="flex items-center space-x-3 truncate">
-                <div className={`p-1.5 rounded-full ${activeRun.status === 'waiting_input' ? 'bg-pink-100 text-pink-600 dark:bg-pink-900/30 dark:text-pink-400 animate-pulse' : ['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 animate-pulse'}`}>
+            {/* min-w-0 + flex-1 so a long run name truncates instead of pushing the buttons on
+                the right into each other. */}
+            <div className="flex items-center space-x-3 min-w-0 flex-1">
+                <div className={`shrink-0 p-1.5 rounded-full ${activeRun.status === 'waiting_input' ? 'bg-pink-100 text-pink-600 dark:bg-pink-900/30 dark:text-pink-400 animate-pulse' : ['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 animate-pulse'}`}>
                    <Activity className="w-4 h-4" />
                 </div>
-                <div className="flex flex-col truncate">
+                <div className="flex flex-col min-w-0">
                     <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeRun.name}</span>
-                    <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">
-                       {activeRun.status === 'cancelling' ? 'Cancelling...' : activeRun.status === 'pausing' ? 'Pausing...' : activeRun.status === 'waiting_input' ? 'Waiting for input' : activeRun.status} • {startedSteps}/{totalSteps} Tasks
+                    <span className="text-[11px] text-gray-500 font-medium truncate">
+                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : activeRun.status} · {startedSteps}/{totalSteps} steps
                     </span>
                 </div>
             </div>
-            {expanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronUp className="w-4 h-4 text-gray-400" />}
+            {/* Where a minimized "Input needed" prompt comes back from (see inputPrompt.ts). */}
+            {activeRun.status === 'waiting_input' && (
+                <button
+                    onClick={(e) => { e.stopPropagation(); setPromptMinimized(null); }}
+                    title="Open the input prompt"
+                    className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-pink-600 hover:bg-pink-700 text-white"
+                >
+                    <HandHelping className="w-3.5 h-3.5" /> answer
+                </button>
+            )}
+            {expanded ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronUp className="w-4 h-4 text-gray-400 shrink-0" />}
         </div>
 
         {/* Expanded View */}

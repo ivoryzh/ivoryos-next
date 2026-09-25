@@ -1,12 +1,22 @@
 "use client";
 
 import { useState, useEffect, useCallback } from 'react';
-import { Play, AlertTriangle, RefreshCw, Download, Save, FilePlus2 } from 'lucide-react';
+import { Play, RefreshCw, Download, Save, FilePlus2 } from 'lucide-react';
 import { useNodesState, useEdgesState, addEdge, Connection, Edge, Node } from '@xyflow/react';
 import CloudWorkflowEditor from '@/components/CloudWorkflowEditor';
-import { LIBRARY_INSTRUMENT, scanDynamicParams } from '@ivoryos/shared-ui';
+import {
+  LIBRARY_INSTRUMENT,
+  scanDynamicParams,
+  scanReturnVars,
+  emptyOptimizeConfig,
+  type OptimizeConfig,
+  type SpreadsheetRow,
+  WorkflowPeek,
+} from '@ivoryos/shared-ui';
 import { validateGraph, isDynamicValue, effectiveParamValue, blankParamsOf } from '@/lib/dag';
+import { runConfigOf, runModeOf, type NodeCadence, type RunMode } from '@/lib/runPayload';
 import RunConfigPanel, { ConfigurableNode } from '@/components/RunConfigPanel';
+import ScheduleDialog from '@/components/ScheduleDialog';
 
 // A param written "#name" is a placeholder filled in at run time — the same convention the edge
 // Designer uses (scanDynamicParams). Parallel branches on this canvas are usually one protocol
@@ -38,8 +48,6 @@ function dynamicVarsOf(node: any): string[] {
 /** Values supplied for this node's #names. Lives on the node, so Save/Export/Load carry it. */
 const configOf = (node: any): Record<string, string> => (node?.data?.config || {});
 
-const isBlankValue = (v: unknown) => !String(v ?? '').trim();
-
 const hasBareHash = (nodes: any[]) => nodes.some((n) => {
   const block = n?.data?.block || {};
   return Object.keys(block.schema?.parameters || {})
@@ -57,6 +65,8 @@ export default function CloudDesignerPage() {
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [taskStatuses, setTaskStatuses] = useState<any[]>([]);
+  // Blank means "number it after the canvas's name" (the run route does that).
+  const [experimentName, setExperimentName] = useState('');
 
   useEffect(() => {
     const saved = localStorage.getItem('cloud_workflow');
@@ -101,6 +111,13 @@ export default function CloudDesignerPage() {
   // nodes (`data.config`), so they are saved, exported and reloaded with the workflow rather than
   // retyped every session.
   const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const [showScheduleDialog, setShowScheduleDialog] = useState(false);
+  // Return variables each saved sequence produces, per device — the candidate objectives for a
+  // node configured to optimize. Read from the body Cloud already mirrors, so no extra round trip.
+  const [sequenceReturns, setSequenceReturns] = useState<Record<string, Record<string, string[]>>>({});
+  // Each device's published workflow bodies (their latest version), for the step preview.
+  const [sequenceBodies, setSequenceBodies] = useState<Record<string, any>>({});
+  const [peekNodeId, setPeekNodeId] = useState<string | null>(null);
   // Nodes the last run attempt rejected, so the canvas can point at them instead of leaving a
   // list of ids in an alert for someone to match up by eye.
   const [invalidNodeIds, setInvalidNodeIds] = useState<string[]>([]);
@@ -157,17 +174,26 @@ export default function CloudDesignerPage() {
       // implementation, so this and the Designer can't drift apart about what counts as a
       // placeholder (AGENTS.md section 3).
       const sequencesByDevice: Record<string, any> = {};
+      // A saved sequence's outputs are the objectives a node running it can optimise against.
+      // Collected here because this is the one place the bodies are already in hand.
+      const returnsByDevice: Record<string, Record<string, string[]>> = {};
       for (const s of (Array.isArray(sequences) ? sequences : [])) {
         if (!sequencesByDevice[s.device_id]) sequencesByDevice[s.device_id] = {};
+        if (!returnsByDevice[s.device_id]) returnsByDevice[s.device_id] = {};
+        returnsByDevice[s.device_id][s.name] = scanReturnVars(s.body);
         sequencesByDevice[s.device_id][s.name] = {
           description: s.description || '',
           parameters: scanDynamicParams(s.body),
           return_type: 'None',
+          // What running it saves, shown on the node so a graph reads as data flowing through it.
+          outputs: returnsByDevice[s.device_id][s.name],
           // Carried onto the node's `ref` when one is dragged out, so a distributed run pins the
           // body it was built against instead of resolving the bare name against whatever the
           // target device's library happens to hold when the task finally lands there.
           version: s.body?.version,
           body_hash: s.body?.body_hash,
+          // Typical duration from the device's own completed runs of it (edge runtime.py).
+          runtime: s.body?.runtime || null,
         };
       }
       for (const device of devices) {
@@ -178,6 +204,10 @@ export default function CloudDesignerPage() {
         }
       }
       setCloudDevices(devices);
+      setSequenceReturns(returnsByDevice);
+      setSequenceBodies(Object.fromEntries(
+        (Array.isArray(sequences) ? sequences : []).map((s: any) => [`${s.device_id}/${s.name}`, s.body]),
+      ));
 
       const aggregated: any = { instruments: {} };
       for (const device of devices) {
@@ -282,7 +312,7 @@ export default function CloudDesignerPage() {
 
   const exportJSON = () => {
     const payload = {
-      name: currentWorkflowName || 'Distributed Run',
+      name: currentWorkflowName || 'Experiment',
       description: currentWorkflowDescription,
       nodes,
       edges
@@ -324,29 +354,92 @@ export default function CloudDesignerPage() {
     alert(`Workflow '${currentWorkflowName}' saved to Cloud Library!`);
   };
 
-  /** Every node that still needs a value typed for at least one of its #names. */
-  const nodesNeedingConfig = (list: any[]) => list.filter((n) => {
-    const vars = dynamicVarsOf(n);
-    if (!vars.length) return false;
-    const cfg = configOf(n);
-    return vars.some(v => isBlankValue(cfg[v]));
-  });
+  /** Optimizer backends the node's target device reported in its published schema. */
+  const optimizerCatalogFor = (deviceId: string): Record<string, any> =>
+    cloudDevices.find(d => String(d.id) === String(deviceId))?.schema?.optimizers || {};
+
+  /**
+   * Output variables this node can be optimized against: the saved sequence's own return
+   * variables for a Library Workflows node, or the step's own for a plain instrument call.
+   */
+  const objectiveOptionsFor = (node: any): string[] => {
+    const block = (node.data as any)?.block || {};
+    const deviceId = String((node.data as any)?.targetDeviceId || '');
+    if (block.instrument === LIBRARY_INSTRUMENT) {
+      return sequenceReturns[deviceId]?.[String(block.method)] || [];
+    }
+    return String(block.returnVar || '').split(',').map((n: string) => n.trim()).filter(Boolean);
+  };
+
+  /** Declared type per #name, so the panel can warn about a non-numeric value before dispatch. */
+  const varTypesFor = (node: any): Record<string, string> => {
+    const block = (node.data as any)?.block || {};
+    const types: Record<string, string> = {};
+    for (const [key, declared] of Object.entries<any>(block.schema?.parameters || {})) {
+      const value = effectiveParamValue(block, key);
+      if (!isDynamicValue(value)) continue;
+      const name = String(value).trim().slice(1);
+      if (name && declared?.type) types[name] = String(declared.type);
+    }
+    return types;
+  };
 
   /** Panel rows: every node with #names, filled or not, so a configured one can be reviewed. */
+  // Every step, not only those with #values: a step with none can still be repeated, and the
+  // panel is also where the experiment is named.
   const configurableNodes = (): ConfigurableNode[] => nodes
-    .filter(n => dynamicVarsOf(n).length > 0)
+    .filter(n => !['Flow Control', 'Flow_Control'].includes(String((n.data as any)?.block?.instrument || '')))
     .map((n) => {
       const block = (n.data as any)?.block || {};
+      const runConfig = runConfigOf(n);
+      const deviceId = String((n.data as any)?.targetDeviceId || '');
       return {
         id: String(n.id),
         label: block.instrument === LIBRARY_INSTRUMENT
           ? String(block.method || n.id)
           : `${block.instrument} · ${String(block.method || '').replace(/_/g, ' ')}`,
-        deviceId: String((n.data as any)?.targetDeviceId || ''),
+        deviceId,
         vars: dynamicVarsOf(n),
+        varTypes: varTypesFor(n),
+        mode: runModeOf(n),
         values: configOf(n),
+        // At least one row always exists so the table has somewhere to type.
+        rows: runConfig.spreadsheet?.rows?.length ? runConfig.spreadsheet.rows : [{}],
+        batchSize: runConfig.spreadsheet?.batchSize ?? '',
+        isWorkflow: block.instrument === LIBRARY_INSTRUMENT,
+        optimization: runConfig.optimization || { ...emptyOptimizeConfig(), objectives_order: [] },
+        optimizerCatalog: optimizerCatalogFor(deviceId),
+        objectiveOptions: objectiveOptionsFor(n),
+        runtime: block.instrument === LIBRARY_INSTRUMENT
+          ? cloudDevices.find(d => String(d.id) === deviceId)?.schema?.instruments?.[LIBRARY_INSTRUMENT]?.[String(block.method)]?.runtime || null
+          : null,
+        schedule: runConfig.schedule || {},
       };
     });
+
+  /** Patch one node's `data.runConfig`. Lives on the node, so Save/Export/Load carry it. */
+  const patchRunConfig = (nodeId: string, patch: Record<string, any>) => {
+    setNodes(nds => nds.map(n => (String(n.id) !== nodeId ? n : {
+      ...n,
+      data: { ...n.data, runConfig: { ...runConfigOf(n), ...patch } },
+    })));
+  };
+
+  const setNodeMode = (nodeId: string, mode: RunMode) => patchRunConfig(nodeId, { mode });
+
+  // Merged, not replaced: rows and batch size both live under `spreadsheet`.
+  const spreadsheetOf = (nodeId: string) =>
+    runConfigOf(nodes.find(n => String(n.id) === nodeId)).spreadsheet || {};
+  const setNodeRows = (nodeId: string, rows: SpreadsheetRow[]) =>
+    patchRunConfig(nodeId, { spreadsheet: { ...spreadsheetOf(nodeId), rows } });
+  const setNodeBatchSize = (nodeId: string, batchSize: string) =>
+    patchRunConfig(nodeId, { spreadsheet: { ...spreadsheetOf(nodeId), batchSize } });
+
+  const setNodeOptimization = (nodeId: string, optimization: OptimizeConfig & { objectives_order?: string[] }) =>
+    patchRunConfig(nodeId, { optimization });
+
+  const setNodeSchedule = (nodeId: string, schedule: NodeCadence) =>
+    patchRunConfig(nodeId, { schedule });
 
   const setNodeConfigValue = (nodeId: string, varName: string, value: string) => {
     setNodes(nds => nds.map(n => (String(n.id) !== nodeId ? n : {
@@ -394,9 +487,13 @@ export default function CloudDesignerPage() {
       return;
     }
 
-    // Unfilled placeholders open the panel rather than refusing: unlike an empty box, there is
-    // somewhere obvious to type the value, so asking beats reporting.
-    if (nodesNeedingConfig(nodes).length > 0) {
+    // Any node with #names opens the panel, filled in or not. The panel is where a step is set
+    // to run once, per spreadsheet row, or as an optimization, and where a run is scheduled, so
+    // it is the last stop before dispatch rather than something only a missing value reaches.
+    // (There used to be a separate Configure button for the filled-in case; two buttons that
+    // both opened this panel read as two ways of doing the same thing.) The panel's own Run
+    // button refuses while a node is still incomplete.
+    if (configurableNodes().length > 0) {
       setShowConfigPanel(true);
       return;
     }
@@ -408,44 +505,26 @@ export default function CloudDesignerPage() {
     setShowConfigPanel(false);
     setIsExecuting(true);
     try {
-      // Substituted into the dispatched copy only — the canvas keeps its #placeholders, which is
-      // what makes the same graph re-runnable over a different set of inputs.
-      const resolvedNodes = nodes.map(n => {
-        const block = (n.data as any)?.block;
-        if (!block) return n;
-        const cfg = configOf(n);
-        // Seeded from the node's own params so a value that only ever existed as a schema default
-        // is written out explicitly once it resolves — the dispatched copy has to be complete on
-        // its own, since the edge never sees this node's schema.
-        const params: Record<string, any> = { ...(block.params || {}) };
-        let changed = false;
-        for (const key of Object.keys(block.schema?.parameters || {})) {
-          const value = effectiveParamValue(block, key);
-          if (!isDynamicValue(value)) continue;
-          const varName = String(value).trim().slice(1);
-          if (cfg[varName] === undefined) continue;
-          params[key] = cfg[varName];
-          changed = true;
-        }
-        return changed ? { ...n, data: { ...n.data, block: { ...block, params } } } : n;
-      });
-
-      const payload = {
-        name: currentWorkflowName || 'Distributed Run',
-        nodes: resolvedNodes,
-        edges
-      };
-
+      // The canvas keeps its `#placeholders` and sends them as authored — substituting them into
+      // the dispatched copy is the run route's job now (see src/lib/planTasks.ts). It has to be:
+      // a spreadsheet node resolves one value per row and an optimization node one per trial, so
+      // "the resolved copy" is no longer a single thing this page could build. Keeping the graph
+      // unsubstituted is also what makes it re-runnable over a different set of inputs.
       const res = await fetch(`/api/cloud-workflows/runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          // Typed, or numbered after the canvas's name by the route ("Screen #3").
+          name: experimentName.trim() || undefined,
+          base: currentWorkflowName || 'Experiment',
+          nodes,
+          edges,
+        }),
       });
       const data = await res.json();
-      
+
       if (res.ok) {
          setActiveRunId(data.runId);
-         alert(`Distributed workflow started with ID: ${data.runId}`);
       } else {
          throw new Error(data.error || 'Failed to dispatch workflow');
       }
@@ -454,6 +533,20 @@ export default function CloudDesignerPage() {
     } finally {
       setIsExecuting(false);
     }
+  };
+
+  /** Turn the configured graph into a recurring trigger instead of running it now. */
+  const createSchedule = async (spec: { name: string; everyMinutes: number; maxRuns: number; startAt?: string }) => {
+    const res = await fetch('/api/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...spec, nodes, edges }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not create the schedule.');
+    setShowScheduleDialog(false);
+    setShowConfigPanel(false);
+    return data;
   };
 
   return (
@@ -471,62 +564,66 @@ export default function CloudDesignerPage() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          onNodeClick={(node) => {
+            if ((node.data as any)?.block?.instrument === LIBRARY_INSTRUMENT) setPeekNodeId(String(node.id));
+          }}
           header={
-            <header className="glass-header flex items-center justify-between px-6 z-10 shrink-0">
-              <div className="flex items-center space-x-4">
-                <div className="flex flex-col justify-center">
-                  <input
-                    type="text"
-                    value={currentWorkflowName}
-                    onChange={(e) => setCurrentWorkflowName(e.target.value)}
-                    placeholder="Workflow Name"
-                    className="input-ghost"
-                    style={{ minWidth: '300px' }}
-                  />
-                  <input
-                    type="text"
-                    value={currentWorkflowDescription}
-                    onChange={(e) => setCurrentWorkflowDescription(e.target.value)}
-                    placeholder="Add a short description..."
-                    className="input-ghost"
-                    style={{ minWidth: '300px', fontSize: '0.75rem', opacity: 0.7 }}
-                  />
-                </div>
+            <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10 relative">
+              {/* Same layout and button vocabulary as the edge Designer's header, so moving
+                  between the two does not mean relearning which button is which. */}
+              <div className="flex flex-col justify-center flex-1 mr-4 space-y-1 min-w-0">
+                <input
+                  type="text"
+                  value={currentWorkflowName}
+                  onChange={(e) => setCurrentWorkflowName(e.target.value)}
+                  placeholder="Workflow Name"
+                  className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
+                />
+                <input
+                  type="text"
+                  value={currentWorkflowDescription}
+                  onChange={(e) => setCurrentWorkflowDescription(e.target.value)}
+                  placeholder="Add a short description..."
+                  className="text-xs text-gray-400 dark:text-gray-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 w-full"
+                />
               </div>
-              <div className="flex items-center space-x-3">
-                <button 
-                  onClick={saveToLibrary}
-                  className="btn-primary flex items-center space-x-2 px-4 py-2 rounded font-medium"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>Save</span>
-                </button>
-
-                <button 
-                  onClick={exportJSON}
-                  className="btn-primary flex items-center space-x-2 px-4 py-2 rounded font-medium"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Export</span>
-                </button>
-
+              <div className="flex items-center space-x-2 shrink-0">
                 <button
                   onClick={startNewWorkflow}
                   title="Start a new, empty workflow"
-                  className="btn-primary flex items-center space-x-2 px-4 py-2 rounded font-medium"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
-                  <FilePlus2 className="w-4 h-4" />
-                  <span>New</span>
+                  <FilePlus2 className="w-4 h-4 text-gray-400" />
+                  <span className="hidden sm:inline">New</span>
                 </button>
-                
+
+                <button
+                  onClick={saveToLibrary}
+                  disabled={nodes.length === 0}
+                  title="Save this workflow to the Cloud library"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Save className="w-4 h-4" />
+                  <span className="hidden sm:inline">Save</span>
+                </button>
+
+                <button
+                  onClick={exportJSON}
+                  title="Download this workflow as JSON"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+                >
+                  <Download className="w-4 h-4 text-gray-400" />
+                  <span className="hidden sm:inline">Export</span>
+                </button>
 
                 <button
                   onClick={runDistributedWorkflow}
                   disabled={nodes.length === 0}
-                  className="btn-primary flex items-center space-x-2 px-6 py-2 rounded font-bold"
+                  title="Dispatch each step to its device"
+                  className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {activeRunId ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                  <span>{activeRunId ? 'Running...' : 'Run Distributed'}</span>
+                  <span>{activeRunId ? 'Running…' : 'Run'}</span>
                 </button>
               </div>
             </header>
@@ -538,8 +635,68 @@ export default function CloudDesignerPage() {
           nodes={configurableNodes()}
           onChange={setNodeConfigValue}
           onCopy={copyNodeConfig}
+          onModeChange={setNodeMode}
+          onRowsChange={setNodeRows}
+          onOptimizationChange={setNodeOptimization}
+          onScheduleChange={setNodeSchedule}
+          onBatchSizeChange={setNodeBatchSize}
+          experimentName={experimentName}
+          experimentNamePlaceholder={`${currentWorkflowName || 'Experiment'} #…`}
+          onExperimentNameChange={setExperimentName}
           onCancel={() => setShowConfigPanel(false)}
           onRun={dispatchRun}
+          onSchedule={() => setShowScheduleDialog(true)}
+        />
+      )}
+      {(() => {
+        // The steps a workflow node will run, from the body its device published. Cloud has only
+        // the latest version's body, so a node still pinned to an older one says so and offers the
+        // update rather than showing steps it will not run.
+        const node = nodes.find(n => String(n.id) === peekNodeId);
+        if (!node) return null;
+        const block = (node.data as any).block || {};
+        const deviceId = String((node.data as any).targetDeviceId || '');
+        const body = sequenceBodies[`${deviceId}/${block.method}`] || null;
+        const head = body?.version;
+        const ref = block.ref || {};
+        const tracksLatest = ref.mode === 'latest' || !ref.version || ref.version === head;
+        const values = configOf(node);
+        const params = Object.fromEntries(Object.entries(block.params || {}).map(([k, v]: [string, any]) => {
+          const name = typeof v === 'string' && v.trim().startsWith('#') ? v.trim().slice(1) : null;
+          return [k, name && values[name] ? values[name] : v];
+        }));
+        return (
+          <WorkflowPeek
+            target={{ name: String(block.method), version: ref.version, mode: ref.mode === 'latest' ? 'latest' : 'pinned', params }}
+            body={tracksLatest ? body : null}
+            error={!body
+              ? `${deviceId || 'Its device'} has not published this workflow's steps.`
+              : !tracksLatest
+                ? `This step is pinned to v${ref.version}. Cloud only has the latest version (v${head}), so it cannot show v${ref.version}'s steps. Update to run and see v${head}.`
+                : null}
+            latestVersion={head}
+            note={<>These are the steps of <strong className="font-semibold">{String(block.method)}</strong> as {deviceId || 'its device'} last published it. Edit it on the device; {ref.mode === 'latest' ? 'this step runs the latest saved version.' : `this step runs v${ref.version} until you update it.`}</>}
+            onClose={() => setPeekNodeId(null)}
+            onUpdate={() => {
+              setNodes(nds => nds.map(n => (String(n.id) !== peekNodeId ? n : {
+                ...n,
+                data: {
+                  ...n.data,
+                  block: {
+                    ...(n.data as any).block,
+                    ref: { ...ref, name: block.method, version: head, body_hash: body?.body_hash, mode: 'latest' },
+                  },
+                },
+              })));
+            }}
+          />
+        );
+      })()}
+      {showScheduleDialog && (
+        <ScheduleDialog
+          defaultName={experimentName.trim() || currentWorkflowName || 'Experiment'}
+          onCancel={() => setShowScheduleDialog(false)}
+          onCreate={createSchedule}
         />
       )}
     </div>

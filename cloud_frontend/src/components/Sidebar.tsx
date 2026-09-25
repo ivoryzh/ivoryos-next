@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { Sun, Moon, Cloud, Menu, Settings2, Book, LayoutTemplate, Server, ChevronDown, ChevronRight } from 'lucide-react';
+import { Sun, Moon, Cloud, Menu, Settings2, Book, LayoutTemplate, Server, ChevronDown, ChevronRight, CalendarClock, Table2, MonitorCheck } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -97,11 +97,11 @@ export default function Sidebar() {
           <Menu className="w-5 h-5 shrink-0" />
         </button>
         {isExpanded && (
-          <div className="flex items-center space-x-3 ml-2 text-primary">
-            <div className="flex items-center justify-center bg-blue-500 rounded p-1" style={{ color: '#fff' }}>
-              <Cloud className="w-5 h-5" />
-            </div>
-            <h1 className="text-xl font-bold tracking-wider" style={{ color: 'var(--text-primary)' }}>Cloud Hub</h1>
+          <div className="flex items-center space-x-3 ml-2 min-w-0">
+            {/* The same mark as the edge app, so the two read as one product. */}
+            <img src="/favicon.ico" alt="IvoryOS" className="w-8 h-8 shrink-0" />
+            <h1 className="text-xl font-bold tracking-wider" style={{ color: 'var(--text-primary)' }}>IvoryOS</h1>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-600 border border-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:border-indigo-500/30">Cloud</span>
           </div>
         )}
       </div>
@@ -109,6 +109,9 @@ export default function Sidebar() {
       <nav className="flex-1 space-y-2 w-full overflow-y-auto">
         {navItem('/library', 'Library', <Book className="w-5 h-5 shrink-0" />)}
         {navItem('/', 'Orchestrator', <Cloud className="w-5 h-5 shrink-0" />)}
+        {navItem('/schedules', 'Schedules', <CalendarClock className="w-5 h-5 shrink-0" />)}
+        {navItem('/results', 'Results', <Table2 className="w-5 h-5 shrink-0" />)}
+        {navItem('/devices', 'Devices', <MonitorCheck className="w-5 h-5 shrink-0" />)}
 
         {/* Edge Sequence Dropdown */}
         <div className="flex flex-col">

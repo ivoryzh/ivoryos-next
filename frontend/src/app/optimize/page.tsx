@@ -1,10 +1,21 @@
 "use client";
+import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Settings2, Info, Zap, Sun, ChevronDown, Plus, X } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
-import { buildRunName, getReturnLeaves, readNamedOutput } from '@ivoryos/shared-ui';
+import {
+  buildRunName,
+  getReturnLeaves,
+  readNamedOutput,
+  buildOptimizationParameters,
+  resolveFixedBlock,
+  getVarMode as sharedGetVarMode,
+  getVarModeType as sharedGetVarModeType,
+  isPerIteration as sharedIsPerIteration,
+  getIterationValue as sharedGetIterationValue,
+} from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
   baybe: 'BayBE',
@@ -243,164 +254,31 @@ export default function OptimizePage() {
     if (isStarting) return; // guard against double-click while the request/optimizer init is in flight
     setIsStarting(true);
 
-    // Every backend (Ax, BayBE, NIMO) requires a value_type per parameter — infer it rather
-    // than force the user to pick, since getting this wrong for a 'choice' list (e.g. treating
-    // "20, 25, 30" as ints when the user meant continuous floats) is easy to do by accident.
-    const inferValueType = (bounds: any[]): 'int' | 'float' | 'str' => {
-        if (bounds.every((b: any) => typeof b === 'number')) {
-            return bounds.every((b: number) => Number.isInteger(b)) ? 'int' : 'float';
-        }
-        return 'str';
-    };
-
-    // A variable can be pulled out of the search space three ways: left to the optimizer
-    // (default), given one fixed value used on every iteration, or — independent of that
-    // Optimize/Fixed choice, via the separate "Per-Iteration" checkbox — given its own value per
-    // iteration (spreadsheet-style, in the shared table) — e.g. a "vial index" that's dynamic but
-    // stepped through manually rather than searched over. Per-Iteration wins if checked, since it
-    // pulls the variable out of the Optimize/Fixed toggle entirely.
-    const perIterationVars = variables.filter(v => isPerIteration(v));
-    const remainingVars = variables.filter(v => !isPerIteration(v));
-    const optimizedVars = remainingVars.filter(v => getVarMode(v) === 'optimize');
-    const fixedVars = remainingVars.filter(v => getVarMode(v) === 'fixed');
-
-    const missingFixed = fixedVars.filter(v => !optConfig.bounds[v]?.fixedValue);
-    if (missingFixed.length > 0) {
-        alert(`Please provide a fixed value for: ${missingFixed.join(', ')}`);
-        setIsStarting(false);
-        return;
-    }
-
-    const budgetCount = Math.max(1, optConfig.budget || 1);
-    const incompletePerIteration = perIterationVars.filter(v =>
-        Array.from({ length: budgetCount }).some((_, i) => !getIterationValue(v, i))
-    );
-    if (incompletePerIteration.length > 0) {
-        alert(`Please fill in a value for every iteration (1-${budgetCount}) for: ${incompletePerIteration.join(', ')}`);
-        setIsStarting(false);
-        return;
-    }
-
-    const paramSpace = optimizedVars.map((v: any) => {
-        const b = optConfig.bounds[v] || {};
-        if (b.type === 'choice') {
-            const bounds = (b.min || "").split(",").map((s: string) => {
-                const n = parseFloat(s.trim());
-                return isNaN(n) ? s.trim() : n;
-            });
-            return { name: v, type: 'choice', bounds, value_type: inferValueType(bounds) };
-        }
-        // Range bounds are always numeric here; default to 'float' rather than inferring from
-        // whole-number min/max (e.g. 20-80 for a temperature range), which would otherwise
-        // silently restrict a continuous parameter to integer-only values.
-        return { name: v, type: 'range', bounds: [parseFloat(b.min || "0"), parseFloat(b.max || "1")], value_type: 'float' };
-    });
-
-    const objConfig = returns.map((v: any) => ({
-        name: v, minimize: optConfig.objectives[v]?.goal === 'minimize'
-    }));
-
-    // Each objective can carry its own optional early-stop target; when 2+ are enabled,
-    // earlyStopMode decides whether ANY one of them or ALL of them must be met to stop early.
-    const earlyStopEnabledVars = returns.filter((v: string) => optConfig.objectives[v]?.earlyStop);
-    const invalidEarlyStop = earlyStopEnabledVars.filter((v: string) => isNaN(parseFloat(optConfig.objectives[v]?.threshold)));
-    if (invalidEarlyStop.length > 0) {
-        alert(`Early stop is enabled for ${invalidEarlyStop.join(', ')} but missing a target value.`);
-        setIsStarting(false);
-        return;
-    }
-    let earlyStop: { mode: 'any' | 'all'; criteria: { metric: string; threshold: number }[] } | undefined;
-    if (earlyStopEnabledVars.length > 0) {
-        earlyStop = {
-            mode: optConfig.earlyStopMode === 'all' ? 'all' : 'any',
-            criteria: earlyStopEnabledVars.map((v: string) => ({ metric: v, threshold: parseFloat(optConfig.objectives[v]?.threshold) }))
-        };
-    }
-
-    // Fixed (non-optimized) #vars get resolved to their literal value client-side, exactly like
-    // Prep/Cleanup global values. Per-iteration vars can't be resolved client-side the same way —
-    // the sequence_template is one shared template the backend loop reuses every iteration, so a
-    // value that has to differ per iteration has to be resolved backend-side (see iteration_values
-    // in the payload below); only #vars still in the search space or per-iteration are left as
-    // '#name' placeholders in the template for the backend to substitute.
-    const fixedValues: Record<string, string> = {};
-    fixedVars.forEach(v => { fixedValues[v] = optConfig.bounds[v]?.fixedValue ?? ''; });
-
-    const iterationValues: Record<string, string[]> = {};
-    perIterationVars.forEach(v => {
-        iterationValues[v] = Array.from({ length: budgetCount }, (_, i) => getIterationValue(v, i));
-    });
-
-    const resolveFixedVarsInBlock = (block: any) => {
-        const args = JSON.parse(JSON.stringify(block.params || {}));
-        const resolveArgs = (obj: any, schemaObj: any) => {
-            Object.keys(obj).forEach(key => {
-                const val = obj[key];
-                let pData: any = null;
-                if (schemaObj?.parameters?.[key]) pData = schemaObj.parameters[key];
-                else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
-
-                if (typeof val === 'string' && val.startsWith('#')) {
-                    const varName = val.substring(1);
-                    if (!(varName in fixedValues)) return; // still optimized — leave for the backend
-                    let subVal: any = fixedValues[varName];
-                    const typeHint = pData?.type || '';
-                    if (typeHint.includes('int') || typeHint.includes('float')) {
-                        if (subVal !== '' && !isNaN(Number(subVal))) subVal = Number(subVal);
-                    }
-                    obj[key] = subVal;
-                } else if (typeof val === 'object' && val !== null) {
-                    resolveArgs(val, pData);
-                }
-            });
-        };
-        resolveArgs(args, block.schema);
-        // returnBindings points each objective name at one specific field of the step's return
-        // value; returnVar stays alongside it as the flat legacy list the backend falls back to.
-        return { instrument: block.instrument, method: block.method, params: args, returnVar: block.returnVar, returnBindings: block.returnBindings };
-    };
-
-    const resolveGlobalBlock = (block: any) => {
-        const args = JSON.parse(JSON.stringify(block.params || {}));
-        const resolveArgs = (obj: any, schemaObj: any) => {
-            Object.keys(obj).forEach(key => {
-                const val = obj[key];
-                let pData = null;
-                if (schemaObj?.parameters?.[key]) pData = schemaObj.parameters[key];
-                else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
-                
-                if (typeof val === 'string' && val.startsWith('#')) {
-                    const varName = val.substring(1);
-                    let subVal: any = globalValues[varName];
-                    if (subVal === undefined || subVal === null || subVal === '') {
-                        throw new Error(`Missing global value for variable '${varName}'`);
-                    }
-                    
-                    const typeHint = pData?.type || '';
-                    if (typeHint.includes('int') || typeHint.includes('float')) {
-                        if (!isNaN(Number(subVal)) && subVal !== '') subVal = Number(subVal);
-                    }
-                    obj[key] = subVal;
-                } else if (typeof val === 'object' && val !== null) {
-                    resolveArgs(val, pData);
-                }
-            });
-        };
-        resolveArgs(args, block.schema);
-        return {
-            instrument: block.instrument,
-            method: block.method,
-            params: args,
-            returnVar: block.returnVar,
-            returnBindings: block.returnBindings
-        };
-    };
-
+    // Everything from here to the payload — the Optimize/Fixed/Per-Iteration partition, the
+    // search-space and objective mapping, early-stop, and resolving Fixed vars to literals —
+    // lives in @ivoryos/shared-ui. The Cloud orchestrator builds the same `parameters` for a node
+    // it dispatches, and a Cloud-launched optimization has to *be* this run rather than a second
+    // implementation of it: a drifted copy would mean an optimizer silently searching a different
+    // space depending on which screen started it.
+    let parameters: Record<string, any>;
     let resolvedPrep: any[] = [];
     let resolvedCleanup: any[] = [];
     try {
-        resolvedPrep = prepSequence.map(resolveGlobalBlock);
-        resolvedCleanup = cleanupSequence.map(resolveGlobalBlock);
+        parameters = buildOptimizationParameters({
+            config: optConfig,
+            variables,
+            returns,
+            sequence,
+            existingData,
+        });
+        // Lets the edge time runs of a saved workflow (runtime.py).
+        const savedName = unmodifiedSavedWorkflowName();
+        if (savedName) parameters.workflow_name = savedName;
+        // Prep/Cleanup run once for the whole campaign, so their #vars come from the Fixed Values
+        // panel. Lenient numeric casting here preserves this page's long-standing behaviour —
+        // the backend's own cast_arguments has the last word on a value it can't convert.
+        resolvedPrep = prepSequence.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient' }));
+        resolvedCleanup = cleanupSequence.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient' }));
     } catch (err: any) {
         alert(err.message);
         setIsStarting(false);
@@ -409,30 +287,12 @@ export default function OptimizePage() {
 
     const payload = {
         name: await buildRunName(`${localStorage.getItem('ivoryos_editing_workflow') || 'Optimization'} Run`, experimentName, API_BASE),
-        parameters: { 
-            type: "Optimization",
-            optimizer: optConfig.optimizer,
-            budget: optConfig.budget,
-            batch_size: Math.max(1, optConfig.batch_size || 1),
-            error_recovery: optConfig.error_recovery,
-            optimizer_config: optConfig.optimizer_config,
-            parameter_space: paramSpace,
-            objective_config: objConfig,
-            ...(earlyStop ? { early_stop: earlyStop } : {}),
-            ...(perIterationVars.length > 0 ? { iteration_values: iterationValues } : {}),
-            ...(existingData.length > 0 ? { existing_data: existingData } : {}),
-            // Only Ax's client actually applies parameter_constraints today (BayBE/NIMO accept
-            // and store it but never use it) — see AGENTS.md's Optimizer wiring section.
-            ...(optConfig.optimizer === 'ax' && (optConfig.constraints || []).some((c: string) => c.trim())
-                ? { parameter_constraints: optConfig.constraints.filter((c: string) => c.trim()) }
-                : {}),
-            sequence_template: sequence.map(resolveFixedVarsInBlock)
-        },
+        parameters,
         prep: resolvedPrep,
         cleanup: resolvedCleanup,
         sequence: []
     };
-    
+
     try {
         const res = await fetch(`${API_BASE}/api/queue/runs`, {
             method: 'POST',
@@ -460,18 +320,13 @@ export default function OptimizePage() {
   // the shared spreadsheet-style table below, one column per per-iteration variable. `excluded`
   // is the pre-existing on-disk shape (older saved configs) — read as 'fixed' for backward
   // compatibility, but never written anymore.
-  const getVarMode = (v: string): 'optimize' | 'fixed' => {
-    const b = optConfig.bounds[v];
-    if (b?.mode === 'fixed' || b?.mode === 'optimize') return b.mode;
-    return b?.excluded ? 'fixed' : 'optimize';
-  };
+  // Delegated to @ivoryos/shared-ui so the rule this screen *reads* a variable by is literally the
+  // rule buildOptimizationParameters *writes* it by — including the legacy `excluded` spelling.
+  const getVarMode = (v: string): 'optimize' | 'fixed' => sharedGetVarMode(optConfig, v);
   // A single "Range / Choice / Fixed" dropdown, collapsing what used to be an Optimize/Fixed
   // toggle plus a separate Range/Choice select into one control — mode and bounds.type both
   // change from the same select, in one state update so they can't end up disagreeing mid-render.
-  const getVarModeType = (v: string): 'range' | 'choice' | 'fixed' => {
-    if (getVarMode(v) === 'fixed') return 'fixed';
-    return optConfig.bounds[v]?.type === 'choice' ? 'choice' : 'range';
-  };
+  const getVarModeType = (v: string): 'range' | 'choice' | 'fixed' => sharedGetVarModeType(optConfig, v);
   const setVarModeType = (v: string, value: 'range' | 'choice' | 'fixed') => {
     setOptConfig({
       ...optConfig,
@@ -494,11 +349,11 @@ export default function OptimizePage() {
   const removeConstraint = (i: number) => {
     setOptConfig({ ...optConfig, constraints: (optConfig.constraints || []).filter((_: string, idx: number) => idx !== i) });
   };
-  const isPerIteration = (v: string): boolean => !!optConfig.bounds[v]?.perIteration;
+  const isPerIteration = (v: string): boolean => sharedIsPerIteration(optConfig, v);
   const setPerIteration = (v: string, on: boolean) => {
     setOptConfig({ ...optConfig, bounds: { ...optConfig.bounds, [v]: { ...optConfig.bounds[v], perIteration: on } } });
   };
-  const getIterationValue = (v: string, i: number): string => (optConfig.bounds[v]?.iterationValues || [])[i] ?? '';
+  const getIterationValue = (v: string, i: number): string => sharedGetIterationValue(optConfig, v, i);
   const setIterationValue = (v: string, i: number, val: string) => {
     const current = [...(optConfig.bounds[v]?.iterationValues || [])];
     while (current.length <= i) current.push('');

@@ -486,6 +486,11 @@ def save_version(workflows_dir, name, body, note=None, author=None):
             body["note"] = note
         if author:
             body["author"] = author
+        # The deck this version was written against, beside note/author: metadata, not content,
+        # so `body_hash` ignores it and re-saving on a newer deck is not a new version.
+        from . import deck
+        if deck.current_version() is not None:
+            body["deck_version"] = deck.current_version()
 
         session.add(SavedWorkflowVersion(
             name=name,
@@ -782,8 +787,23 @@ def expand_workflow_blocks(
 
         caller_params = block.get("params") or block.get("args") or {}
 
+        # A link normally stands for the whole saved workflow, prep through cleanup. `phases`
+        # narrows that to a subset, which is what lets a caller run the setup once, the body once
+        # per sample, and the teardown once.
+        #
+        # Needed because a spreadsheet dispatched from Cloud sends one link per row: without this
+        # the workflow's *prep and cleanup ran once per row too* -- a two-row screen tared the
+        # balance twice and cooled the reactor down twice, which is wrong both as chemistry and
+        # as a record. The bench Configure page never had the problem, because there prep and
+        # cleanup are separate lists it submits once.
+        wanted_phases = block.get("phases") or block.get("_phases")
+        phase_keys = (
+            tuple(p for p in ("prep", "script", "cleanup") if p in wanted_phases)
+            if wanted_phases else ("prep", "script", "cleanup")
+        )
+
         inner = []
-        for phase_key in ("prep", "script", "cleanup"):
+        for phase_key in phase_keys:
             blocks = body.get(phase_key)
             if phase_key == "script" and not blocks:
                 blocks = body.get("sequence")
@@ -814,6 +834,13 @@ def expand_workflow_blocks(
             params.setdefault("_parent_workflow", name)
             params.setdefault("_parent_path", list(_stack) + [name])
             params.setdefault("_expansion_id", expansion_id)
+            # A spreadsheet row's identity has to survive expansion. Cloud dispatches one linked
+            # block per row, so without this the fifteen steps a workflow expands into carry no
+            # record of which sample they belong to, and Data History has nothing to group them
+            # by -- which is exactly how a two-row run came back showing one step per row.
+            for key in ("_row", "_block"):
+                if key in caller_params:
+                    params.setdefault(key, caller_params[key])
 
         expanded.extend(steps)
 

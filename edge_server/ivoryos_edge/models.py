@@ -116,6 +116,24 @@ class SavedWorkflowVersion(Base):
     author: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
 
+class DeckVersion(Base):
+    """One shape of the deck: every instrument's introspected schema, as it was at a startup.
+
+    The schema is rebuilt from the live drivers on every start and was never kept, so "what did
+    `pump.dispense` take when this workflow was written?" had no answer once a driver changed.
+    A new row is written only when the fingerprint differs from the latest one -- a restart
+    against the same drivers is the same deck, not a new version.
+    """
+    __tablename__ = "deck_versions"
+
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    instrument_meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    first_seen: Mapped[float] = mapped_column(Float, default=0.0)
+    last_seen: Mapped[float] = mapped_column(Float, default=0.0)
+
+
 class AgentProposal(Base):
     """Something an agent wants to do, waiting on a person to say yes.
 

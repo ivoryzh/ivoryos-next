@@ -394,3 +394,49 @@ async def test_optimizers_endpoint_lists_registered_schemas():
         data = resp.json()
         assert "mock" in data
         assert data["mock"]["optimizer_config"]["step_1"]["model"] == ["TestModel"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_optimization_reports_running_and_finished(monkeypatch):
+    """A Cloud-dispatched optimization has to tell Cloud it started and finished.
+
+    The optimization path returned before the plain path's reporting code, so it never did: Cloud
+    left the task 'queued' forever, and -- since Cloud holds a device's next task until the current
+    one is done -- every later Cloud task for that device waited behind it.
+    """
+    from ivoryos_edge import server
+
+    published = []
+
+    class Broker:
+        client_id = "test-device"
+
+        def publish(self, topic, payload, retain=False, qos=0):
+            published.append((topic, payload))
+
+    monkeypatch.setattr(server, "global_broker", Broker())
+    monkeypatch.setattr(server, "global_topic_prefix", "ivoryos/edge")
+
+    await server.handle_cloud_task({
+        "runId": "cloud_opt", "nodeId": "node_opt",
+        "run": {
+            "name": "Cloud optimization report",
+            "parameters": {
+                "type": "Optimization", "optimizer": "mock", "budget": 1,
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "y", "minimize": True}],
+                "sequence_template": [
+                    {"instrument": "dummy", "method": "test_method", "params": {"duration": 0}, "returnVar": "y"}
+                ],
+            },
+        },
+    })
+    statuses = []
+    for _ in range(80):
+        # Status changes only; progress updates also say "running".
+        statuses = [p["status"] for t, p in published if t.endswith("/task-status") and "progress" not in p]
+        if "completed" in statuses or "error" in statuses:
+            break
+        await asyncio.sleep(0.05)
+
+    assert statuses == ["running", "completed"], statuses

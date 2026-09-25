@@ -83,6 +83,11 @@ def check(name, body, schema, fingerprint, known_workflows=()):
             for issue in errors[:MAX_REPORTED]
         ],
     }
+    # Which deck this workflow was last saved against, so a broken one can say "written for deck
+    # v3" -- the version whose diff to the current deck explains the errors. Absent for workflows
+    # saved before decks were versioned.
+    if (body or {}).get("deck_version") is not None:
+        verdict["deck_version"] = body["deck_version"]
     _cache[name] = (key, fingerprint, verdict)
     return verdict
 

@@ -1,12 +1,25 @@
 "use client";
+import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Play, Plus, Trash2, Sun, Moon, Download, Upload, ArrowUp, ArrowDown, GripVertical, AlertTriangle, Layers, ListTree } from 'lucide-react';
-import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
+import { Play, Download, Upload, AlertTriangle, Layers, ListTree } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
-import { buildRunName, LIBRARY_INSTRUMENT, WorkflowMap, confirmDialog, notify, readNamedOutput } from '@ivoryos/shared-ui';
+import {
+  buildRunName,
+  LIBRARY_INSTRUMENT,
+  WorkflowMap,
+  confirmDialog,
+  notify,
+  readNamedOutput,
+  SpreadsheetTable,
+  buildSpreadsheetParameters,
+  expandSpreadsheet,
+  resolveFixedBlock,
+  toSubmittedStep,
+  toWireBlock,
+} from '@ivoryos/shared-ui';
 
 /**
  * Resolve any `Library Workflows` blocks into the steps they stand for, via the server's own
@@ -73,19 +86,6 @@ async function expandLinkedBlocks(seqs: { prep: any[]; sequence: any[]; cleanup:
   } catch {
     return null;
   }
-}
-
-/** Editor block -> the shape `/api/workflows/expand` and `/api/queue/runs` both accept. */
-function toWireBlock(b: any) {
-  return {
-    instrument: b.instrument,
-    method: b.method,
-    params: b.params,
-    returnVar: b.returnVar,
-    ...(b.returnBindings?.length ? { returnBindings: b.returnBindings } : {}),
-    batch_action: !!b.isBatchAction,
-    ...(b.ref ? { ref: b.ref } : {}),
-  };
 }
 
 export default function ExecutionPage() {
@@ -332,29 +332,10 @@ export default function ExecutionPage() {
     setRows(newRows);
   };
 
-  const moveRowUp = (idx: number) => {
-    if (idx === 0) return;
-    const newRows = [...rows];
-    const temp = newRows[idx];
-    newRows[idx] = newRows[idx - 1];
-    newRows[idx - 1] = temp;
-    setRows(newRows);
-  };
-
-  const moveRowDown = (idx: number) => {
-    if (idx === rows.length - 1) return;
-    const newRows = [...rows];
-    const temp = newRows[idx];
-    newRows[idx] = newRows[idx + 1];
-    newRows[idx + 1] = temp;
-    setRows(newRows);
-  };
-
-  const onDragEnd = (result: DropResult) => {
-    if (!result.destination) return;
+  const reorderRows = (from: number, to: number) => {
     const newRows = Array.from(rows);
-    const [reorderedItem] = newRows.splice(result.source.index, 1);
-    newRows.splice(result.destination.index, 0, reorderedItem);
+    const [moved] = newRows.splice(from, 1);
+    newRows.splice(to, 0, moved);
     setRows(newRows);
   };
 
@@ -452,144 +433,34 @@ export default function ExecutionPage() {
     setExecutionState({ isRunning: true, currentRow: -1, results: [] });
 
     try {
-      // Resolves every '#var' in a block's params via `getValue(varName)`, casting to a number
-      // when the schema says int/float and throwing a clear error (via `describeVar`) if the
-      // value is missing or not a valid number. Shared by per-sample rows, batch steps (which
-      // pull from the batch group's first row via `groupFirstRowValue` below), and Prep/Cleanup blocks
-      // (which pull from the Fixed Values panel) — all "resolve this #var from some source",
-      // just a different source and a different missing-value message per case.
-      const resolveArgs = (block: any, getValue: (varName: string) => any, describeVar: (varName: string) => string) => {
-          const args = JSON.parse(JSON.stringify(block.params || {}));
-          const walk = (obj: any, schemaObj: any) => {
-              Object.keys(obj).forEach(key => {
-                  const val = obj[key];
-                  let pData = null;
-                  if (schemaObj?.parameters?.[key]) pData = schemaObj.parameters[key];
-                  else if (schemaObj?.fields?.[key]) pData = schemaObj.fields[key];
-
-                  if (typeof val === 'string' && val.startsWith('#')) {
-                      const varName = val.substring(1).trim();
-                      if (varName === '') {
-                          throw new Error(`A parameter uses '#' with no variable name — fix it in the Designer before running.`);
-                      }
-                      if (liveInputVars.has(varName)) return; // resolved live on the edge server, leave as '#varName'
-                      let subVal: any = getValue(varName);
-                      if (subVal === undefined || subVal === null || subVal === '') {
-                          throw new Error(`Missing value for ${describeVar(varName)}`);
-                      }
-
-                      const typeHint = (pData?.type || '').toLowerCase();
-                      if (typeHint.includes('int') || typeHint.includes('float')) {
-                          if (isNaN(Number(subVal))) {
-                              throw new Error(`${describeVar(varName)} expects a number (${pData?.type}), got '${subVal}'`);
-                          }
-                          subVal = Number(subVal);
-                      }
-                      obj[key] = subVal;
-                  } else if (typeof val === 'object' && val !== null) {
-                      walk(val, pData);
-                  }
-              });
-          };
-          walk(args, block.schema);
-          return args;
-      };
-
-      const resolveGlobalBlock = (block: any) => ({
-          instrument: block.instrument,
-          method: block.method,
-          params: resolveArgs(block, v => globalValues[v], v => `global value '${v}'`),
-          returnVar: block.returnVar
-      });
-
-      // A batch step's value still comes from the spreadsheet — but strictly from the group's
-      // FIRST row, not "whichever row happens to have it." This has to be a hard rule, not a
-      // best-effort scan: the table visually mutes every other row in the group as "not used for
-      // this row," and that label has to be literally true, or filling in a later row instead of
-      // the first would silently work anyway and make the muted styling a lie.
-      const groupFirstRowValue = (groupRows: Record<string, any>[], varName: string) => groupRows[0]?.[varName];
-
-      const fullSequence: any[] = [];
-
-      if (variables.length > 0) {
-        // Row-based execution, chunked into batch groups of `batchSize` rows by plain row
-        // POSITION (not "whichever rows happen to have data") — this has to match the table's
-        // display exactly (group boundaries, the "1/batch" designated row), or the two silently
-        // drift apart the way they did before. Within each group, the sequence is walked once: a
-        // per-sample step expands into one call per active row IN THAT GROUP (blank rows in the
-        // group are just skipped, same leniency as before), a batch step fires exactly once for
-        // the whole group, reading its value from the group's literal first row. The group loop
-        // then repeats for the next group — e.g. 24 rows with batch size 4 runs the per-sample/
-        // batch walk 6 times, 4 rows each, not once for all 24.
-        const isRowActive = (row: Record<string, any>) => Object.values(row).some(v => v !== undefined && v !== null && v !== '');
-        if (!rows.some(isRowActive)) {
-            setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-            await notify("Fill in at least one row before running.", { title: 'Nothing to run', tone: 'error' });
-            return;
-        }
-        const groupSize = Math.max(1, parseInt(batchSize) || rows.length);
-        const groups: { rows: Record<string, any>[]; start: number }[] = [];
-        for (let g = 0; g < rows.length; g += groupSize) {
-            const slice = rows.slice(g, g + groupSize);
-            if (slice.some(isRowActive)) groups.push({ rows: slice, start: g }); // drop groups that are entirely blank (e.g. unused trailing rows)
-        }
-
-        try {
-          for (let gi = 0; gi < groups.length; gi++) {
-            const { rows: groupRows, start: groupStart } = groups[gi];
-            // Numbered by raw position (Math.floor(groupStart / groupSize) + 1), not by index among
-            // the non-blank groups, so this always matches the "Batch N" label shown in the table.
-            const groupDesc = groups.length > 1 ? `batch ${Math.floor(groupStart / groupSize) + 1} (rows ${groupStart + 1}-${groupStart + groupRows.length})` : 'the batch';
-            for (let i = 0; i < sequence.length; i++) {
-              const block = sequence[i];
-              if (block.isBatchAction) {
-                fullSequence.push({
-                  instrument: block.instrument,
-                  method: block.method,
-                  params: resolveArgs(block, v => groupFirstRowValue(groupRows, v), v => `'${v}' for ${groupDesc} — fill it in on the first row of that group (row ${groupStart + 1})`),
-                  originalRow: groupStart,
-                  originalBlockIndex: i
-                });
-                continue;
-              }
-              for (let r = 0; r < groupRows.length; r++) {
-                const rowData = groupRows[r];
-                if (!isRowActive(rowData)) continue; // unused row within the group — nothing to run for it
-                const rowIndex = groupStart + r;
-                fullSequence.push({
-                  instrument: block.instrument,
-                  method: block.method,
-                  params: resolveArgs(block, v => rowData[v], v => `'${v}' in row ${rowIndex + 1}`),
-                  originalRow: rowIndex,
-                  originalBlockIndex: i
-                });
-              }
-            }
-          }
-        } catch (err: any) {
-            await notify(err.message, { title: 'Missing a value', tone: 'error' });
-            setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-            return;
-        }
-      } else {
-        // No spreadsheet variables — run sequence once as-is
-        for (let i = 0; i < sequence.length; i++) {
-          const block = sequence[i];
-          fullSequence.push({
-            instrument: block.instrument,
-            method: block.method,
-            params: JSON.parse(JSON.stringify(block.params || {})),
-            originalRow: 0,
-            originalBlockIndex: i
-          });
-        }
+      // The per-sample/batch walk, the `#var` resolution and the numeric checks all live in
+      // @ivoryos/shared-ui now — the Cloud orchestrator dispatches spreadsheet runs through the
+      // very same functions, so a distributed run and a bench run expand identically. The table
+      // above draws its group boundaries from the same `groupSizeFor`, which is what keeps the
+      // "not used for this row" hint from ever becoming a lie.
+      let fullSequence: any[] = [];
+      try {
+        fullSequence = expandSpreadsheet({
+          sequence,
+          rows,
+          variables,
+          batchSize,
+          liveInputVars,
+        });
+      } catch (err: any) {
+        setExecutionState({ isRunning: false, currentRow: -1, results: [] });
+        await notify(err.message, {
+          title: err.message.startsWith('Fill in') ? 'Nothing to run' : 'Missing a value',
+          tone: 'error',
+        });
+        return;
       }
 
       let resolvedPrep: any[] = [];
       let resolvedCleanup: any[] = [];
       try {
-          resolvedPrep = prepSequence.map(resolveGlobalBlock);
-          resolvedCleanup = cleanupSequence.map(resolveGlobalBlock);
+          resolvedPrep = prepSequence.map(b => resolveFixedBlock(b, globalValues));
+          resolvedCleanup = cleanupSequence.map(b => resolveFixedBlock(b, globalValues));
       } catch (err: any) {
           await notify(err.message, { title: 'Missing a value', tone: 'error' });
           setExecutionState({ isRunning: false, currentRow: -1, results: [] });
@@ -600,27 +471,15 @@ export default function ExecutionPage() {
       const payload = {
         name: await buildRunName(`${localStorage.getItem('ivoryos_editing_workflow') || 'Spreadsheet'} Run`, experimentName, API_BASE),
         parameters: {
-          type: variables.length > 0 ? 'Spreadsheet' : 'Simple',
-          variables,
-          rows: variables.length > 0 ? rows.filter(row => Object.values(row).some(v => v !== undefined && v !== null && v !== '')) : [],
-          // Records which step (by position within one row's block sequence) is tagged with a
-          // returnVar, so Data History can later match a row's output back to a named column —
-          // the persisted run otherwise has no way to tell which step produced "the" result.
-          sequence_template: sequence.map(b => ({
-            instrument: b.instrument,
-            method: b.method,
-            returnVar: b.returnVar || null,
-            // Which field of a structured result each of those names points at, so Data History
-            // can export the field itself instead of the whole result object.
-            returnBindings: b.returnBindings || null
-          }))
+          ...buildSpreadsheetParameters({ variables, rows, sequence, batchSize }),
+          // Lets the edge time runs of a saved workflow (runtime.py).
+          ...(unmodifiedSavedWorkflowName() ? { workflow_name: unmodifiedSavedWorkflowName() } : {}),
         },
         prep: resolvedPrep,
-        sequence: fullSequence.map(s => ({
-          instrument: s.instrument,
-          method: s.method,
-          params: s.params
-        })),
+        // `toSubmittedStep` stamps each step with the row it came from. Data History used to
+        // recover that by slicing the flat list into equal chunks, which assumes a row-major
+        // flattening this walk does not produce — see toSubmittedStep for the full story.
+        sequence: fullSequence.map(toSubmittedStep),
         cleanup: resolvedCleanup
       };
 
@@ -656,17 +515,11 @@ export default function ExecutionPage() {
     return isNaN(Number(val));
   };
 
-  // Maps each row to its position among "active" (non-blank) rows, or -1 if the row is blank —
-  // mirrors executeSpreadsheet()'s activeRows filter so the group divider/muted-cell hints line
-  // up with the groups that will actually run, even if a blank row sits in the middle.
+  // Whether the table shows any batch affordances at all. The grouping itself (boundaries, the
+  // designated first row, the "Batch N" label) is computed inside SpreadsheetTable from the same
+  // `groupSizeFor` that `expandSpreadsheet` uses — that shared call is what keeps the display and
+  // the real behaviour from drifting apart, which they have done before.
   const hasBatchStep = sequence.some(b => b.isBatchAction);
-  // Grouping is by plain row position, not by "which rows happen to have data yet" — a fresh,
-  // still-empty spreadsheet has to show its batch grouping immediately (5 rows, batch size 4
-  // must show a group boundary before row 5 right away), not only once the user starts typing.
-  // executeSpreadsheet() below chunks the same way, for the same reason the batch resolver was
-  // just made strict about "first row of the group": the display and the real behavior must
-  // always agree, or a hint like "not used for this row" becomes actively misleading.
-  const groupSize = Math.max(1, parseInt(batchSize) || rows.length);
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
@@ -756,109 +609,20 @@ export default function ExecutionPage() {
               <p className="text-xs mt-2">Only prep/cleanup fixed values are configured above.</p>
             </div>
           ) : (
-            <div className="bg-white dark:bg-black/40 rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden shadow-sm dark:shadow-none">
-                <table className="w-full text-left border-collapse">
-                    <thead>
-                        <tr className="bg-gray-50 dark:bg-white/5 border-b border-gray-200 dark:border-white/10 text-xs tracking-wider text-gray-500 dark:text-gray-400 font-semibold">
-                            <th className="p-3 w-16 text-center">Row</th>
-                            {variables.map(v => (
-                                <th key={v} className="p-3 border-l border-gray-200 dark:border-white/10">
-                                  <div className="flex flex-col">
-                                    <div className="flex items-center gap-1">
-                                      <span>{v}</span>
-                                      {batchVariables.includes(v) && (
-                                        <span title="Batch step value — only needs to be filled in on one row per batch group" className="inline-flex items-center gap-0.5 text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-500/10 px-1 py-0.5 rounded normal-case">
-                                          <Layers className="w-2.5 h-2.5" /> 1/batch
-                                        </span>
-                                      )}
-                                    </div>
-                                    {varTypes[v] && <span className="text-[10px] text-gray-400 dark:text-gray-500 font-normal normal-case">{varTypes[v]}</span>}
-                                  </div>
-                                </th>
-                            ))}
-                            <th className="p-3 w-28 text-center border-l border-gray-200 dark:border-white/10">Action</th>
-                        </tr>
-                    </thead>
-                    <DragDropContext onDragEnd={onDragEnd}>
-                        <Droppable droppableId="spreadsheet-rows">
-                            {(provided) => (
-                                <tbody {...provided.droppableProps} ref={provided.innerRef}>
-                                    {rows.map((row, idx) => {
-                                      const isGroupStart = hasBatchStep && rows.length > groupSize && idx > 0 && idx % groupSize === 0;
-                                      const groupNumber = isGroupStart ? Math.floor(idx / groupSize) + 1 : null;
-                                      return (
-                                        <Draggable key={`row-${idx}`} draggableId={`row-${idx}`} index={idx}>
-                                            {(provided) => (
-                                                <tr
-                                                    ref={provided.innerRef}
-                                                    {...provided.draggableProps}
-                                                    className={`border-b border-gray-100 dark:border-white/5 bg-white dark:bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.02] ${isGroupStart ? 'border-t-2 border-t-teal-300 dark:border-t-teal-700/60' : ''}`}
-                                                >
-                                                    <td className="p-3 border-l border-gray-100 dark:border-white/5">
-                                                        <div className="flex items-center justify-center space-x-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-grab" {...provided.dragHandleProps}>
-                                                            <GripVertical className="w-4 h-4" />
-                                                            <div className="flex flex-col items-center leading-none">
-                                                              <span className="text-sm font-medium">{idx + 1}</span>
-                                                              {groupNumber && <span className="text-[8px] font-bold text-teal-600 dark:text-teal-400 uppercase tracking-wider mt-0.5">Batch {groupNumber}</span>}
-                                                            </div>
-                                                        </div>
-                                                    </td>
-                                                    {variables.map(v => {
-                                                      const isBatchVar = batchVariables.includes(v);
-                                                      const isDesignatedRow = !isBatchVar || idx % groupSize === 0;
-                                                      return (
-                                                        <td key={v} className="p-2 border-l border-gray-100 dark:border-white/5">
-                                                            {varOptions[v] ? (
-                                                                <select
-                                                                    value={row[v] || ''}
-                                                                    onChange={(e) => updateRow(idx, v, e.target.value)}
-                                                                    className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-indigo-500 dark:hover:border-white/20 dark:focus:border-indigo-500 px-2 py-1 text-sm outline-none transition-colors cursor-pointer"
-                                                                >
-                                                                    <option value="" disabled>Select {v}</option>
-                                                                    {varOptions[v].map(opt => <option key={String(opt)} value={String(opt)}>{String(opt)}</option>)}
-                                                                </select>
-                                                            ) : (
-                                                                <input
-                                                                    type="text"
-                                                                    value={row[v] || ''}
-                                                                    onChange={(e) => updateRow(idx, v, e.target.value)}
-                                                                    placeholder={isDesignatedRow ? `Enter ${v}...` : 'not used for this row'}
-                                                                    title={isInvalidNumericCell(v, row[v]) ? `Expects a number (${varTypes[v]})` : (isDesignatedRow ? undefined : `Only needed once per batch group — this row's value (if any) is ignored.`)}
-                                                                    className={`w-full border-b px-2 py-1 text-sm outline-none transition-colors ${
-                                                                      isInvalidNumericCell(v, row[v])
-                                                                        ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-500/50'
-                                                                        : isDesignatedRow
-                                                                          ? 'bg-transparent border-transparent hover:border-gray-300 focus:border-indigo-500 dark:hover:border-white/20 dark:focus:border-indigo-500'
-                                                                          : 'bg-gray-50 dark:bg-white/[0.03] border-transparent text-gray-400 dark:text-gray-600 italic placeholder:text-gray-300 dark:placeholder:text-gray-600 hover:border-gray-200 focus:border-gray-300'
-                                                                    }`}
-                                                                />
-                                                            )}
-                                                        </td>
-                                                      );
-                                                    })}
-                                                    <td className="p-3 text-center border-l border-gray-100 dark:border-white/5">
-                                                        <button onClick={() => removeRow(idx)} disabled={rows.length === 1} className="text-gray-400 hover:text-red-500 disabled:opacity-50">
-                                                            <Trash2 className="w-4 h-4 mx-auto" />
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </Draggable>
-                                      );
-                                    })}
-                                    {provided.placeholder}
-                                </tbody>
-                            )}
-                        </Droppable>
-                    </DragDropContext>
-                </table>
-                <div className="p-3 bg-gray-50 dark:bg-white/5 border-t border-gray-200 dark:border-white/10">
-                    <button onClick={addRow} className="flex items-center space-x-2 text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 px-2 py-1">
-                        <Plus className="w-4 h-4" />
-                        <span>Add Row</span>
-                    </button>
-                </div>
-            </div>
+            <SpreadsheetTable
+              variables={variables}
+              rows={rows}
+              onRowChange={updateRow}
+              onAddRow={addRow}
+              onRemoveRow={removeRow}
+              onReorder={reorderRows}
+              varTypes={varTypes}
+              varOptions={varOptions}
+              batchVariables={batchVariables}
+              batchSize={batchSize}
+              showBatchGrouping={hasBatchStep}
+              idPrefix="configure"
+            />
           )}
 
           {(variables.length > 0 || globalVariables.length > 0) && (

@@ -7,7 +7,7 @@ import uuid
 import httpx
 import base64
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,8 +17,11 @@ import uvicorn
 from dotenv import load_dotenv
 
 from .introspection import inspect_device_module
-from .models import init_db
+from .models import init_db, async_session, WorkflowRun
+from sqlalchemy import func, select
 from .queue import WorkflowQueueManager
+from . import deck
+from . import runtime
 from . import workflows as wf
 from .workflows import WorkflowError, expand_workflow_blocks
 
@@ -156,6 +159,64 @@ async def update_cloud_settings(req: CloudSettingsRequest):
 
 from .broker import LocalMQTTBroker, AWSIoTBroker
 
+
+# What each workflow's runtime was when last published, so a finished run only re-sends the
+# workflows whose typical duration actually moved (each sequence message is a whole body, and AWS
+# IoT meters them in 5KB steps).
+_published_runtime: dict = {}
+
+
+def republish_changed_runtimes():
+    """Re-send the retained sequence message of every workflow whose timing changed."""
+    if not (global_broker and global_topic_prefix and global_client_id):
+        return
+    try:
+        current = runtime.workflow_runtimes()
+        for name in wf.list_workflow_names(WORKFLOWS_DIR):
+            if current.get(name) == _published_runtime.get(name):
+                continue
+            body = wf.read_head(WORKFLOWS_DIR, name)
+            global_broker.publish(
+                f"{global_topic_prefix}/{global_client_id}/sequences/{name}",
+                published_sequence(name, body), retain=True, qos=1,
+            )
+    except Exception as e:
+        print(f"Could not republish workflow timings: {e}")
+
+
+def published_sequence(name, body):
+    """What goes out on `sequences/{name}`: the saved body plus this deck's verdict on it.
+
+    Cloud has no HTTP path to a device, so the only way its Library can say "this workflow no
+    longer runs here" is for the verdict to travel with the body it already mirrors. Computed by
+    `compatibility.check`, the same call the edge Library's listing makes, so the two libraries
+    cannot disagree about the same workflow. Not part of the body proper: `body_hash` ignores it,
+    and a push from Cloud has it stripped before saving (see handle_sequence_push).
+    """
+    message = dict(body or {})
+    try:
+        message["compatibility"] = compatibility.check(
+            name,
+            body or {},
+            getattr(app.state, "instrument_schemas", {}),
+            getattr(app.state, "schema_fingerprint", ""),
+            wf.list_workflow_names(WORKFLOWS_DIR),
+        )
+    except Exception as e:
+        # A verdict is a courtesy; failing to compute one must not stop the body syncing.
+        print(f"Could not check '{name}' against this deck: {e}")
+    # How long it usually takes, from this device's own run history (runtime.py). Cloud shows it
+    # beside the workflow and uses it to spell out what a repeat cadence adds up to.
+    try:
+        timing = runtime.workflow_runtimes().get(name)
+        if timing:
+            message["runtime"] = timing
+        _published_runtime[name] = timing
+    except Exception as e:
+        print(f"Could not time '{name}': {e}")
+    return message
+
+
 async def handle_sequence_push(payload: dict):
     """Apply a workflow pushed down from Cloud, then echo it back as the acknowledgement.
 
@@ -173,6 +234,8 @@ async def handle_sequence_push(payload: dict):
     if not name or not isinstance(body, dict):
         print(f"Ignoring malformed sequence push: {payload!r}")
         return
+    # A verdict Cloud echoes back describes the old body on this deck; it is recomputed on publish.
+    body = {k: v for k, v in body.items() if k != "compatibility"}
     try:
         wf.validate_name(name)
         saved, version, _created = wf.save_version(
@@ -190,11 +253,119 @@ async def handle_sequence_push(payload: dict):
     if global_broker and global_topic_prefix and global_client_id:
         try:
             global_broker.publish(
-                f"{global_topic_prefix}/{global_client_id}/sequences/{name}", saved,
-                retain=True, qos=1,
+                f"{global_topic_prefix}/{global_client_id}/sequences/{name}",
+                published_sequence(name, saved), retain=True, qos=1,
             )
         except Exception as e:
             print(f"Applied '{name}' but failed to echo it back: {e}")
+
+
+def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, error: str = None,
+                        progress: dict = None):
+    """Report a cloud-originated task's state back to Cloud.
+
+    A dedicated topic, NOT .../status — that one is the plain {online, ts} device heartbeat
+    daemon.js reads with `payload.online`, which is undefined (falsy) on this payload shape;
+    publishing there was incorrectly flipping the device to "offline" in Supabase every time a
+    cloud run started or finished.
+    """
+    if not (global_broker and global_topic_prefix):
+        return
+    payload = {"runId": cloud_run_id, "nodeId": cloud_node_id, "status": status}
+    if error:
+        payload["error"] = error
+    if progress:
+        payload["progress"] = progress
+    try:
+        global_broker.publish(
+            f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload,
+            # A progress update is superseded by the next one, so it need not be redelivered;
+            # a status change (running/completed/error) must arrive.
+            qos=0 if progress else 1,
+        )
+    except Exception as e:
+        print(f"Failed to emit cloud '{status}' status for {cloud_node_id}: {e}")
+
+
+def publish_task_result(cloud_run_id: str, cloud_node_id: str, record: dict):
+    """A finished Cloud task's run record (queue.build_cloud_result), once, at QoS 1.
+
+    Its own topic rather than task-status: it is the one large message (up to ~100KB), and keeping
+    it apart keeps every status and progress message small and cheap to parse.
+    """
+    if not (global_broker and global_topic_prefix):
+        return
+    try:
+        global_broker.publish(
+            f"{global_topic_prefix}/{global_broker.client_id}/task-result",
+            {"runId": cloud_run_id, "nodeId": cloud_node_id, "result": record}, qos=1,
+        )
+    except Exception as e:
+        print(f"Failed to send results for {cloud_node_id}: {e}")
+
+
+async def handle_cloud_task(payload: dict):
+    """Start a run dispatched by Cloud.
+
+    Two payload shapes are accepted on this topic, normalised to one call:
+
+      {block, runId, nodeId}       a single step — what Cloud sent before it could configure a
+                                   node, still what a plain instrument step dispatches as.
+      {run, runId, nodeId}         a whole run: {name, parameters, prep, sequence, cleanup}, the
+                                   exact body POST /api/queue/runs accepts. This is what a
+                                   spreadsheet node, an optimization node, or a merged linear
+                                   chain arrives as.
+
+    Both go through `start_run`, so a Cloud-dispatched run is the same run as a bench-started one
+    rather than a reduced second notion of what a run is.
+    """
+    run_id = payload.get("runId")
+    node_id = payload.get("nodeId")
+    if not run_id or not node_id:
+        print(f"Ignoring cloud task with no runId/nodeId: {payload!r}")
+        return
+
+    run = payload.get("run")
+    if run is None:
+        block = payload.get("block")
+        if not block:
+            print(f"Ignoring cloud task carrying neither 'run' nor 'block': {payload!r}")
+            return
+        run = {"sequence": [block], "name": payload.get("name")}
+
+    parameters = dict(run.get("parameters") or {})
+    parameters["cloud_run_id"] = run_id
+    parameters["cloud_node_id"] = node_id
+
+    try:
+        await start_run(
+            run.get("name") or _cloud_run_label(run),
+            parameters,
+            run.get("prep") or [],
+            run.get("sequence") or [],
+            run.get("cleanup") or [],
+        )
+    except Exception as e:
+        # A cloud-dispatched node can reference a workflow this device doesn't have (or has since
+        # renamed), or carry parameters this device rejects. Report the refusal back rather than
+        # only printing it: the task otherwise sits at 'queued' in Cloud forever with nothing
+        # explaining why, which is exactly the stuck-task hole that made a failed dispatch look
+        # identical to a slow one.
+        print(f"Refusing cloud task {node_id} for run {run_id}: {e}")
+        publish_task_status(run_id, node_id, "error", str(e))
+
+
+def _cloud_run_label(run: dict) -> str:
+    """A readable name for a Cloud task that arrived without one: what it runs, not Cloud's ids.
+
+    It used to be "Cloud Node node_1790192601858 (run_1790192697946)" -- two internal ids that mean
+    nothing at the bench and that no one can match to anything in Data History.
+    """
+    first = next(iter(run.get("sequence") or []), None) or {}
+    instrument = first.get("instrument") or first.get("module") or ""
+    method = first.get("method") or first.get("action") or ""
+    what = method if instrument == "Library Workflows" else ".".join(p for p in (instrument, method) if p)
+    return f"{what or 'Step'} (from Cloud)"
 
 
 async def handle_broker_message(topic: str, payload: dict):
@@ -202,33 +373,30 @@ async def handle_broker_message(topic: str, payload: dict):
     if topic.rsplit("/", 1)[-1] == "sequences-push":
         await handle_sequence_push(payload)
         return
+    if topic.rsplit("/", 1)[-1] == "cloud-queue":
+        # Awareness only: Cloud never queues work here (it holds tasks until this device is
+        # free), so this just lets the Queue page say what Cloud has waiting.
+        queue_manager.cloud_queue = payload if isinstance(payload, dict) else None
+        await queue_manager.broadcast_global_queue()
+        return
 
     print(f"Received cloud task from topic {topic}: {payload}")
-    block = payload.get("block")
-    runId = payload.get("runId")
-    nodeId = payload.get("nodeId")
-    if block and runId and nodeId:
-        resolved_links = []
-        try:
-            expanded_blocks = expand_workflow_blocks(
-                [block], WORKFLOWS_DIR, "main", resolved=resolved_links
-            )
-        except WorkflowError as e:
-            # A cloud-dispatched node can reference a workflow this device doesn't have (or has
-            # since renamed). Refusing loudly here beats queueing a malformed step: the old
-            # expander's silent fallback would have sent "Library Workflows" to the executor as if
-            # it were an instrument.
-            print(f"Refusing cloud task {nodeId} for run {runId}: {e}")
-            return
-        await queue_manager.submit_sequence(
-            f"Cloud Node {nodeId} ({runId})",
-            expanded_blocks,
-            {
-                "cloud_run_id": runId,
-                "cloud_node_id": nodeId,
-                **({"resolved_links": resolved_links} if resolved_links else {}),
-            }
-        )
+    await handle_cloud_task(payload)
+
+def _safe_optimizer_catalog():
+    """The optimizer catalog, or {} if building it raises.
+
+    Guarded because this is called from the schema publish: an optimizer backend whose import or
+    `get_schema()` blows up must cost Cloud the optimizer list, not the entire instrument schema.
+    The registry's own import is already wrapped in a bare except (see optimizer/registry.py), so
+    a broken backend is absent rather than fatal there too.
+    """
+    try:
+        return get_optimizers()
+    except Exception as e:
+        print(f"Could not include optimizers in the published schema: {e}")
+        return {}
+
 
 def publish_schema(broker, topic_prefix, client_id):
     """Retained, published once per (re)connect rather than on every heartbeat — the instrument
@@ -244,7 +412,18 @@ def publish_schema(broker, topic_prefix, client_id):
     like an unrelated, unexplained connection-instability bug — see git history / AGENTS.md."""
     schema = {
         "instruments": dict(getattr(app.state, "instrument_schemas", {})),
-        "instrument_meta": getattr(app.state, "instrument_meta", {})
+        "instrument_meta": getattr(app.state, "instrument_meta", {}),
+        # Which optimizer backends this particular machine actually has installed, with their real
+        # configuration schemas -- the same thing GET /api/optimizers serves the local Optimize
+        # page. Cloud cannot reach that endpoint (there is no HTTP path from Cloud to a device,
+        # only these topics), and without it the Cloud-side optimization config would have to
+        # offer a hardcoded list and let the device reject it after dispatch. A few names and
+        # their field definitions, published once per connect alongside a payload orders of
+        # magnitude larger, so this costs nothing against AWS IoT's metering.
+        "optimizers": _safe_optimizer_catalog(),
+        # Which recorded shape of this deck the schema above is -- see deck.py. Lets Cloud tell a
+        # device whose drivers changed apart from one that merely reconnected.
+        "deck_version": deck.current_version(),
     }
     broker.publish(f"{topic_prefix}/{client_id}/schema", schema, retain=True, qos=1)
 
@@ -261,11 +440,75 @@ def publish_sequences(broker, topic_prefix, client_id):
         for name in wf.list_workflow_names(WORKFLOWS_DIR):
             try:
                 data = wf.read_head(WORKFLOWS_DIR, name)
-                broker.publish(f"{topic_prefix}/{client_id}/sequences/{name}", data, retain=True, qos=1)
+                broker.publish(
+                    f"{topic_prefix}/{client_id}/sequences/{name}", published_sequence(name, data),
+                    retain=True, qos=1,
+                )
             except Exception as e:
                 print(f"Failed to publish sequence '{name}': {e}")
     except Exception as e:
         print(f"Failed to list workflows for sync: {e}")
+
+# Run states in which this device is not free to take another run: something is executing,
+# paused mid-run, waiting on a person, or already queued here.
+_OCCUPIED_RUN_STATES = ("pending", "running", "paused", "waiting_input")
+
+
+async def device_busy() -> bool:
+    """Whether this device has any run in progress or waiting in its queue, whoever started it.
+
+    Cloud holds a ready task until the device is free rather than sending it to wait in this
+    queue, where Cloud could no longer reorder or cancel it. Cloud only knows about its *own*
+    tasks, though; a run started at the bench is invisible to it without this.
+    """
+    # Read from the runs' own states rather than the queue's `active_run_id`: the end-of-run
+    # notification fires after the run is committed as finished but before the queue lets go of
+    # it, and at that moment the device *is* free.
+    try:
+        async with async_session() as session:
+            count = (await session.execute(
+                select(func.count()).select_from(WorkflowRun)
+                .where(WorkflowRun.status.in_(_OCCUPIED_RUN_STATES))
+            )).scalar()
+            if count:
+                return True
+            # A run that hit an error and is parked waiting for an operator to retry/skip/cancel
+            # still holds the queue, though its recorded status already reads 'error'.
+            active = queue_manager.active_run_id
+            if active is not None and queue_manager.error_action is None:
+                run = await session.get(WorkflowRun, active)
+                return bool(run and run.status == "error" and not queue_manager.cancelled)
+        return False
+    except Exception:
+        return False
+
+
+# A new value on every broker connection, sent with the heartbeat. The heartbeat is retained, so a
+# Cloud daemon starting up sees the *previous* connection's "online" and cannot tell that this
+# process has since restarted and missed whatever it sent in between (the cloud-queue summary).
+global_session: str = ""
+
+
+async def publish_status():
+    """The small retained heartbeat: `{online, busy, ts}`. One boolean more than before, so the
+    per-message cost on AWS IoT is unchanged."""
+    if not (global_broker and global_topic_prefix and global_client_id):
+        return
+    global_broker.publish(
+        f"{global_topic_prefix}/{global_client_id}/status",
+        {"online": True, "busy": await device_busy(), "ts": time.time(), "session": global_session},
+        retain=True, qos=0,
+    )
+
+
+def notify_status_changed():
+    """Send the heartbeat now instead of on the next 5s tick -- called when a run is queued or
+    finishes, so Cloud neither sends into a queue that just filled nor waits to use a free device."""
+    try:
+        asyncio.get_running_loop().create_task(publish_status())
+    except RuntimeError:
+        pass
+
 
 async def status_loop(broker, topic_prefix, client_id):
     """A cheap, frequent liveness signal — deliberately just {online, ts}, not the schema. Kept
@@ -300,10 +543,20 @@ async def status_loop(broker, topic_prefix, client_id):
     tick = 0
     while True:
         try:
-            broker.publish(f"{topic_prefix}/{client_id}/status", {"online": True, "ts": time.time()}, retain=True, qos=0)
+            broker.publish(
+                f"{topic_prefix}/{client_id}/status",
+                {"online": True, "busy": await device_busy(), "ts": time.time(), "session": global_session},
+                retain=True, qos=0,
+            )
             if tick in RESYNC_TICKS:
                 publish_schema(broker, topic_prefix, client_id)
                 publish_sequences(broker, topic_prefix, client_id)
+            # Cloud tasks a restart abandoned: say so once the connection is up, or Cloud keeps
+            # them 'running' and holds every later task for this device behind them.
+            while queue_manager.abandoned_cloud_tasks and tick >= 1:
+                task = queue_manager.abandoned_cloud_tasks.pop(0)
+                publish_task_status(task["runId"], task["nodeId"], "error",
+                                    "The device restarted before this finished.")
         except Exception as e:
             print(f"Error publishing status: {e}")
         tick += 1
@@ -389,6 +642,8 @@ async def setup_broker():
             else:
                 raise TimeoutError("Timed out waiting to connect — check the endpoint and, for AWS IoT, that the certificate is registered and its policy allows this Thing to connect.")
 
+            global global_session
+            global_session = uuid.uuid4().hex[:8]
             global_broker.subscribe(f"{topic_prefix}/{client_id}/execute")
             # Cloud -> Edge workflow write-through. Without this the Cloud sequence editor could
             # only ever write to Cloud's own database: the device never learned about a workflow
@@ -399,6 +654,8 @@ async def setup_broker():
             # through the same save path as a local save, and only real once this device echoes
             # it back on its own sequences/{name} topic.
             global_broker.subscribe(f"{topic_prefix}/{client_id}/sequences-push")
+            # What Cloud is holding for this device, for the Queue page (awareness only).
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/cloud-queue")
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the
@@ -460,6 +717,16 @@ async def startup_event():
     # workflow changes (its body_hash) or the server restarts against different drivers.
     from .compatibility import schema_fingerprint
     app.state.schema_fingerprint = schema_fingerprint(app.state.instrument_schemas)
+
+    # Keep this shape of the deck if it is new, so runs and saved workflows can say which deck
+    # they belong to, and the Instruments page can show what changed between two of them.
+    try:
+        app.state.deck_version = deck.record(
+            app.state.instrument_schemas, app.state.instrument_meta, app.state.schema_fingerprint,
+        )
+        print(f"Deck version {app.state.deck_version} ({app.state.schema_fingerprint})")
+    except Exception as e:
+        print(f"Could not record the deck version: {e}")
         
     try:
         import json
@@ -484,7 +751,8 @@ def get_status():
         "instrument_meta": getattr(app.state, "instrument_meta", {}),
         "active_tasks": list(active_tasks.keys()),
         "active_workflow_id": queue_manager.active_run_id,
-        "queue_paused": queue_manager.paused
+        "queue_paused": queue_manager.paused,
+        "cloud_queue": queue_manager.cloud_queue,
     }
 
 @app.get("/api/optimizers")
@@ -501,48 +769,104 @@ async def list_runs():
     runs = await queue_manager.get_all_runs()
     return {"runs": runs}
 
-@app.post("/api/queue/runs")
-async def create_run(req: Request):
-    data = await req.json()
-    name = data.get("name", "Unnamed Workflow")
-    parameters = data.get("parameters", {})
-    
-    prep = data.get("prep", [])
-    sequence = data.get("sequence", [])
-    cleanup = data.get("cleanup", [])
-    
+def _per_row_template(sequence):
+    """The per-row step template for a Spreadsheet run, taken from what will actually run.
+
+    `sequence_template` records which step in ONE row's sequence produced which named output, so
+    Data History can put real result columns on the export. The submitter builds it from the
+    blocks it authored -- but a `Library Workflows` block is one block there and fifteen steps
+    here, and only this side knows that. A Cloud-dispatched spreadsheet therefore arrived claiming
+    a one-step template for a run whose rows are fifteen steps each, and Data History, slicing the
+    flat step list into chunks of that length, showed one step per row and silently dropped the
+    other twenty-eight.
+
+    Taking the first row's expanded steps is exact in every case the submitter cannot see:
+    linked-workflow expansion, nested links, and batch steps (which belong to their group's first
+    row). Steps carry `_row` from `toSubmittedStep`; a payload without it -- anything submitted
+    before that existed -- leaves the caller's own template alone.
+    """
+    rows_seen = [s.get("params", {}).get("_row") for s in sequence]
+    if not sequence or any(r is None for r in rows_seen):
+        return None
+    first_row = rows_seen[0]
+    return [
+        {
+            "instrument": step.get("instrument"),
+            "method": step.get("method"),
+            "returnVar": step.get("params", {}).get("_return_var"),
+            "returnBindings": step.get("params", {}).get("_return_bindings"),
+        }
+        for step in sequence
+        if step.get("params", {}).get("_row") == first_row
+    ]
+
+
+async def start_run(name: str, parameters: dict, prep: list, sequence: list, cleanup: list) -> int:
+    """Expand a run's links and hand it to the queue. The single entry point for starting a run.
+
+    Deliberately not inlined in the HTTP route any more: a run can now arrive two ways — from a
+    browser via POST /api/queue/runs, or from Cloud over the `execute` MQTT topic — and those two
+    have to mean exactly the same thing. Cloud dispatching a spreadsheet or optimization run is
+    the *same* run as one started at the bench, arriving by a different door, so both callers go
+    through this function rather than the MQTT path growing its own reduced notion of what a run
+    is (which is what it had: a single block, no prep/cleanup, no parameters at all).
+
+    Returns the new run's id; raises WorkflowError for an unresolvable link.
+    """
     # Every link followed while flattening is recorded and persisted onto the run, so a finished
     # run can state exactly which body of each subworkflow it executed. Without this, editing a
     # linked workflow silently made past runs unreproducible with nothing in the record to show it.
     resolved_links = []
 
+    # Which deck this run executed against. Stamped here because every run -- bench or Cloud,
+    # plain, spreadsheet or optimization -- starts through this function.
+    if deck.current_version() is not None:
+        parameters["deck_version"] = deck.current_version()
+
+    prep = expand_workflow_blocks(prep, WORKFLOWS_DIR, "prep", resolved=resolved_links)
+    sequence = expand_workflow_blocks(sequence, WORKFLOWS_DIR, "main", resolved=resolved_links)
+    cleanup = expand_workflow_blocks(cleanup, WORKFLOWS_DIR, "cleanup", resolved=resolved_links)
+
+    if parameters.get("type") == "Optimization":
+        parameters["prep_template"] = prep
+        parameters["cleanup_template"] = cleanup
+        # The sequence_template is already inside parameters, but it's not expanded!
+        if "sequence_template" in parameters:
+            parameters["sequence_template"] = expand_workflow_blocks(
+                parameters["sequence_template"], WORKFLOWS_DIR, resolved=resolved_links
+            )
+
+        if resolved_links:
+            parameters["resolved_links"] = resolved_links
+
+        # Send empty sequence because loop handles the sequence_template
+        return await queue_manager.submit_sequence(name, [], parameters)
+
+    if resolved_links:
+        parameters["resolved_links"] = resolved_links
+
+    if parameters.get("type") == "Spreadsheet":
+        # Rebuilt from the expanded steps rather than trusted from the caller -- see
+        # _per_row_template for the run this got wrong.
+        rebuilt = _per_row_template(sequence)
+        if rebuilt:
+            parameters["sequence_template"] = rebuilt
+
+    # Flatten everything into a single sequence
+    return await queue_manager.submit_sequence(name, prep + sequence + cleanup, parameters)
+
+
+@app.post("/api/queue/runs")
+async def create_run(req: Request):
+    data = await req.json()
     try:
-        prep = expand_workflow_blocks(prep, WORKFLOWS_DIR, "prep", resolved=resolved_links)
-        sequence = expand_workflow_blocks(sequence, WORKFLOWS_DIR, "main", resolved=resolved_links)
-        cleanup = expand_workflow_blocks(cleanup, WORKFLOWS_DIR, "cleanup", resolved=resolved_links)
-
-        if parameters.get("type") == "Optimization":
-            parameters["prep_template"] = prep
-            parameters["cleanup_template"] = cleanup
-            # The sequence_template is already inside parameters, but it's not expanded!
-            if "sequence_template" in parameters:
-                parameters["sequence_template"] = expand_workflow_blocks(
-                    parameters["sequence_template"], WORKFLOWS_DIR, resolved=resolved_links
-                )
-
-            if resolved_links:
-                parameters["resolved_links"] = resolved_links
-
-            # Send empty sequence because loop handles the sequence_template
-            run_id = await queue_manager.submit_sequence(name, [], parameters)
-        else:
-            if resolved_links:
-                parameters["resolved_links"] = resolved_links
-
-            # Flatten everything into a single sequence
-            combined_sequence = prep + sequence + cleanup
-            run_id = await queue_manager.submit_sequence(name, combined_sequence, parameters)
-
+        run_id = await start_run(
+            data.get("name", "Unnamed Workflow"),
+            data.get("parameters", {}),
+            data.get("prep", []),
+            data.get("sequence", []),
+            data.get("cleanup", []),
+        )
         return {"status": "started", "run_id": run_id}
     except WorkflowError as e:
         # A missing, cyclic or over-nested link aborts the run rather than dispatching a malformed
@@ -847,6 +1171,38 @@ def _workflow_summary(name):
 from . import compatibility
 
 
+@app.get("/api/deck")
+def get_deck():
+    """The current deck version and the history of every recorded one (newest first)."""
+    return {"version": deck.current_version(), "versions": deck.list_versions()}
+
+
+@app.get("/api/deck/versions/{version}")
+def get_deck_version(version: int):
+    found = deck.get_version(version)
+    if found is None:
+        return JSONResponse(status_code=404, content={"error": f"No deck version {version}"})
+    return found
+
+
+@app.get("/api/deck/diff")
+def get_deck_diff(to: Optional[int] = None, frm: Optional[int] = None):
+    """What changed between two deck versions. `to` defaults to the current one and `frm` to the
+    version before it, so a bare call answers "what changed at the last driver update?"."""
+    to = to or deck.current_version()
+    if to is None:
+        return JSONResponse(status_code=404, content={"error": "No deck version recorded yet"})
+    frm = frm if frm is not None else to - 1
+    new, old = deck.get_version(to), deck.get_version(frm) if frm >= 1 else None
+    if new is None:
+        return JSONResponse(status_code=404, content={"error": f"No deck version {to}"})
+    return {
+        "from": frm if old else None,
+        "to": to,
+        "changes": deck.diff(old["schema"] if old else {}, new["schema"]),
+    }
+
+
 @app.get("/api/workflows")
 def list_workflows():
     try:
@@ -857,6 +1213,14 @@ def list_workflows():
                 bodies[name] = wf.ensure_versioned(WORKFLOWS_DIR, name)
             except WorkflowError:
                 bodies[name] = {}
+
+        # Typical durations from this device's run history, once for the whole listing (cached on
+        # the newest finished run, so a listing with nothing new finished costs one query).
+        try:
+            timings = runtime.workflow_runtimes()
+        except Exception as e:
+            print(f"Could not time workflows: {e}")
+            timings = {}
 
         summaries = []
         for name in names:
@@ -871,6 +1235,7 @@ def list_workflows():
             # Still runnable against the drivers currently connected? The bodies are already in
             # hand for linked_by, and the verdict is cached per body_hash + deck fingerprint, so
             # this costs nothing on a listing where neither has changed — see compatibility.py.
+            summary["runtime"] = timings.get(name)
             summary["compatibility"] = compatibility.check(
                 name,
                 bodies.get(name) or {},
@@ -1065,7 +1430,8 @@ async def save_workflow(name: str, req: Request):
     if global_broker and global_topic_prefix and global_client_id:
         try:
             global_broker.publish(
-                f"{global_topic_prefix}/{global_client_id}/sequences/{name}", body, retain=True, qos=1
+                f"{global_topic_prefix}/{global_client_id}/sequences/{name}",
+                published_sequence(name, body), retain=True, qos=1,
             )
         except Exception as e:
             print(f"Failed to publish saved workflow '{name}': {e}")

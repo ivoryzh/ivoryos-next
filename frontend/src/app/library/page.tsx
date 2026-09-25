@@ -4,7 +4,7 @@ import { API_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag, Plus } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { workflowSignature, toSequenceBlocks, confirmDialog, notify } from '@ivoryos/shared-ui';
+import { workflowSignature, toSequenceBlocks, confirmDialog, notify, runtimeSummary, formatDuration, type WorkflowRuntime } from '@ivoryos/shared-ui';
 
 type WorkflowItem = {
   name: string;
@@ -25,7 +25,9 @@ type WorkflowItem = {
   // Whether this still runs against the drivers currently connected. Computed server-side by the
   // same validator the agent uses, cached per body_hash + deck fingerprint — so it is already in
   // the listing response rather than something this page has to ask for. See compatibility.py.
-  compatibility?: { status: 'ok' | 'broken'; error_count: number; errors: { where?: string; message: string; hint?: string }[] };
+  compatibility?: { status: 'ok' | 'broken'; error_count: number; deck_version?: number; errors: { where?: string; message: string; hint?: string }[] };
+  // Typical duration from this deck's own completed runs of it (runtime.py); absent until it has run.
+  runtime?: WorkflowRuntime | null;
 };
 
 // Mirrors MAX_TAGS / MAX_TAG_LENGTH in edge_server/ivoryos_edge/workflows.py. Enforced here too
@@ -96,6 +98,7 @@ function IncompatibleLine({ compatibility }: { compatibility: NonNullable<Workfl
       <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
       <span className="min-w-0 flex-1 truncate">
         Won&apos;t run on this deck — <strong>{count === 1 ? '1 problem' : `${count} problems`}</strong>
+        {compatibility.deck_version ? <span className="opacity-70"> · written for deck v{compatibility.deck_version}</span> : null}
       </span>
       <div className="hidden group-hover/compat:block absolute left-0 bottom-full mb-1.5 z-50 w-max max-w-[300px] p-2.5 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-[11px] shadow-xl pointer-events-none">
         <p className="font-semibold mb-1 opacity-70">Checked against the connected instruments:</p>
@@ -115,6 +118,27 @@ function IncompatibleLine({ compatibility }: { compatibility: NonNullable<Workfl
   );
 }
 
+/**
+ * The one tag nobody types: a workflow other workflows link to. Derived from `linked_by` on every
+ * load rather than stored, so it can never go stale — unlinking the last dependent removes it, and
+ * there is nothing to edit or forget to clean up. It carries the list of dependents on hover,
+ * which is the reason to care: editing this workflow changes them too.
+ */
+const USED_BY_TAG = 'used by others';
+
+function UsedByTag({ names }: { names: string[] }) {
+  return (
+    <span className="group/usedby relative inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-800/40 dark:text-emerald-400">
+      <Link2 className="w-3 h-3" />
+      used by {names.length === 1 ? names[0] : `${names.length}`}
+      <span className="hidden group-hover/usedby:block absolute left-0 bottom-full mb-1.5 z-50 w-max max-w-[240px] p-2.5 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-[11px] font-normal shadow-xl pointer-events-none">
+        <span className="block font-semibold mb-1 opacity-70">Editing this changes {names.length > 1 ? 'them' : 'it'} too:</span>
+        {names.map(n => <span key={n} className="block break-words">{n}</span>)}
+      </span>
+    </span>
+  );
+}
+
 type VersionEntry = {
   version: number;
   updated_at: number;
@@ -130,6 +154,10 @@ export default function LibraryPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'created_at' | 'updated_at'>('updated_at');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  // Workflows that won't run on this deck go after the ones that will, whatever the sort — the
+  // library is mostly opened to pick something to run.
+  const [workingFirst, setWorkingFirst] = useState(true);
+  const [usedByOnly, setUsedByOnly] = useState(false);
   // Loading a workflow overwrites whatever is on the designer canvas. If that canvas holds
   // unsaved edits, legacy IvoryOS stopped and asked first instead of silently discarding them.
   const [pendingLoad, setPendingLoad] = useState<{ name: string; draftName: string; version?: number } | null>(null);
@@ -250,7 +278,12 @@ export default function LibraryPage() {
     // AND across selected tags: each one you add narrows the list, which is what people expect
     // from filter chips and what makes combining two of them useful.
     && activeTags.every(t => hasTag(w, t))
+    && (!usedByOnly || (w.linked_by?.length ?? 0) > 0)
   ).sort((a, b) => {
+     if (workingFirst) {
+       const broken = (w: WorkflowItem) => (w.compatibility?.status === 'broken' ? 1 : 0);
+       if (broken(a) !== broken(b)) return broken(a) - broken(b);
+     }
      let valA = a[sortBy];
      let valB = b[sortBy];
      if (typeof valA === 'string') valA = valA.toLowerCase();
@@ -440,13 +473,39 @@ export default function LibraryPage() {
                     >
                         <ArrowUpDown className="w-4 h-4 text-gray-500" />
                     </button>
+                    <label
+                        title="List workflows that won't run on this deck after the ones that will"
+                        className="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 cursor-pointer select-none whitespace-nowrap"
+                    >
+                        <input
+                            type="checkbox"
+                            checked={workingFirst}
+                            onChange={(e) => setWorkingFirst(e.target.checked)}
+                            className="accent-indigo-600"
+                        />
+                        working first
+                    </label>
                 </div>
             </div>
         </div>
 
-        {allTags.length > 0 && (
+        {(allTags.length > 0 || workflows.some(w => (w.linked_by?.length ?? 0) > 0)) && (
           <div className="px-8 pb-2 flex items-center flex-wrap gap-2">
             <Tag className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+            {workflows.some(w => (w.linked_by?.length ?? 0) > 0) && (
+              <button
+                onClick={() => setUsedByOnly(v => !v)}
+                title="Added automatically to every workflow another workflow links to"
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  usedByOnly
+                    ? 'bg-emerald-600 border-emerald-600 text-white'
+                    : 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:border-emerald-800/40 dark:text-emerald-400 dark:hover:bg-emerald-900/40'
+                }`}
+              >
+                <Link2 className="w-3 h-3" />
+                {USED_BY_TAG}
+              </button>
+            )}
             {allTags.map(tag => {
               const on = isTagActive(tag);
               return (
@@ -463,9 +522,9 @@ export default function LibraryPage() {
                 </button>
               );
             })}
-            {activeTags.length > 0 && (
+            {(activeTags.length > 0 || usedByOnly) && (
               <button
-                onClick={() => setActiveTags([])}
+                onClick={() => { setActiveTags([]); setUsedByOnly(false); }}
                 className="px-2 py-1 text-xs font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
               >
                 Clear filters
@@ -479,8 +538,8 @@ export default function LibraryPage() {
             <div className="flex flex-col items-center justify-center h-64 text-gray-500 dark:text-gray-400 border-2 border-dashed border-gray-300 dark:border-white/10 rounded-2xl">
               <p className="text-sm font-medium">No saved workflows found.</p>
               <p className="text-xs mt-2">
-                {activeTags.length > 0
-                  ? `Nothing is tagged ${activeTags.join(' + ')}.`
+                {activeTags.length > 0 || usedByOnly
+                  ? `Nothing is tagged ${[...(usedByOnly ? [USED_BY_TAG] : []), ...activeTags].join(' + ')}.`
                   : 'Check your search filter or go to the Designer to create a new one.'}
               </p>
             </div>
@@ -517,17 +576,15 @@ export default function LibraryPage() {
                         {workflow.compatibility?.status === 'broken' && (
                           <IncompatibleLine compatibility={workflow.compatibility} />
                         )}
-                        {/* The blast radius of editing this workflow: these resolve to it at run
-                            time and change with it. Copies never appear here, because an inlined
-                            copy holds no reference for anything to propagate through. */}
-                        {(workflow.linked_by?.length ?? 0) > 0 && (
-                          <LinkLine
-                            tone="warn"
-                            names={workflow.linked_by!}
-                            lead="Used by"
-                            tooltipTitle={`Editing this changes ${workflow.linked_by!.length > 1 ? 'them' : 'it'} too:`}
-                          />
-                        )}
+                        {workflow.runtime?.runs ? (
+                          <div
+                            className="mt-2 flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400"
+                            title={`Median of its recent completed runs: prep ${formatDuration(workflow.runtime.prep_s)}, body ${formatDuration(workflow.runtime.iteration_s)} per pass, cleanup ${formatDuration(workflow.runtime.cleanup_s)}`}
+                          >
+                            <Clock className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">{runtimeSummary(workflow.runtime)}</span>
+                          </div>
+                        ) : null}
                         {(workflow.links?.length ?? 0) > 0 && (
                           <LinkLine
                             tone="muted"
@@ -540,6 +597,10 @@ export default function LibraryPage() {
                             the list — and a second set of clickable chips on every card only made
                             it ambiguous which one you were touching. */}
                         <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                          {/* The blast radius of editing this workflow: these resolve to it at run
+                              time and change with it. Copies never appear here, because an inlined
+                              copy holds no reference for anything to propagate through. */}
+                          {(workflow.linked_by?.length ?? 0) > 0 && <UsedByTag names={workflow.linked_by!} />}
                           {(workflow.tags || []).map(tag => (
                             <span
                               key={tag}

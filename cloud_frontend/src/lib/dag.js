@@ -97,6 +97,28 @@ function placeholderParamsOf(node) {
   return declared.filter((key) => isDynamicValue(effectiveParamValue(block, key)));
 }
 
+/**
+ * How a node turns into work. `single` dispatches the bare block, exactly as this canvas always
+ * did; `spreadsheet` and `optimization` wrap it in a whole run (see src/lib/runPayload.ts).
+ *
+ * Defined here rather than beside the payload builder because both sides need it and only this
+ * file can be required by `daemon.js` — the TypeScript module re-exports these instead of keeping
+ * its own copy of the rule.
+ */
+function runConfigOf(node) {
+  return (node && node.data && node.data.runConfig) || {};
+}
+
+function runModeOf(node) {
+  const mode = runConfigOf(node).mode;
+  return mode === 'spreadsheet' || mode === 'optimization' ? mode : 'single';
+}
+
+/** A node that iterates carries its own `#name`s down to the device, unresolved on purpose. */
+function isIteratingNode(node) {
+  return runModeOf(node) !== 'single';
+}
+
 function isStartNode(node) {
   return isFlowControlNode(node) && String(blockOf(node).method || '') === START_METHOD;
 }
@@ -127,24 +149,53 @@ function buildGraph(nodes, edges) {
 }
 
 /**
+ * Which task carries each node's work: its own, for every run planned today.
+ *
+ * Runs planned while "merge chains" existed stored one task for a whole straight line of steps,
+ * listing the nodes it covered in `members`. Such a run can still be in flight or be advanced
+ * after an upgrade, so the mapping is read back from those rows rather than recomputed -- there is
+ * no chain-finding left to recompute it with. Every task planned now covers exactly its own node.
+ */
+function representativesFromTasks(nodes, tasks) {
+  const reps = new Map();
+  for (const n of (nodes || [])) reps.set(String(n.id), String(n.id));
+  for (const t of (tasks || [])) {
+    for (const member of (Array.isArray(t.members) ? t.members : [])) {
+      reps.set(String(member), String(t.node_id));
+    }
+  }
+  return reps;
+}
+
+/**
  * The tasks `nodeId` genuinely waits on: its ancestors with the Flow Control nodes contracted
  * away. Walking upward rather than looking at direct predecessors is what makes rule 2 hold
  * through a chain of several Flow Control nodes (`A -> If -> Sleep -> B` still yields `{A}`).
  * `seen` keeps this terminating even on a graph that has not been validated yet.
  */
-function effectiveDependencies(nodeId, incoming, isFlowControlId) {
+function effectiveDependencies(nodeId, incoming, isFlowControlId, reps) {
+  const repOf = (id) => (reps && reps.get(String(id))) || String(id);
+  const self = repOf(nodeId);
   const deps = new Set();
   const seen = new Set([String(nodeId)]);
   const stack = (incoming.get(String(nodeId)) || []).slice();
   while (stack.length) {
-    const parent = stack.pop();
+    const parent = String(stack.pop());
     if (seen.has(parent)) continue;
     seen.add(parent);
     if (isFlowControlId(parent)) {
       for (const grandparent of (incoming.get(parent) || [])) stack.push(grandparent);
-    } else {
-      deps.add(parent);
+      continue;
     }
+    // Only reachable for a run planned when chains could be merged: a step in the same task as
+    // this one is part of the run it dispatches, not something to wait for. Without this such a
+    // task would depend on itself and stay blocked forever.
+    const rep = repOf(parent);
+    if (rep === self) {
+      for (const grandparent of (incoming.get(parent) || [])) stack.push(grandparent);
+      continue;
+    }
+    deps.add(rep);
   }
   return deps;
 }
@@ -304,7 +355,10 @@ function validateGraph(nodes, edges, opts) {
   for (const node of dispatchable) {
     const blank = blankParamsOf(node);
     if (blank.length) blanks.push(`${node.id} (${blank.join(', ')})`);
-    if (opts && opts.requireResolvedParams) {
+    // An iterating node keeps its `#name`s on purpose: a spreadsheet supplies them per row and an
+    // optimization per trial, so they are resolved by the run rather than before it. Only a node
+    // that dispatches once has to arrive with every placeholder already filled in.
+    if (opts && opts.requireResolvedParams && !isIteratingNode(node)) {
       const left = placeholderParamsOf(node);
       if (left.length) unresolved.push(`${node.id} (${left.join(', ')})`);
     }
@@ -353,14 +407,22 @@ function planRun(runId, nodes, edges) {
   const { incoming } = buildGraph(nodes, edges);
   const flowControlIds = new Set(nodes.filter(isFlowControlNode).map(n => String(n.id)));
   const isFlowControlId = (id) => flowControlIds.has(id);
-
-  const tasks = nodes.filter(n => !isFlowControlNode(n)).map(n => {
-    const deps = effectiveDependencies(n.id, incoming, isFlowControlId);
+  // One task per step, each dispatched on its own. Cloud owns the ordering between them: a join
+  // (C after both A and B) is C staying blocked here until both report, not C being handed to a
+  // device queue early to wait there. That keeps every task standalone -- it can be retried,
+  // cancelled or reported on by itself -- and is why straight lines are no longer merged into
+  // one run.
+  const tasks = nodes.filter((n) => !isFlowControlNode(n)).map((node) => {
+    const id = String(node.id);
+    const deps = effectiveDependencies(id, incoming, isFlowControlId);
     return {
       run_id: runId,
-      node_id: String(n.id),
-      device_id: deviceIdOf(n),
-      block: blockOf(n),
+      node_id: id,
+      device_id: deviceIdOf(node),
+      // The bare block, for the single-step wire shape. A node that iterates carries its real
+      // content in `run` instead, attached by the caller -- see src/lib/runPayload.ts.
+      block: blockOf(node),
+      members: [id],
       status: deps.size === 0 ? 'pending' : 'blocked',
       deps: Array.from(deps),
     };
@@ -385,13 +447,15 @@ function computeAdvance(nodes, edges, tasks) {
   const flowControlIds = new Set((nodes || []).filter(isFlowControlNode).map(n => String(n.id)));
   const isFlowControlId = (id) => flowControlIds.has(id);
 
+  const reps = representativesFromTasks(nodes, tasks);
+
   const statusByNode = new Map((tasks || []).map(t => [String(t.node_id), t.status]));
 
   const unblock = [];
   const cancel = [];
   for (const task of (tasks || [])) {
     if (task.status !== 'blocked') continue;
-    const deps = Array.from(effectiveDependencies(task.node_id, incoming, isFlowControlId));
+    const deps = Array.from(effectiveDependencies(task.node_id, incoming, isFlowControlId, reps));
     // A dependency that errored or was itself cancelled can never complete, so this task can
     // never legally run. Leaving it 'blocked' was safe (it does stay unrun) but left the run
     // parked at 'running' with no terminal state and nothing in the UI explaining the stall.
@@ -444,6 +508,10 @@ module.exports = {
   blankParamsOf,
   placeholderParamsOf,
   buildGraph,
+  runConfigOf,
+  runModeOf,
+  isIteratingNode,
+  representativesFromTasks,
   effectiveDependencies,
   validateGraph,
   planRun,

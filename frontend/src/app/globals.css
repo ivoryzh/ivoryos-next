@@ -20,6 +20,12 @@
   }
 }
 
+/* Native scrollbars and form controls follow the app's own dark toggle (the `.dark` class), not
+   just the OS setting -- without this, scrollbars stayed light grey on a dark page. */
+.dark {
+  color-scheme: dark;
+}
+
 html, body {
   overflow: hidden;
   height: 100%;

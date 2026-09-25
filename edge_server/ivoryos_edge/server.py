@@ -765,9 +765,18 @@ def get_optimizers():
 # --- Queue Manager Endpoints ---
 
 @app.get("/api/queue/runs")
-async def list_runs():
+async def list_runs(recent: Optional[int] = None):
+    """Runs with their steps. With `recent`, only what is still queued or running plus the
+    `recent` newest -- what a status widget needs -- instead of the whole history."""
+    if recent is not None:
+        return {"runs": await queue_manager.get_live_runs(recent=recent)}
     runs = await queue_manager.get_all_runs()
     return {"runs": runs}
+
+@app.get("/api/queue/history")
+async def run_history(limit: int = 50, offset: int = 0, q: str = "", sort: str = "newest", status: str = "all"):
+    """One page of run summaries (no steps) for Data History; open one via /api/queue/runs/{id}."""
+    return await queue_manager.list_run_summaries(limit=limit, offset=offset, q=q, sort=sort, status=status)
 
 def _per_row_template(sequence):
     """The per-row step template for a Spreadsheet run, taken from what will actually run.

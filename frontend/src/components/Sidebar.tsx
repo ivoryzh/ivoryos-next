@@ -2,7 +2,7 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gamepad2, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gauge, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
@@ -242,7 +242,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
         {navItem(runEntryHref, 'Configure', <Settings2 className="w-5 h-5 shrink-0" />, ['/execution', '/optimize'])}
         {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}
         {navItem('/data', 'Data History', <Database className="w-5 h-5 shrink-0" />)}
-        {navItem('/instruments', 'Instruments', <Gamepad2 className="w-5 h-5 shrink-0" />)}
+        {navItem('/instruments', 'Instruments', <Gauge className="w-5 h-5 shrink-0" />)}
         {plugins.length > 0 && (
             <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">
                 {isExpanded && <div className="px-4 mb-2 text-[10px] font-bold tracking-wider uppercase text-gray-400">Plugins</div>}
@@ -259,7 +259,13 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
 
       <div className="flex flex-col space-y-4 w-full">
         <div className="mx-3">
-          <div className={`flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-100 dark:border-white/5`}>
+          {/* The whole card opens the cloud settings, so a collapsed sidebar (where only the dot
+              shows) still gets there in one click instead of expand-then-click. */}
+          <Link
+            href="/cloud"
+            title={isExpanded ? 'Cloud settings' : `Cloud Connect: ${edgeStatus?.cloud_connected ? 'Connected' : 'Offline'} (open settings)`}
+            className={`flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-100 dark:border-white/5 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors group`}
+          >
             <div className="flex items-center min-w-0">
               <div className={`w-2 h-2 rounded-full shrink-0 ${edgeStatus?.cloud_connected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
               {isExpanded && (
@@ -270,11 +276,9 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
               )}
             </div>
             {isExpanded && (
-              <Link href="/cloud" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors ml-2">
-                <Settings2 className="w-4 h-4" />
-              </Link>
+              <Settings2 className="w-4 h-4 ml-2 shrink-0 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-200 transition-colors" />
             )}
-          </div>
+          </Link>
         </div>
 
         <button 

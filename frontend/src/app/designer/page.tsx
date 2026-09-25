@@ -145,7 +145,7 @@ export default function DesignerPage() {
       } catch (e) { }
     };
 
-    fetch(`${API_BASE}/api/queue/runs`)
+    fetch(`${API_BASE}/api/queue/runs?recent=1`)
       .then(res => res.json())
       .then(data => {
         if (data.runs) {
@@ -782,8 +782,8 @@ export default function DesignerPage() {
             cleanupSequence={cleanupSequence}
             setCleanupSequence={setCleanupSequence}
             header={
-              <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-50 relative">
-                <div className="flex flex-col justify-center flex-1 mr-4 space-y-1">
+              <header className="@container h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-50 relative">
+                <div className="flex flex-col justify-center flex-1 min-w-0 mr-4 space-y-1">
                   <div className="flex items-center space-x-3">
                     <input
                       type="text"
@@ -808,7 +808,7 @@ export default function DesignerPage() {
                     className="text-xs text-gray-400 dark:text-gray-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 w-full"
                   />
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center space-x-2 shrink-0">
                   {/* Save and New belong with the other actions. They used to sit beside the name,
                     against a two-line block, so they were vertically offset from every other
                     control in the header no matter what padding they were given. */}
@@ -818,7 +818,7 @@ export default function DesignerPage() {
                     className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                   >
                     <FilePlus2 className="w-4 h-4 text-gray-400" />
-                    <span className="hidden sm:inline">New</span>
+                    <span className="hidden @3xl:inline">New</span>
                   </button>
 
                   <button
@@ -828,13 +828,13 @@ export default function DesignerPage() {
                     className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Save className="w-4 h-4" />
-                    <span className="hidden sm:inline">Save</span>
+                    <span className="hidden @3xl:inline">Save</span>
                   </button>
 
                   <div className="relative group">
-                    <button className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
+                    <button title="Export or import this workflow as JSON" className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
                       <Settings2 className="w-4 h-4" />
-                      <span className="hidden sm:inline">Manage</span>
+                      <span className="hidden @3xl:inline">Manage</span>
                     </button>
                     <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
                       <button
@@ -865,10 +865,11 @@ export default function DesignerPage() {
 
                   <button
                     onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
+                    title={viewMode === 'canvas' ? 'Show this workflow as a Python script' : 'Back to the canvas'}
                     className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                   >
                     {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
-                    <span className="hidden sm:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
+                    <span className="hidden @3xl:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
                   </button>
                   {(() => {
                     const allBlocks = [...prepSequence, ...sequence, ...cleanupSequence];
@@ -897,6 +898,7 @@ export default function DesignerPage() {
                             setIsMapOpen(true);
                           }}
                           disabled={hasNoSteps}
+                          title={hasDynamicParams ? 'Fill in the #variables on the Configure page' : (hasPendingRuns ? 'Add this workflow to the queue' : 'Run this workflow')}
                           className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
                             ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                             : hasDynamicParams
@@ -905,15 +907,16 @@ export default function DesignerPage() {
                             }`}
                         >
                           {hasDynamicParams ? <Settings2 className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                          <span>{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run')}</span>
+                          <span className="hidden @xl:inline">{hasDynamicParams ? 'Configure' : (hasPendingRuns ? 'Add to Queue' : 'Run')}</span>
                         </button>
                         {hasDynamicParams && sequence.some(s => s.returnVar) && (
                           <a
                             href="/optimize"
+                            title="Optimize this workflow's #variables"
                             className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
                           >
                             <Zap className="w-4 h-4" />
-                            <span>Optimize</span>
+                            <span className="hidden @xl:inline">Optimize</span>
                           </a>
                         )}
                       </>

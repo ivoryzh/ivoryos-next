@@ -66,8 +66,8 @@ export function SpreadsheetTable({
   compact = false,
   idPrefix = 'spreadsheet',
 }: SpreadsheetTableProps) {
-  const groupSize = groupSizeFor(batchSize, rows.length);
-  const showGroups = showBatchGrouping && rows.length > groupSize;
+  const groupSize = groupSizeFor(batchSize);
+  const showGroups = showBatchGrouping && groupSize > 1 && rows.length > groupSize;
   const cellPad = compact ? 'p-1.5' : 'p-2';
   const headPad = compact ? 'p-2' : 'p-3';
 

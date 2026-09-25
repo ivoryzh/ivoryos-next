@@ -216,7 +216,7 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
   const toggle = (key: string) => setCollapsed(prev => ({ ...prev, [key]: !prev[key] }));
 
   const rows = spreadsheet ? spreadsheet.rows : exampleRows;
-  const batchSize = spreadsheet ? (spreadsheet.batchSize || spreadsheet.rows) : exampleBatchSize;
+  const batchSize = spreadsheet ? (spreadsheet.batchSize || 1) : exampleBatchSize;
   const setBatchSize = (n: number) => {
     if (spreadsheet?.onBatchSizeChange) spreadsheet.onBatchSizeChange(n);
     else if (!spreadsheet) setExampleBatchSize(n);
@@ -233,9 +233,10 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
   const groups = loops ? batchGroups(mainSteps, rows, batchSize) : [];
   const perGroup = groups[0]?.rowCount ?? 1;
   const lastGroup = groups[groups.length - 1]?.rowCount ?? 1;
-  // The batch-size control matters whenever there is something for it to change: a batch step to
-  // group, or (on Configure) a batch size already set that splits the walk into several passes.
-  const showBatchControl = loops && (batchStepCount > 0 || groups.length > 1);
+  // On Configure the batch size always changes something — it decides whether rows interleave
+  // step by step or each runs start to finish — so it is always offered there. In the Designer's
+  // example numbers it only matters when there is a batch step to group.
+  const showBatchControl = !!spreadsheet || batchStepCount > 0;
 
   const cost = result ? spreadsheetCost(mainSteps, rows, batchSize) : null;
   const totalCalls = result && cost && loops

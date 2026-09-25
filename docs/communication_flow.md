@@ -2,6 +2,8 @@
 
 IvoryOS consists of a **Next.js (React) Frontend** and a **Python FastAPI Edge Server**. The two systems communicate during physical execution using a hybrid approach of standard REST API calls and real-time WebSockets.
 
+This page covers the browser and its own edge server. For how an edge server and Cloud sync workflows and dispatch jobs to each other over MQTT, see [edge_cloud_sync.md](edge_cloud_sync.md).
+
 ## 1. Initiating Execution (REST API)
 
 When you queue a run from the **Designer** or **Optimize/Execution** pages, the frontend does not directly execute any physical hardware commands. Instead, it compiles the execution plan and sends it to the Edge Server.

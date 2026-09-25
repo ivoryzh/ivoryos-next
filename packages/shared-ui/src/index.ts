@@ -7,7 +7,7 @@ export { ExtraArguments, coerceArgumentLiteral } from './ExtraArguments';
 export { buildRunName } from './runNaming';
 export { workflowSignature } from './workflowSignature';
 export { readNamedOutput, resolveResultPath } from './returnValues';
-export { ResultView, labelAndUnit } from './ResultView';
+export { ResultView } from './ResultView';
 export { FLOW_CONTROL_SCHEMAS, flowControlSchema, isFlowControlInstrument } from './flowControl';
 export type { ReturnBindingRef, OutputTemplateStep } from './returnValues';
 export { WorkflowMap } from './WorkflowMap';

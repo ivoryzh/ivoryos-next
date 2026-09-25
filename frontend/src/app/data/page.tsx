@@ -1,17 +1,13 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 
-import { useState, useEffect } from 'react';
-import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import {
-  ResultView, RunDataTable, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf,
+  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf,
 } from '@ivoryos/shared-ui';
 
-// Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
-// returned. When that value is a plain scalar — the overwhelmingly common case, since that's the
-// only thing an optimizer can ever act on — show it bare instead of as a one-key JSON object.
-// A dataclass/dict/list result (multiple fields, or a non-scalar 'result') still gets the full dump.
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned, so unwrap that one key before handing the value to ResultView — otherwise every result
 // renders under a pointless "Result" heading.
@@ -58,6 +54,9 @@ type TimelineStep = {
    * 'cleanup' for the steps that ran once around them.
    */
   iteration?: BandKey;
+  /** The spreadsheet row, when bands are batches: rows in a batch interleave, so the step's own
+   *  row is what tells two `pump.dispense` bars apart. */
+  row?: number;
 };
 
 type BandKey = number | 'prep' | 'cleanup';
@@ -78,29 +77,49 @@ const StatusDot = ({ status }: { status?: string }) => (
   />
 );
 
+type ArgItem = { key: string; value: unknown; text: string; source?: string };
+
 /**
- * One step as a line of log: what was called, with what, and what came back. Arguments are the
- * ones actually passed (bookkeeping keys like `_row`/`_phase` dropped). An If/While shows its
- * condition, the values it read, and the outcome -- every outcome, for a While -- which the edge
- * records on the step (`condition_record` in queue.py).
+ * A step's arguments as passed (bookkeeping keys like `_row`/`_phase` dropped), each marked with
+ * where it came from when it was a `#name`: runs record that as `_vars` (see `dynamicArgumentsOf`
+ * in shared-ui), and a value still reading `#name` was resolved on the edge from an earlier
+ * step's output. Runs submitted before `_vars` existed simply show no marks.
  */
-const summarizeStep = (step: any): { label: string; args: string; outcome: string } => {
+const argumentsOf = (step: any): ArgItem[] => {
+  const params: Record<string, any> = step.params || {};
+  const vars: Record<string, string> = params._vars || {};
+  return Object.entries(params)
+    .filter(([k]) => !k.startsWith('_'))
+    .map(([key, value]) => {
+      const text = cellText(value);
+      const ref = typeof value === 'string' ? /^#(\w+)$/.exec(value.trim())?.[1] : undefined;
+      return { key, value, text, source: vars[key] ?? ref };
+    });
+};
+
+/** The outputs this step was told to save (its return bindings / return var), with their values. */
+const savedOutputsOf = (step: any): { name: string; value: unknown }[] => {
+  const params: Record<string, any> = step.params || {};
+  const bindings: any[] = params._return_bindings || [];
+  const names: string[] = bindings.length
+    ? bindings.map(b => b?.var).filter(Boolean)
+    : String(params._return_var || '').split(',').map(v => v.trim()).filter(Boolean);
+  if (names.length === 0) return [];
+  const template = [{ instrument: step.instrument, method: step.method, returnVar: params._return_var || null, returnBindings: bindings.length ? bindings : null }];
+  return names.map(name => ({ name, value: readNamedOutput(name, template as any, [{ outputs: step.result }] as any) }));
+};
+
+/** Long values are cut in the one-line view; the expanded table has them whole. */
+const clip = (text: string, max = 28) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/**
+ * A flow-control step as a line of log. An If/While shows its condition, the values it read, and
+ * the outcome -- every outcome, for a While -- which the edge records on the step
+ * (`condition_record` in queue.py).
+ */
+const summarizeFlowStep = (step: any): { label: string; args: string; outcome: string } => {
   const params: Record<string, any> = step.params || {};
   const outputs: any = step.result || {};
-  const visibleArgs = Object.entries(params)
-    .filter(([k]) => !k.startsWith('_'))
-    .map(([k, v]) => `${k}=${cellText(v)}`)
-    .join(', ');
-
-  if (!isFlowStep(step)) {
-    const value = stepResultValue(step.result);
-    return {
-      label: `${step.instrument}.${step.method}`,
-      args: visibleArgs,
-      outcome: value === undefined || value === null ? '' : cellText(value),
-    };
-  }
-
   switch (step.method) {
     case 'If':
     case 'While': {
@@ -129,15 +148,57 @@ const summarizeStep = (step: any): { label: string; args: string; outcome: strin
   }
 };
 
-/** Steps as log lines. Click a line for the full result or error. */
+const DYNAMIC = 'text-teal-600 dark:text-teal-400';
+
+/** A step's full arguments and output, as tables. What a click on a log line opens. */
+const StepDetail = ({ args, value }: { args: ArgItem[]; value: unknown }) => (
+  <div className="space-y-2">
+    {args.length > 0 && (
+      <div>
+        <div className="text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">Arguments</div>
+        <table className="w-full text-xs border-collapse">
+          <tbody>
+            {args.map(a => (
+              <tr key={a.key} className="border-b last:border-b-0 border-gray-100 dark:border-white/5 align-top">
+                <td className="py-1 pr-4 font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap w-0">{a.key}</td>
+                <td className={`py-1 font-mono break-words ${a.source ? DYNAMIC : 'text-gray-800 dark:text-gray-200'}`} style={{ overflowWrap: 'anywhere' }}>{a.text}</td>
+                <td className="py-1 pl-4 text-[10px] whitespace-nowrap w-0 text-right">
+                  {a.source && <span className={DYNAMIC}>from #{a.source}</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
+    {value !== undefined && value !== null && value !== '' && (
+      <div>
+        <div className="text-[10px] uppercase tracking-wider font-bold text-gray-400 mb-0.5">Output</div>
+        <ResultView value={value} />
+      </div>
+    )}
+  </div>
+);
+
+/**
+ * Steps as log lines: what was called and with what. Arguments from a `#name` are coloured; the
+ * output shows on the line only when the step saves it to a named variable, since that is the value
+ * the run is about -- everything else is one click away, as tables.
+ */
 const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
   const [open, setOpen] = useState<number | null>(null);
   return (
     <div className="divide-y divide-gray-100 dark:divide-white/5 min-w-0">
       {steps.map((step: any, i: number) => {
-        const { label, args, outcome } = summarizeStep(step);
         const isOpen = open === i;
-        const hasMore = !!step.error || (!isFlowStep(step) && step.result && outcome.length > 0);
+        const flow = isFlowStep(step);
+        const flowSummary = flow ? summarizeFlowStep(step) : null;
+        const args = flow ? [] : argumentsOf(step);
+        const saved = flow ? [] : savedOutputsOf(step);
+        const value = flow ? undefined : stepResultValue(step.result);
+        const hasValue = value !== undefined && value !== null && value !== '';
+        const hasMore = !!step.error || (!flow && (args.length > 0 || hasValue));
+        const label = flowSummary ? flowSummary.label : `${step.instrument}.${step.method}`;
         return (
           <div key={i} className={`min-w-0 ${step.status === 'skipped' ? 'opacity-50' : ''}`}>
             <div
@@ -147,10 +208,39 @@ const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
               <span className="w-6 text-right text-[10px] text-gray-400 shrink-0">{start + i + 1}</span>
               <StatusDot status={step.status} />
               <span className="text-indigo-600 dark:text-indigo-400 font-semibold truncate shrink-0 max-w-[40%]" title={label}>{label}</span>
-              <span className="text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={args}>{args}</span>
-              {outcome !== '' && (
-                <span className="text-gray-800 dark:text-gray-200 truncate shrink-0 max-w-[35%]" title={outcome}>&rarr; {outcome}</span>
+              {flowSummary ? (
+                <>
+                  <span className="text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={flowSummary.args}>{flowSummary.args}</span>
+                  {flowSummary.outcome !== '' && (
+                    <span className="text-gray-800 dark:text-gray-200 truncate shrink-0 max-w-[35%]" title={flowSummary.outcome}>{flowSummary.outcome}</span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1">
+                    {args.map((a, n) => (
+                      <span key={a.key} title={a.source ? `${a.key}=${a.text} (from #${a.source})` : `${a.key}=${a.text}`}>
+                        {n > 0 && ', '}
+                        {a.key}=<span className={a.source ? DYNAMIC : 'text-gray-600 dark:text-gray-300'}>{clip(a.text)}</span>
+                      </span>
+                    ))}
+                  </span>
+                  {saved.length > 0 && (
+                    <span className="truncate shrink-0 max-w-[35%]" title={saved.map(o => `${o.name}=${cellText(o.value)}`).join(', ')}>
+                      {saved.map((o, n) => (
+                        <span key={o.name}>
+                          {n > 0 && ', '}
+                          <span className="text-amber-600 dark:text-amber-400">{o.name}</span>
+                          <span className="text-gray-800 dark:text-gray-200">={clip(cellText(o.value), 16)}</span>
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </>
               )}
+              {hasMore && !step.error && (isOpen
+                ? <ChevronUp className="w-3 h-3 text-gray-400 shrink-0" />
+                : <ChevronDown className="w-3 h-3 text-gray-400 shrink-0" />)}
               <span className="text-[10px] text-gray-400 w-12 text-right shrink-0">{secondsBetween(step.start_time, step.end_time)}</span>
             </div>
             {step.error && (
@@ -164,7 +254,7 @@ const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
             )}
             {isOpen && !step.error && (
               <div className="ml-11 mr-3 mb-1.5 p-2 rounded border text-xs bg-gray-50 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-600 dark:text-gray-300 overflow-hidden">
-                <ResultView value={stepResultValue(step.result)} />
+                <StepDetail args={args} value={value} />
               </div>
             )}
           </div>
@@ -341,6 +431,9 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
             <span className="text-gray-700 dark:text-gray-200">
               {active.iteration !== undefined && (
                 <span className="text-indigo-600 dark:text-indigo-400 font-bold">{bandName(active.iteration)} · </span>
+              )}
+              {active.row !== undefined && unit === 'Batch' && (
+                <span className="text-teal-600 dark:text-teal-400">row {active.row} · </span>
               )}
               {stepLabel(active)}
               <span className="text-gray-400">
@@ -520,8 +613,44 @@ function batchOfRows(run: any): Map<number, number> | null {
   return new Set(map.values()).size < run.rows.length ? map : null;
 }
 
+const PAGE_SIZE = 50;
+
+const SORTS: { value: string; label: string }[] = [
+  { value: 'newest', label: 'Newest first' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'name', label: 'Name A–Z' },
+  { value: 'duration', label: 'Longest first' },
+];
+
+const STATUS_FILTERS: { value: string; label: string }[] = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'error', label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' },
+  { value: 'active', label: 'Queued / running' },
+];
+
+const LIST_DOT: Record<string, string> = {
+  completed: 'bg-green-500',
+  error: 'bg-red-500',
+  cancelled: 'bg-gray-400',
+  running: 'bg-indigo-500 animate-pulse',
+  waiting_input: 'bg-amber-500 animate-pulse',
+};
+
 export default function DataPage() {
-  const [history, setHistory] = useState<any[]>([]);
+  // The list is one page of summaries from /api/queue/history; only the selected run is loaded
+  // with its steps. Loading every run with every step made this page -- and every step of every
+  // run, since the queue broadcast carried the same payload -- slower as the history grew.
+  const [summaries, setSummaries] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [sort, setSort] = useState('newest');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [query, setQuery] = useState('');
+  const [listLoaded, setListLoaded] = useState(false);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [selectedRun, setSelectedRun] = useState<any>(null);
@@ -530,9 +659,45 @@ export default function DataPage() {
   const [plotsLoading, setPlotsLoading] = useState(false);
   const [pendingDeleteRun, setPendingDeleteRun] = useState<any>(null);
   const [isDeletingRun, setIsDeletingRun] = useState(false);
+  const [listVersion, setListVersion] = useState(0);
+  const selectedIdRef = useRef<number | null>(null);
+  selectedIdRef.current = selectedId;
+
+  // Typing searches the server, so wait for a pause rather than querying per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => { setQuery(searchQuery.trim()); setPage(0); }, 250);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE), q: query, sort, status: statusFilter,
+    });
+    fetch(`${API_BASE}/api/queue/history?${params}`)
+      .then(res => res.json())
+      .then(data => {
+        if (cancelled) return;
+        setSummaries(data.runs || []);
+        setTotal(data.total || 0);
+        setListLoaded(true);
+        // Open the first run on arrival, and keep whatever is open while paging or filtering.
+        if (selectedIdRef.current === null && data.runs?.length) setSelectedId(data.runs[0].id);
+      })
+      .catch(() => { if (!cancelled) setListLoaded(true); });
+    return () => { cancelled = true; };
+  }, [page, query, sort, statusFilter, listVersion]);
 
   // One reading of a run record, shared with Cloud's view of synced results.
-  const formatRuns = (runs: any[]) => runs.map(formatRun);
+  useEffect(() => {
+    if (selectedId === null) { setSelectedRun(null); return; }
+    let cancelled = false;
+    fetch(`${API_BASE}/api/queue/runs/${selectedId}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(run => { if (!cancelled) setSelectedRun(run ? formatRun(run) : null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedId]);
 
   useEffect(() => {
     // Theme init
@@ -541,32 +706,27 @@ export default function DataPage() {
     if (savedTheme === 'dark') document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
 
-    const fetchRuns = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/queue/runs`);
-        const data = await res.json();
-        const formatted = formatRuns(data.runs);
-        setHistory(formatted);
-        setSelectedRun((prev: any) => prev ? formatted.find((f: any) => f.id === prev.id) || prev : formatted[0]);
-      } catch (e) { }
-    };
-
-    fetchRuns();
-
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
       .then(data => setEdgeStatus(data))
       .catch(err => console.error(err));
 
+    // The broadcast carries live and recent runs with their steps: enough to keep an open run
+    // current as it executes. The list itself is refreshed at most every couple of seconds --
+    // the broadcast fires after every step.
+    let lastListRefresh = 0;
     const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.status) setEdgeStatus(data.status);
         if (data.runs) {
-          const formatted = formatRuns(data.runs);
-          setHistory(formatted);
-          setSelectedRun((prev: any) => prev ? formatted.find((f: any) => f.id === prev.id) || prev : formatted[0]);
+          const open = data.runs.find((r: any) => r.id === selectedIdRef.current);
+          if (open) setSelectedRun(formatRun(open));
+          if (Date.now() - lastListRefresh > 2000) {
+            lastListRefresh = Date.now();
+            setListVersion(v => v + 1);
+          }
         }
       } catch (e) { }
     };
@@ -618,8 +778,8 @@ export default function DataPage() {
       const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to delete run');
-      setHistory(prev => prev.filter(r => r.id !== run.id));
-      setSelectedRun((prev: any) => (prev?.id === run.id ? null : prev));
+      if (selectedIdRef.current === run.id) setSelectedId(null);
+      setListVersion(v => v + 1);
       setPendingDeleteRun(null);
     } catch (e: any) {
       alert("Failed to delete run: " + e.message);
@@ -799,20 +959,56 @@ export default function DataPage() {
               <Trash2 className="w-4 h-4" />
             </button>
           </header>
+          <div className="px-4 pt-4 space-y-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search runs..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                title="Every word must match the run name, its columns or values, or an instrument or method it used"
+                className="w-full pl-10 pr-4 py-2 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="flex gap-2">
+              <select
+                value={sort}
+                onChange={(e) => { setSort(e.target.value); setPage(0); }}
+                title="Sort order"
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {SORTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select
+                value={statusFilter}
+                onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
+                title="Show only runs with this status"
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {STATUS_FILTERS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+          </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-2">
-            {history.length === 0 ? (
-              <div className="text-gray-500 dark:text-gray-600 italic text-sm text-center mt-10">No history found.</div>
+            {summaries.length === 0 ? (
+              <div className="text-gray-500 dark:text-gray-600 italic text-sm text-center mt-10">
+                {!listLoaded ? 'Loading…' : query || statusFilter !== 'all' ? 'No runs match.' : 'No history found.'}
+              </div>
             ) : (
-              history.map(run => (
+              summaries.map(run => (
                 <div
                   key={run.id}
-                  onClick={() => setSelectedRun(run)}
-                  className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedRun?.id === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
+                  onClick={() => setSelectedId(run.id)}
+                  className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedId === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
                 >
                   <div className="flex justify-between items-center mb-1 gap-2">
-                    <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate min-w-0">{run.name.split(' - ')[0]}</span>
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <span title={run.status} className={`w-1.5 h-1.5 rounded-full shrink-0 ${LIST_DOT[run.status] || 'bg-gray-300 dark:bg-gray-600'}`} />
+                      <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate">{String(run.name).split(' - ')[0]}</span>
+                    </span>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] text-gray-500">{serverDate(run.timestamp).toLocaleString()}</span>
+                      <span className="text-[10px] text-gray-500">{run.start_time ? serverDate(run.start_time).toLocaleString() : ''}</span>
                       <button
                         onClick={(e) => { e.stopPropagation(); setPendingDeleteRun(run); }}
                         title="Delete run"
@@ -822,13 +1018,35 @@ export default function DataPage() {
                       </button>
                     </div>
                   </div>
-                  <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
-                    {run.variables.length} variables • {run.rows.length} rows
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate" title={(run.instruments || []).join(', ')}>
+                    {run.row_count != null ? `${run.variable_count} variables • ${run.row_count} rows` : run.type === 'Optimization' ? 'optimization' : 'single run'}
+                    {run.instruments?.length ? ` • ${run.instruments.join(', ')}` : ''}
                   </div>
                 </div>
               ))
             )}
           </div>
+          {total > PAGE_SIZE && (
+            <div className="shrink-0 flex items-center justify-between px-4 py-2 border-t border-gray-200 dark:border-white/10 text-xs text-gray-500 dark:text-gray-400">
+              <button
+                type="button"
+                disabled={page === 0}
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                className="flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" /> Newer
+              </button>
+              <span>{page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}</span>
+              <button
+                type="button"
+                disabled={(page + 1) * PAGE_SIZE >= total}
+                onClick={() => setPage(p => p + 1)}
+                className="flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                Older <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 flex flex-col relative z-0 min-w-0 overflow-hidden">
@@ -940,23 +1158,36 @@ export default function DataPage() {
                   {(() => {
                     const batches = batchOfRows(selectedRun);
                     return (
+                  <>
                   <ExecutionTimeline
                     iterationLabel={batches ? 'Batch' : iterationLabelOf(selectedRun)}
                     steps={[
                         ...(selectedRun.prep || []).map((d: any) => ({ ...d, iteration: 'prep' as const })),
                         ...selectedRun.rows.flatMap((r: any) =>
-                          (r.details || []).map((d: any) => ({ ...d, iteration: batches ? (batches.get(r.row) ?? r.row) : r.row }))),
+                          (r.details || []).map((d: any) => ({ ...d, row: r.row, iteration: batches ? (batches.get(r.row) ?? r.row) : r.row }))),
                         ...(selectedRun.cleanup || []).map((d: any) => ({ ...d, iteration: 'cleanup' as const })),
                       ]}
                   />
-                    );
-                  })()}
-                  <RunDataTable run={selectedRun} />
+                  <RunDataTable run={selectedRun} batchOf={batches} />
                     <LogCard title="steps">
                       <LogGroup label="Prep" summary="ran once" steps={selectedRun.prep || []} muted />
-                      {selectedRun.rows.map((row: any) => (
+                      {selectedRun.rows.map((row: any, idx: number) => {
+                        const batch = batches?.get(row.row);
+                        const startsBatch = batch !== undefined && (idx === 0 || batches?.get(selectedRun.rows[idx - 1].row) !== batch);
+                        const batchRows = batch === undefined ? [] : selectedRun.rows.filter((r: any) => batches?.get(r.row) === batch);
+                        return (
+                        <React.Fragment key={`${selectedRun.id}-${row.row}`}>
+                        {/* The same divider the Configure spreadsheet draws: these rows ran together,
+                            step by step, rather than one after another. */}
+                        {startsBatch && (
+                          <div className="flex items-center gap-2 px-3 py-1 bg-teal-50/60 dark:bg-teal-500/[0.06] border-t-2 border-t-teal-300 dark:border-t-teal-700/60">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400">Batch {batch}</span>
+                            <span className="text-[10px] text-teal-700/70 dark:text-teal-300/60">
+                              rows {batchRows[0]?.row}–{batchRows[batchRows.length - 1]?.row} · ran together, step by step
+                            </span>
+                          </div>
+                        )}
                         <LogGroup
-                          key={`${selectedRun.id}-${row.row}`}
                           defaultOpen={selectedRun.rows.length === 1}
                           label={selectedRun.rows.length === 1 && selectedRun.type === 'Sequence'
                             ? 'Run'
@@ -966,9 +1197,14 @@ export default function DataPage() {
                             .join('  ')}
                           steps={row.details || []}
                         />
-                      ))}
+                        </React.Fragment>
+                        );
+                      })}
                       <LogGroup label="Cleanup" summary="ran once" steps={selectedRun.cleanup || []} muted />
                     </LogCard>
+                  </>
+                    );
+                  })()}
                 </div>
               </div>
             </>

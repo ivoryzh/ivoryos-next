@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 import traceback
 import inspect
 
-from sqlalchemy import update, select
+from sqlalchemy import update, select, or_, and_, func, String, cast
 from sqlalchemy.orm import selectinload
 from ivoryos_edge.introspection import serialize_result
 from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
@@ -408,6 +408,107 @@ class WorkflowQueueManager:
                 result.append(d)
             return result
 
+    # Statuses a run never leaves. Everything else is still the queue's business.
+    TERMINAL_STATUSES = ("completed", "error", "cancelled")
+
+    async def get_live_runs(self, recent: int = 10):
+        """Every run still in the queue (pending, running, paused, waiting for input...) plus the
+        `recent` newest runs, each with its steps.
+
+        This is what the global queue broadcast carries. It used to carry `get_all_runs()` -- the
+        whole history, every step of every run -- and it is sent after every single step, so the
+        cost of running one step grew with the size of the lab's history. Nothing listening needs
+        old runs: the queue pages want what is live and what just finished, and Data History pages
+        through `list_run_summaries` instead.
+        """
+        async with async_session() as session:
+            newest = select(WorkflowRun.id).order_by(WorkflowRun.id.desc()).limit(recent)
+            runs = await session.execute(
+                select(WorkflowRun)
+                .options(selectinload(WorkflowRun.steps))
+                .where(or_(WorkflowRun.status.not_in(self.TERMINAL_STATUSES), WorkflowRun.id.in_(newest)))
+                .order_by(WorkflowRun.id.desc())
+            )
+            result = []
+            for r in runs.scalars().unique():
+                d = r.as_dict()
+                d["steps"] = [s.as_dict() for s in r.steps]
+                result.append(d)
+            return result
+
+    async def list_run_summaries(self, limit: int = 50, offset: int = 0, q: str = "",
+                                 sort: str = "newest", status: str = "all"):
+        """One page of run history, without steps: `{runs, total}`.
+
+        Each word of `q` must match the run's name, its parameters (type, column names, values) or
+        an instrument/method it called. `status` is a status name, `active` for anything not yet
+        finished, or `all`. `sort` is newest, oldest, name or duration (longest first).
+        """
+        conditions = []
+        for term in q.lower().split():
+            like = f"%{term}%"
+            step_match = (
+                select(WorkflowStep.id)
+                .where(WorkflowStep.run_id == WorkflowRun.id,
+                       or_(func.lower(WorkflowStep.instrument).like(like), func.lower(WorkflowStep.method).like(like)))
+                .exists()
+            )
+            conditions.append(or_(
+                func.lower(WorkflowRun.name).like(like),
+                func.lower(cast(WorkflowRun.parameters, String)).like(like),
+                step_match,
+            ))
+        if status == "active":
+            conditions.append(WorkflowRun.status.not_in(self.TERMINAL_STATUSES))
+        elif status and status != "all":
+            conditions.append(WorkflowRun.status == status)
+        where = and_(*conditions) if conditions else None
+
+        duration = func.julianday(WorkflowRun.end_time) - func.julianday(WorkflowRun.start_time)
+        order = {
+            "oldest": [WorkflowRun.start_time.asc(), WorkflowRun.id.asc()],
+            "name": [func.lower(WorkflowRun.name).asc(), WorkflowRun.id.desc()],
+            # An unfinished run has no duration; it sorts last rather than first.
+            "duration": [duration.is_(None), duration.desc(), WorkflowRun.id.desc()],
+        }.get(sort, [WorkflowRun.start_time.desc(), WorkflowRun.id.desc()])
+
+        async with async_session() as session:
+            count_q = select(func.count(WorkflowRun.id))
+            page_q = select(WorkflowRun).order_by(*order).limit(max(1, min(limit, 500))).offset(max(0, offset))
+            if where is not None:
+                count_q = count_q.where(where)
+                page_q = page_q.where(where)
+            total = (await session.execute(count_q)).scalar_one()
+            runs = list((await session.execute(page_q)).scalars())
+
+            instruments: Dict[int, List[str]] = {}
+            if runs:
+                pairs = await session.execute(
+                    select(WorkflowStep.run_id, WorkflowStep.instrument)
+                    .where(WorkflowStep.run_id.in_([r.id for r in runs]))
+                    .distinct()
+                )
+                for run_id, instrument in pairs:
+                    if instrument and instrument not in ("Flow_Control", "Flow Control"):
+                        instruments.setdefault(run_id, []).append(instrument)
+
+        summaries = []
+        for r in runs:
+            params = r.parameters or {}
+            variables = params.get("variables") or []
+            summaries.append({
+                "id": r.id,
+                "name": r.name,
+                "status": r.status,
+                "start_time": r.start_time.isoformat() if r.start_time else None,
+                "end_time": r.end_time.isoformat() if r.end_time else None,
+                "type": params.get("type"),
+                "variable_count": len(variables),
+                "row_count": len(params.get("rows") or []) if variables else None,
+                "instruments": sorted(instruments.get(r.id, [])),
+            })
+        return {"runs": summaries, "total": total}
+
     async def get_run_status(self, run_id: int):
         async with async_session() as session:
             run = await session.get(WorkflowRun, run_id)
@@ -539,7 +640,7 @@ class WorkflowQueueManager:
         if not self.global_connections:
             return
             
-        runs = await self.get_all_runs()
+        runs = await self.get_live_runs()
         payload = {
             "runs": runs,
             "status": {
@@ -1260,9 +1361,14 @@ class WorkflowQueueManager:
                 iteration_steps = []
                 for tmpl_step in seq_template:
                     args = {}
+                    # Which arguments came from a #name, so Data History can mark them after the
+                    # values are substituted. `_`-prefixed, so cast_arguments never forwards it.
+                    dynamic = {}
                     for k, v in tmpl_step.get("params", {}).items():
                         if isinstance(v, str) and v.startswith("#"):
                             var_name = v[1:]
+                            if not k.startswith("_"):
+                                dynamic[k] = var_name
                             if var_name in iteration_values:
                                 values_for_var = iteration_values[var_name]
                                 args[k] = values_for_var[global_iteration] if global_iteration < len(values_for_var) else v
@@ -1270,6 +1376,8 @@ class WorkflowQueueManager:
                                 args[k] = suggestion.get(var_name, v)
                         else:
                             args[k] = v
+                    if dynamic:
+                        args["_vars"] = dynamic
 
                     db_step = WorkflowStep(
                         run_id=run_id,

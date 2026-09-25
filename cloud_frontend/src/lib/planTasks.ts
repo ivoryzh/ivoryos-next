@@ -12,7 +12,7 @@
  */
 
 import { RunConfigError, resolveBlockParams } from '@ivoryos/shared-ui';
-import { blockOf } from './dag';
+import { blockOf, isCloudLogicNode } from './dag';
 import {
   buildNodeRun,
   repeatIntervalMs,
@@ -112,6 +112,24 @@ export function buildRunTasks(
     const head = nodeById.get(String(task.node_id));
     if (!head) {
       problems.push(`Step ${task.node_id} is no longer on the canvas.`);
+      continue;
+    }
+
+    // Cloud's own steps (Wait, User_Input, If) go to no device and carry no run payload. An If's
+    // variable may be written `#yield`, which names a value to *read*, not a placeholder to fill,
+    // so the placeholder checks below must not see it.
+    if (isCloudLogicNode(head)) {
+      rows.push({
+        run_id: task.run_id,
+        node_id: task.node_id,
+        device_id: task.device_id,
+        block: blockOf(head),
+        run: null,
+        members: [String(task.node_id)],
+        status: task.status,
+        repeat_every_ms: 0,
+        repeat_total: 0,
+      });
       continue;
     }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Play, RefreshCw, Download, Save, FilePlus2 } from 'lucide-react';
 import { useNodesState, useEdgesState, addEdge, Connection, Edge, Node } from '@xyflow/react';
 import CloudWorkflowEditor from '@/components/CloudWorkflowEditor';
@@ -12,11 +12,28 @@ import {
   type OptimizeConfig,
   type SpreadsheetRow,
   WorkflowPeek,
+  notify,
+  confirmDialog,
 } from '@ivoryos/shared-ui';
-import { validateGraph, isDynamicValue, effectiveParamValue, blankParamsOf } from '@/lib/dag';
+import { validateGraph, isDynamicValue, effectiveParamValue, blankParamsOf, TERMINAL_TASK_STATUSES, ACTIVE_TASK_STATUSES, isDeviceNode, deviceIdOf } from '@/lib/dag';
+import { graphSignature, isEmptyGraph } from '@/lib/graphSignature';
 import { runConfigOf, runModeOf, type NodeCadence, type RunMode } from '@/lib/runPayload';
 import RunConfigPanel, { ConfigurableNode } from '@/components/RunConfigPanel';
 import ScheduleDialog from '@/components/ScheduleDialog';
+
+/** The node every canvas starts from. */
+const startNode = (): Node => ({
+  id: 'start_node',
+  type: 'customCloudNode',
+  position: { x: 250, y: 100 },
+  data: {
+    targetDeviceId: '',
+    block: { id: 'start_block', instrument: 'Flow Control', method: 'Start', schema: { parameters: {} }, params: {} },
+  },
+});
+
+// A task still in flight, from the canvas's point of view: anything not yet in a terminal state.
+const LIVE_TASK_STATUSES = [...ACTIVE_TASK_STATUSES, 'blocked'];
 
 // A param written "#name" is a placeholder filled in at run time — the same convention the edge
 // Designer uses (scanDynamicParams). Parallel branches on this canvas are usually one protocol
@@ -64,12 +81,19 @@ export default function CloudDesignerPage() {
   const [currentWorkflowDescription, setCurrentWorkflowDescription] = useState<string>('');
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [taskStatuses, setTaskStatuses] = useState<any[]>([]);
   // Blank means "number it after the canvas's name" (the run route does that).
   const [experimentName, setExperimentName] = useState('');
 
+  // The signature of the graph as last saved or loaded; "Unsaved" means the canvas no longer
+  // matches it. The same rule as the edge Designer's badge (a content comparison, not a flag set by
+  // any change), so undoing an edit clears it again, and reopening the page never sets it.
+  // Persisted with the canvas, so the Library can ask the same question before replacing it.
+  const [savedSignature, setSavedSignature] = useState<string | null>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
+
   useEffect(() => {
     const saved = localStorage.getItem('cloud_workflow');
+    let loaded = false;
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -77,33 +101,37 @@ export default function CloudDesignerPage() {
         setEdges(parsed.edges || []);
         setCurrentWorkflowName(parsed.name || '');
         setCurrentWorkflowDescription(parsed.description || '');
+        setSavedSignature(typeof parsed.savedSignature === 'string'
+          ? parsed.savedSignature
+          // Persisted before signatures existed: an empty canvas has nothing unsaved, anything
+          // else cannot be vouched for.
+          : isEmptyGraph(parsed.nodes || [], parsed.edges || [])
+            ? graphSignature(parsed.nodes || [], parsed.edges || [], parsed.name || '', parsed.description || '')
+            : '');
+        loaded = true;
       } catch (e) {}
-    } else {
-      setNodes([{
-          id: 'start_node',
-          type: 'customCloudNode',
-          position: { x: 250, y: 100 },
-          data: { 
-              targetDeviceId: "",
-              block: {
-                  id: 'start_block',
-                  instrument: 'Flow Control',
-                  method: 'Start',
-                  schema: { parameters: {} },
-                  params: {}
-              }
-          }
-      }]);
     }
+    if (!loaded) {
+      const seed = [startNode()];
+      setNodes(seed);
+      setSavedSignature(graphSignature(seed, [], '', ''));
+    }
+    setHasLoaded(true);
   }, [setNodes, setEdges]);
 
+  const currentSignature = useMemo(
+    () => graphSignature(nodes, edges, currentWorkflowName, currentWorkflowDescription),
+    [nodes, edges, currentWorkflowName, currentWorkflowDescription],
+  );
+  const isUnsaved = hasLoaded && savedSignature !== null && currentSignature !== savedSignature;
+
   useEffect(() => {
-    if (nodes.length > 0) {
+    if (hasLoaded && nodes.length > 0) {
       localStorage.setItem('cloud_workflow', JSON.stringify({
-        nodes, edges, name: currentWorkflowName, description: currentWorkflowDescription
+        nodes, edges, name: currentWorkflowName, description: currentWorkflowDescription, savedSignature,
       }));
     }
-  }, [nodes, edges, currentWorkflowName, currentWorkflowDescription]);
+  }, [hasLoaded, nodes, edges, currentWorkflowName, currentWorkflowDescription, savedSignature]);
   
   const [isExecuting, setIsExecuting] = useState(false);
   const [health, setHealth] = useState<any>(null);
@@ -194,6 +222,9 @@ export default function CloudDesignerPage() {
           body_hash: s.body?.body_hash,
           // Typical duration from the device's own completed runs of it (edge runtime.py).
           runtime: s.body?.runtime || null,
+          // The device's own verdict on whether this still runs against its deck (edge
+          // compatibility.py). A broken one is kept out of the toolbox and flagged on the canvas.
+          compatibility: s.body?.compatibility || null,
         };
       }
       for (const device of devices) {
@@ -254,60 +285,51 @@ export default function CloudDesignerPage() {
     })();
   }, []);
 
+  // Polls while a run started here is live, and also while any node still shows an unfinished
+  // task -- which is what a reload mid-run leaves behind. Without the second case a User_Input
+  // step waiting for an answer after a reload could be answered but would never visibly move on.
+  const hasLiveTask = nodes.some(n => LIVE_TASK_STATUSES.includes((n.data as any)?.taskStatus?.status));
   useEffect(() => {
-    if (!activeRunId) return;
+    if (!activeRunId && !hasLiveTask) return;
     const interval = setInterval(async () => {
       try {
         const res = await fetch('/api/cloud-workflows/status');
-        const tasks = await res.json();
-        const currentRunTasks = tasks.filter((t: any) => t.runId === activeRunId);
-        setTaskStatuses(currentRunTasks);
-        
-        // Stop executing/polling if all tasks in the UI are completed or error
-        if (currentRunTasks.length > 0 && currentRunTasks.every((t: any) => t.status === 'completed' || t.status === 'error' || t.status === 'cancelled')) {
-           setActiveRunId(null);
+        const tasks: any[] = await res.json();
+        const relevant = activeRunId ? tasks.filter((t: any) => t.runId === activeRunId) : tasks;
+        setNodes(nds => nds.map(n => {
+          if (n.type !== 'customCloudNode') return n;
+          // Newest first from the route, so without a known run this is the node's latest task.
+          const fresh = relevant.find((t: any) => t.nodeId === n.id);
+          if (!fresh || JSON.stringify(fresh) === JSON.stringify((n.data as any).taskStatus)) return n;
+          return { ...n, data: { ...n.data, taskStatus: fresh } };
+        }));
+
+        if (activeRunId && relevant.length > 0 && relevant.every((t: any) => TERMINAL_TASK_STATUSES.includes(t.status))) {
+          setActiveRunId(null);
         }
       } catch (e) {}
     }, 1000);
     return () => clearInterval(interval);
-  }, [activeRunId]);
-
-  useEffect(() => {
-    setNodes(nds => nds.map(n => {
-      if (n.type === 'customCloudNode') {
-        const taskStatus = taskStatuses.find(t => t.nodeId === n.id);
-        if (taskStatus) {
-            return { ...n, data: { ...n.data, taskStatus } };
-        }
-      }
-      return n;
-    }));
-  }, [taskStatuses, setNodes]);
+  }, [activeRunId, hasLiveTask, setNodes]);
 
   // Mirrors the Designer's startNewWorkflow: "Clear" with a trash icon read as destroying
-  // something, when the behaviour is really "empty canvas, start the next one". Only asks when
-  // there is something to lose — a canvas holding just the seeded Start node is already empty.
-  const startNewWorkflow = () => {
-    const hasContent = nodes.some(n => n.id !== 'start_node') || edges.length > 0;
-    if (hasContent && !confirm("This clears the canvas and starts an untitled workflow.")) return;
-    setNodes([{
-        id: 'start_node',
-        type: 'customCloudNode',
-        position: { x: 250, y: 100 },
-        data: {
-            targetDeviceId: "",
-            block: {
-                id: 'start_block',
-                instrument: 'Flow Control',
-                method: 'Start',
-                schema: { parameters: {} },
-                params: {}
-            }
-        }
-    }]);
+  // something, when the behaviour is really "empty canvas, start the next one". Asks only when
+  // there is unsaved work to lose -- a saved graph is still in the Library, and a canvas holding
+  // just the seeded Start node has nothing to lose at all.
+  const startNewWorkflow = async () => {
+    if (isUnsaved && !isEmptyGraph(nodes, edges)) {
+      const ok = await confirmDialog(
+        'This canvas has changes that are not saved to the Library. Start a new workflow anyway?',
+        { title: 'Discard unsaved changes?', confirmLabel: 'Discard and start new', tone: 'danger' },
+      );
+      if (!ok) return;
+    }
+    const seed = [startNode()];
+    setNodes(seed);
     setEdges([]);
     setCurrentWorkflowName("");
     setCurrentWorkflowDescription("");
+    setSavedSignature(graphSignature(seed, [], '', ''));
   };
 
   const exportJSON = () => {
@@ -326,9 +348,9 @@ export default function CloudDesignerPage() {
     URL.revokeObjectURL(url);
   };
 
-  const saveToLibrary = () => {
-    if (!currentWorkflowName) {
-      alert("Please enter a workflow name before saving.");
+  const saveToLibrary = async () => {
+    if (!currentWorkflowName.trim()) {
+      await notify('Give the workflow a name (top left) before saving it.', { title: 'Name needed' });
       return;
     }
     const saved = localStorage.getItem('cloud_saved_workflows');
@@ -351,7 +373,8 @@ export default function CloudDesignerPage() {
     }
     
     localStorage.setItem('cloud_saved_workflows', JSON.stringify(library));
-    alert(`Workflow '${currentWorkflowName}' saved to Cloud Library!`);
+    // The badge is the confirmation: "Unsaved" disappearing says it landed.
+    setSavedSignature(currentSignature);
   };
 
   /** Optimizer backends the node's target device reported in its published schema. */
@@ -465,6 +488,31 @@ export default function CloudDesignerPage() {
    * differently: an empty box is an incomplete *step* and is fixed on the node, while a #name is a
    * complete step whose value belongs to the *run* and is collected in the panel.
    */
+  /**
+   * Devices this graph sends steps to that are not online right now. A run is refused while there
+   * are any: Cloud would otherwise accept it and hold those steps indefinitely, so a run that
+   * looked started would sit waiting for a device nobody knew was down. (The run route checks
+   * too; this is only so the answer is immediate.)
+   */
+  const offlineTargets = (): string[] => {
+    const targets = new Set(nodes.filter(isDeviceNode).map(n => deviceIdOf(n)).filter(Boolean));
+    return Array.from(targets).filter(id => {
+      const device = cloudDevices.find(d => String(d.id) === id);
+      return !String(device?.status || '').includes('online');
+    });
+  };
+
+  const refuseIfOffline = async (): Promise<boolean> => {
+    const offline = offlineTargets();
+    if (!offline.length) return false;
+    await notify(
+      `${offline.join(', ')} ${offline.length === 1 ? 'is' : 'are'} offline, so this run cannot start. `
+        + 'Bring the device back online (or point those steps at another device) and run again.',
+      { title: 'Device offline', tone: 'error' },
+    );
+    return true;
+  };
+
   const runDistributedWorkflow = async () => {
     if (nodes.length === 0) return;
 
@@ -477,13 +525,15 @@ export default function CloudDesignerPage() {
       // Point at the offending nodes on the canvas as well as naming them, so a large graph does
       // not turn a list of ids into a search.
       setInvalidNodeIds(nodes.filter(n => blankParamsOf(n).length > 0).map(n => String(n.id)));
-      alert(problems.map(p => p.message).join('\n\n'));
+      await notify(problems.map(p => p.message).join('\n\n'), { title: 'This workflow cannot run yet', tone: 'error' });
       return;
     }
     setInvalidNodeIds([]);
 
+    if (await refuseIfOffline()) return;
+
     if (hasBareHash(nodes)) {
-      alert("'#' needs a variable name after it (e.g. '#temperature').");
+      await notify("'#' needs a variable name after it (e.g. '#temperature').", { tone: 'error' });
       return;
     }
 
@@ -502,6 +552,8 @@ export default function CloudDesignerPage() {
   };
 
   const dispatchRun = async () => {
+    // Checked again here: the run panel can stay open while a device drops.
+    if (await refuseIfOffline()) return;
     setShowConfigPanel(false);
     setIsExecuting(true);
     try {
@@ -529,7 +581,7 @@ export default function CloudDesignerPage() {
          throw new Error(data.error || 'Failed to dispatch workflow');
       }
     } catch (e: any) {
-      alert(`Error starting execution: ${e.message}`);
+      await notify(e.message, { title: 'Could not start the run', tone: 'error' });
     } finally {
       setIsExecuting(false);
     }
@@ -564,21 +616,25 @@ export default function CloudDesignerPage() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
-          onNodeClick={(node) => {
-            if ((node.data as any)?.block?.instrument === LIBRARY_INSTRUMENT) setPeekNodeId(String(node.id));
-          }}
+          // An explicit button on the card, not a click anywhere on it: clicking into a field to
+          // type used to count as "open", and the side panel popped over what was being edited.
+          onOpenNode={(node) => setPeekNodeId(String(node.id))}
           header={
             <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10 relative">
               {/* Same layout and button vocabulary as the edge Designer's header, so moving
                   between the two does not mean relearning which button is which. */}
               <div className="flex flex-col justify-center flex-1 mr-4 space-y-1 min-w-0">
-                <input
-                  type="text"
-                  value={currentWorkflowName}
-                  onChange={(e) => setCurrentWorkflowName(e.target.value)}
-                  placeholder="Workflow Name"
-                  className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
-                />
+                <div className="flex items-center gap-2 min-w-0">
+                  <input
+                    type="text"
+                    value={currentWorkflowName}
+                    onChange={(e) => setCurrentWorkflowName(e.target.value)}
+                    placeholder="Workflow Name"
+                    className="min-w-0 text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
+                  />
+                  {/* Same badge as the edge Designer's. */}
+                  {isUnsaved && <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 text-[10px] font-bold uppercase tracking-wider">Unsaved</span>}
+                </div>
                 <input
                   type="text"
                   value={currentWorkflowDescription}
@@ -677,6 +733,14 @@ export default function CloudDesignerPage() {
             latestVersion={head}
             note={<>These are the steps of <strong className="font-semibold">{String(block.method)}</strong> as {deviceId || 'its device'} last published it. Edit it on the device; {ref.mode === 'latest' ? 'this step runs the latest saved version.' : `this step runs v${ref.version} until you update it.`}</>}
             onClose={() => setPeekNodeId(null)}
+            // Edits go to the device's own library through Edge Sequence (pushed and echoed back,
+            // AGENTS.md section 0), not into this node: the node links the workflow and runs its
+            // latest version, so a saved edit is what the next run does. This canvas is kept in
+            // localStorage, so nothing here is lost by leaving.
+            editLabel="Edge Sequence"
+            onEdit={deviceId ? () => {
+              window.location.href = `/edge-sequence?deviceId=${encodeURIComponent(deviceId)}&sequence=${encodeURIComponent(String(block.method))}`;
+            } : undefined}
             onUpdate={() => {
               setNodes(nds => nds.map(n => (String(n.id) !== peekNodeId ? n : {
                 ...n,

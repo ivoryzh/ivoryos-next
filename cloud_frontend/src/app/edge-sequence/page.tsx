@@ -4,6 +4,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Play, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import { useDocumentTheme } from '@/lib/useDocumentTheme';
 import {
   WorkflowEditor,
   SequenceBlock,
@@ -40,7 +41,8 @@ export default function DesignerPage() {
     results: {}
   });
   
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  // Read from the page, never set here: see useDocumentTheme for how owning a copy broke it.
+  const theme = useDocumentTheme();
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
@@ -126,11 +128,6 @@ export default function DesignerPage() {
 
   // Fetch status on mount
   useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-    
     // Load saved sequence if exists
     const savedSeq = localStorage.getItem('ivoryos_sequence');
     if (savedSeq) {
@@ -285,13 +282,6 @@ export default function DesignerPage() {
     }
   }, [sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   // Mirrors the Designer's startNewWorkflow (frontend/src/app/designer/page.tsx). Was "Clear"
   // with a red trash icon, which read as destroying something rather than starting the next

@@ -3,7 +3,8 @@
 import { useState, useEffect } from 'react';
 import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cpu, AlertTriangle } from 'lucide-react';
 import { graphProblems } from '@/lib/libraryCheck';
-import { runtimeSummary, type WorkflowRuntime } from '@ivoryos/shared-ui';
+import { runtimeSummary, confirmDialog, notify, type WorkflowRuntime } from '@ivoryos/shared-ui';
+import { graphSignature, storedCanvasIsUnsaved } from '@/lib/graphSignature';
 
 type Problem = { where?: string; message: string };
 
@@ -132,20 +133,36 @@ export default function CloudLibraryPage() {
      return 0;
   });
 
-  const loadWorkflow = (workflow: WorkflowItem) => {
+  const loadWorkflow = async (workflow: WorkflowItem) => {
     if (workflow.type === 'edge') {
       window.location.href = `/edge-sequence?deviceId=${encodeURIComponent(workflow.device_id)}&sequence=${encodeURIComponent(workflow.name)}`;
       return;
     }
+    // The same guard as the edge Library: loading replaces the Orchestrator canvas, so work on it
+    // that was never saved would be lost without a word.
+    if (storedCanvasIsUnsaved()) {
+      const ok = await confirmDialog(
+        'The Orchestrator canvas has changes that are not saved to the Library. Open this workflow anyway and discard them?',
+        { title: 'Discard unsaved changes?', confirmLabel: 'Discard and open', tone: 'danger' },
+      );
+      if (!ok) return;
+    }
     try {
+      const nodes = workflow.nodes || [];
+      const edges = workflow.edges || [];
+      const description = workflow.description || '';
       localStorage.setItem('cloud_workflow', JSON.stringify({
-        nodes: workflow.nodes,
-        edges: workflow.edges,
-        name: workflow.name
+        nodes,
+        edges,
+        name: workflow.name,
+        // Dropped here before, so every workflow reopened from the Library lost its description.
+        description,
+        // Just loaded, so by definition unchanged: the canvas opens without "Unsaved".
+        savedSignature: graphSignature(nodes, edges, workflow.name, description),
       }));
       window.location.href = '/';
     } catch (e: any) {
-      alert("Failed to load workflow: " + e.message);
+      await notify(`Failed to load workflow: ${e.message}`, { tone: 'error' });
     }
   };
 

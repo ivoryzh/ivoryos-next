@@ -26,7 +26,10 @@ const fs = require('fs');
 // are shared verbatim with the Next.js run route rather than reimplemented here. Plain CommonJS
 // precisely so this build-step-free process can require it; see that module's header for why the
 // two copies that used to exist disagreed.
-const { TERMINAL_TASK_STATUSES, computeAdvance } = require('./src/lib/dag.js');
+const {
+    TERMINAL_TASK_STATUSES, CLOUD_DEVICE_ID, computeAdvance, evaluateCondition,
+} = require('./src/lib/dag.js');
+const { runContext } = require('./src/lib/cloudLogic.js');
 const { getStore, resolveBrokerUrl } = require('./src/lib/store');
 const { startEmbeddedBroker } = require('./src/lib/embedded-broker.js');
 
@@ -286,7 +289,7 @@ async function advanceRun(runId) {
     const tasks = await store.listRunTasks(runId);
     if (!tasks) return;
 
-    const { unblock, cancel, runStatus, stalled } = computeAdvance(run.nodes, run.edges, tasks);
+    const { unblock, cancel, skip, runStatus, stalled } = computeAdvance(run.nodes, run.edges, tasks);
 
     // Guarded on 'blocked' for the same reason dispatch claims before publishing: two task-status
     // messages landing together can run this twice concurrently, and a task already dispatched
@@ -300,6 +303,12 @@ async function advanceRun(runId) {
         const done = await store.updateTaskStatusFrom(runId, nodeId, 'blocked', 'cancelled');
         if (done) console.log(`[Daemon] Run ${runId}: cancelled ${nodeId} (${reason}).`);
     }
+
+    // An If's untaken branch (see dag.js rule 4).
+    for (const nodeId of skip) {
+        await store.updateTaskStatusFrom(runId, nodeId, 'blocked', 'skipped');
+    }
+    if (skip.length) console.log(`[Daemon] Run ${runId}: skipped ${skip.join(', ')} (branch not taken).`);
 
     if (runStatus !== 'running') {
         await store.updateRunStatus(runId, runStatus);
@@ -353,6 +362,19 @@ function deviceNotReady(deviceId) {
 async function dispatchTask(task) {
     if (!task || task.status !== 'pending') return;
 
+    // A Cloud Logic step is Cloud's own work: claimed here, carried out by the sweep below. It
+    // never touches a device queue, so it is not held behind a busy device either.
+    if (String(task.device_id) === CLOUD_DEVICE_ID) {
+        const claimed = await store.updateTaskStatusFrom(
+            task.run_id, task.node_id, 'pending', 'running', { dispatched: true },
+        );
+        if (claimed) {
+            console.log(`[Daemon] Cloud step ${task.run_id}/${task.node_id} (${(task.block || {}).method}) started.`);
+            await stepCloudTask({ ...task, status: 'running', dispatched_at: new Date().toISOString(), progress: null });
+        }
+        return;
+    }
+
     // The busy check and the claim must not interleave for one device: two ready tasks arriving
     // together would both see it idle and both be sent. The daemon is a single process, so an
     // in-memory guard is enough; the DB state takes over once the claim has landed.
@@ -404,6 +426,105 @@ async function dispatchTask(task) {
         }
         console.log(`[Daemon] Dispatched ${task.run_id}/${task.node_id} to ${task.device_id}`);
     });
+}
+
+// --- Cloud Logic: the steps Cloud runs itself (dag.js rule 3) --------------------------------
+// Wait, User_Input and If. Each one is advanced by `stepCloudTask`, which is idempotent and reads
+// everything it needs from the stored row -- when it started (`dispatched_at`), what it is waiting
+// for (`progress`) -- so a daemon restart mid-Wait or mid-question simply picks up where it was on
+// the next sweep. Nothing here lives in a timer that a restart would lose.
+//
+// The outcome goes in `progress`: the If's branch (read by computeAdvance), the answer to a
+// User_Input (read by a later If through runContext), and a message when it failed.
+
+// How long an If waits for the value it tests before calling it missing. The edge sends a task's
+// results before its final status, so the value is normally there already; this only covers a
+// result message delayed past its status.
+const IF_VALUE_GRACE_MS = 10000;
+
+const bareName = (v) => String(v === undefined || v === null ? '' : v).trim().replace(/^#/, '');
+
+function paramOf(block, key) {
+    const params = block.params || {};
+    if (params[key] !== undefined && params[key] !== '') return params[key];
+    return (((block.schema || {}).parameters || {})[key] || {}).default;
+}
+
+/** Small enough to show on a card: a whole object as a value would not be. */
+function displayValue(v) {
+    if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) return v;
+    const s = JSON.stringify(v);
+    return s.length > 120 ? `${s.slice(0, 117)}...` : s;
+}
+
+async function finishCloudTask(task, status, progress) {
+    const moved = await store.updateTaskStatusIfNotTerminal(
+        task.run_id, task.node_id, status, TERMINAL_TASK_STATUSES, progress,
+    );
+    if (!moved) return;
+    console.log(`[Daemon] Cloud step ${task.run_id}/${task.node_id} -> ${status}`
+        + (progress && progress.branch ? ` (took the ${progress.branch} branch)` : '')
+        + (progress && progress.message ? `: ${progress.message}` : ''));
+    await advanceRun(task.run_id);
+}
+
+async function setCloudProgress(task, progress) {
+    if (JSON.stringify(task.progress || null) === JSON.stringify(progress)) return;
+    await store.updateTaskStatusIfNotTerminal(task.run_id, task.node_id, 'running', TERMINAL_TASK_STATUSES, progress);
+}
+
+async function stepCloudTask(task) {
+    const block = task.block || {};
+    const started = Date.parse(task.dispatched_at || '') || Date.now();
+    const progress = (task.progress && typeof task.progress === 'object') ? task.progress : {};
+
+    if (block.method === 'Wait') {
+        const seconds = Number(paramOf(block, 'seconds')) || 0;
+        const until = started + seconds * 1000;
+        if (Date.now() >= until) return finishCloudTask(task, 'completed', { state: 'done', seconds });
+        return setCloudProgress(task, { state: 'waiting', seconds, until: new Date(until).toISOString() });
+    }
+
+    if (block.method === 'User_Input') {
+        // The answer is written by the input route; completing the step is left to this process
+        // so the daemon stays the only thing that advances a run.
+        if (progress.answer !== undefined) return finishCloudTask(task, 'completed', { ...progress, state: 'answered' });
+        return setCloudProgress(task, {
+            state: 'waiting_input',
+            prompt: String(paramOf(block, 'prompt') || ''),
+            save_as: bareName(paramOf(block, 'save_as')),
+        });
+    }
+
+    if (block.method === 'If') {
+        const variable = bareName(paramOf(block, 'variable'));
+        const operator = String(paramOf(block, 'operator') || '');
+        const expected = paramOf(block, 'value');
+        const ctx = runContext(await store.listRunTaskRecords(task.run_id));
+        if (!Object.prototype.hasOwnProperty.call(ctx, variable)) {
+            if (Date.now() - started < IF_VALUE_GRACE_MS) {
+                return setCloudProgress(task, { state: 'waiting', note: `waiting for ${variable}` });
+            }
+            const known = Object.keys(ctx);
+            return finishCloudTask(task, 'error', {
+                state: 'error',
+                message: `No earlier step saved a value named '${variable}'.`
+                    + (known.length ? ` Saved so far: ${known.slice(0, 8).join(', ')}.` : ''),
+            });
+        }
+        let taken;
+        try {
+            taken = evaluateCondition(ctx[variable], operator, expected);
+        } catch (e) {
+            return finishCloudTask(task, 'error', { state: 'error', message: e.message });
+        }
+        return finishCloudTask(task, 'completed', {
+            state: 'done', branch: taken ? 'true' : 'false',
+            variable, actual: displayValue(ctx[variable]), operator, value: expected,
+        });
+    }
+
+    return finishCloudTask(task, 'error', { state: 'error', message: `Cloud cannot run '${block.method}'.` });
 }
 
 // In cloud mode the store's Realtime subscription only streams changes going forward, so the
@@ -609,6 +730,8 @@ async function publishCloudQueues() {
     const schedules = (await store.listSchedules()).filter(s => s.enabled && s.next_fire_at);
     const devices = new Set([...deviceState.keys()].filter(id => deviceState.get(id).online));
     for (const t of waiting) devices.add(String(t.device_id));
+    // Cloud's own steps wait on no device, and there is no device to tell.
+    devices.delete(CLOUD_DEVICE_ID);
 
     for (const deviceId of devices) {
         const mine = waiting.filter(t => String(t.device_id) === deviceId);
@@ -644,6 +767,9 @@ setInterval(async () => {
     try {
         await failLostTasks();
         for (const task of await store.listTasksByStatus('pending')) await dispatchTask(task);
+        for (const task of await store.listTasksByStatus('running')) {
+            if (String(task.device_id) === CLOUD_DEVICE_ID) await stepCloudTask(task);
+        }
     } catch (e) {
         console.error('[Daemon] Due-task sweep failed:', e.message);
     }

@@ -36,6 +36,8 @@ type Props = {
   /** Opens the linked workflow itself for editing. Host-provided: only the page knows how to
    *  deal with whatever is currently unsaved on the canvas. */
   onEdit?: () => void;
+  /** Where Edit goes, for the button's text. Cloud edits in Edge Sequence, not the Designer. */
+  editLabel?: string;
   /** Replaces the default read-only note, which talks about detaching (a Designer action). */
   note?: React.ReactNode;
 };
@@ -67,7 +69,7 @@ function resolved(value: any, params: Record<string, any>) {
 }
 
 export function WorkflowPeek({
-  target, body, isLoading, error, latestVersion, onClose, onDetach, onUpdate, onEdit, note,
+  target, body, isLoading, error, latestVersion, onClose, onDetach, onUpdate, onEdit, editLabel, note,
 }: Props) {
   useEffect(() => {
     if (!target) return;
@@ -221,7 +223,7 @@ export function WorkflowPeek({
                   className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 dark:bg-white/5 dark:border-indigo-700/40 dark:text-indigo-300 dark:hover:bg-white/10"
                 >
                   <PencilLine className="w-4 h-4" />
-                  Edit {target.name} in the Designer
+                  Edit {target.name} in {editLabel || 'the Designer'}
                 </button>
                 <p className="text-[10px] text-gray-400 dark:text-gray-500 text-center">
                   Opens the linked workflow itself. Changes there affect every workflow linking to it.

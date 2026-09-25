@@ -152,16 +152,18 @@ export function ExtraArguments({
             value={row.name}
             placeholder="name"
             onChange={e => update(row.id, { name: e.target.value })}
-            className={`${inputClass} ${stacked ? 'w-1/2' : 'w-24'}`}
+            // Both halves share the row equally. `w-1/2` beside a `flex-1` let the value input's
+            // intrinsic width win and squeezed the name box down to nothing on a narrow card.
+            className={`${inputClass} ${stacked ? 'flex-1 min-w-0' : 'w-24'}`}
           />
-          <span className="text-gray-400 dark:text-gray-600 text-[11px]">=</span>
+          <span className="text-gray-400 dark:text-gray-600 text-[11px] shrink-0">=</span>
           <input
             type="text"
             list={valueSuggestions.length > 0 ? valueListId : undefined}
             value={row.value}
             placeholder="value"
             onChange={e => update(row.id, { value: e.target.value })}
-            className={`${inputClass} ${stacked ? 'flex-1' : 'w-24'}`}
+            className={`${inputClass} ${stacked ? 'flex-1 min-w-0' : 'w-24'}`}
           />
           <button
             type="button"

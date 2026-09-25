@@ -1551,9 +1551,12 @@ export default function WorkflowEditor({
                                   {/* Top Row: Info & Controls */}
                                   <div
                                     onClick={() => ((!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock) && toggleExpand(block.id, listId)}
-                                    className={`px-3 py-1.5 flex items-center justify-between ${(!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
+                                    className={`px-3 py-1.5 flex flex-wrap items-center justify-between gap-y-1.5 ${(!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
                                   >
-                                    <div className="flex items-center min-w-0 flex-1">
+                                    {/* The name keeps at least this much room; below it the controls
+                                        wrap onto their own line instead of the name running
+                                        underneath them, which is what a narrow canvas used to do. */}
+                                    <div className="flex items-center min-w-[13rem] flex-1">
                                       {/* Only in select mode, so the cards stay uncluttered the rest
                                           of the time. A real checkbox, so drag-and-drop refuses to
                                           start on it and ticking one never becomes a drag. */}
@@ -1567,13 +1570,16 @@ export default function WorkflowEditor({
                                           className="mr-2 shrink-0 accent-indigo-600 cursor-pointer"
                                         />
                                       )}
-                                      <div className={`flex items-center space-x-2 ${!isFlowBlock && !hasParams ? 'ml-1' : ''}`}>
+                                      <div className={`flex items-center space-x-2 min-w-0 ${!isFlowBlock && !hasParams ? 'ml-1' : ''}`}>
                                         {!isFlowBlock && (
                                           <span title={block.instrument.replace(/_/g, ' ')} className="w-28 shrink-0 truncate text-center text-[10px] font-semibold px-2 py-0.5 bg-gray-100 text-gray-600 border border-gray-200 dark:bg-white/10 dark:text-gray-300 dark:border-white/5 rounded-md capitalize">
                                             {block.instrument.replace(/_/g, ' ')}
                                           </span>
                                         )}
-                                        <span className={`text-[13px] tracking-tight ${isLibraryBlock ? '' : 'capitalize'} ${isFlowBlock ? flowTextClass : 'text-gray-800 dark:text-gray-100 font-medium'}`}>
+                                        <span
+                                          title={isLibraryBlock ? block.method : block.method.replace(/_/g, ' ')}
+                                          className={`text-[13px] tracking-tight truncate min-w-0 ${isFlowBlock ? '' : 'whitespace-nowrap'} ${isLibraryBlock ? '' : 'capitalize'} ${isFlowBlock ? flowTextClass : 'text-gray-800 dark:text-gray-100 font-medium'}`}
+                                        >
                                           {isLibraryBlock ? block.method : block.method.replace(/_/g, ' ')}
                                           {blockWarnings.length > 0 && (
                                             <span title={blockWarnings.join('\n')} className="inline-flex items-center ml-1.5 cursor-help">
@@ -1628,7 +1634,7 @@ export default function WorkflowEditor({
                                         )}
                                       </div>
                                     </div>
-                                    <div className="flex items-center space-x-2 shrink-0 ml-4">
+                                    <div className="flex items-center space-x-2 shrink-0 ml-auto pl-4">
                                       {/* Return Variable Logic */}
                                       {(() => {
                                         if (isFlowBlock || listId === 'prep' || listId === 'cleanup') return null;

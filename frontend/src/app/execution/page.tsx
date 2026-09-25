@@ -157,7 +157,7 @@ export default function ExecutionPage() {
     else document.documentElement.classList.remove('dark');
 
 
-    fetch(`${API_BASE}/api/queue/runs`)
+    fetch(`${API_BASE}/api/queue/runs?recent=1`)
       .then(res => res.json())
       .then(data => {
         if (data.runs) {
@@ -520,6 +520,11 @@ export default function ExecutionPage() {
   // `groupSizeFor` that `expandSpreadsheet` uses — that shared call is what keeps the display and
   // the real behaviour from drifting apart, which they have done before.
   const hasBatchStep = sequence.some(b => b.isBatchAction);
+  // Batch size is not only about batch steps: within a batch the walk is step-major (every row's
+  // step 1, then every row's step 2), so it also decides whether rows interleave. Blank is 1 —
+  // each row start to finish — and the field shows whenever there are rows to group.
+  const hasBatchSize = parseInt(batchSize) > 1;
+  const activeRowCount = rows.filter(r => Object.values(r || {}).some(v => v !== undefined && v !== null && v !== '')).length;
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
@@ -620,7 +625,7 @@ export default function ExecutionPage() {
               varOptions={varOptions}
               batchVariables={batchVariables}
               batchSize={batchSize}
-              showBatchGrouping={hasBatchStep}
+              showBatchGrouping={hasBatchStep || hasBatchSize}
               idPrefix="configure"
             />
           )}
@@ -628,14 +633,14 @@ export default function ExecutionPage() {
           {(variables.length > 0 || globalVariables.length > 0) && (
             <div className="flex flex-col items-end pt-4 gap-2">
               <div className="flex items-center gap-2">
-                {sequence.some(b => b.isBatchAction) && (
-                  <div className="flex items-center gap-2" title="How many spreadsheet rows make up one batch. Batch steps run once per group of this many rows instead of once per row.">
+                {variables.length > 0 && (
+                  <div className="flex items-center gap-2" title={`How many spreadsheet rows make up one batch. Within a batch, each step runs for every row before the next step starts${hasBatchStep ? ', and batch steps run once for the whole batch' : ''}. Blank or 1 runs each row start to finish.`}>
                     <Layers className="w-4 h-4 text-teal-600 dark:text-teal-400" />
                     <label className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider whitespace-nowrap">Batch Size</label>
                     <input
                       type="number"
                       min="1"
-                      placeholder={String(rows.length)}
+                      placeholder="1"
                       value={batchSize}
                       onChange={e => setBatchSize(e.target.value)}
                       className="w-16 px-2 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 focus:outline-none focus:border-teal-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200"
@@ -687,8 +692,8 @@ export default function ExecutionPage() {
         onClose={() => setIsMapOpen(false)}
         fetchExpansion={fetchExpansion}
         spreadsheet={{
-          rows: rows.length,
-          batchSize: parseInt(batchSize) || rows.length,
+          rows: activeRowCount,
+          batchSize: parseInt(batchSize) || 1,
           // Bound to the page's real setting rather than a private what-if, so the grouping the
           // preview shows is always the grouping that will run.
           onBatchSizeChange: (size: number) => setBatchSize(String(size)),

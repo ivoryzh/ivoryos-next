@@ -17,7 +17,7 @@ export default function GlobalQueueBar() {
         try {
             const [statusRes, queueRes] = await Promise.all([
                 fetch(`${API_BASE}/api/status`),
-                fetch(`${API_BASE}/api/queue/runs`)
+                fetch(`${API_BASE}/api/queue/runs?recent=10`)
             ]);
             const statusData = await statusRes.json();
             const queueData = await queueRes.json();

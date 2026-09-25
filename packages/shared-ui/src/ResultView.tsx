@@ -11,59 +11,11 @@ import React, { useState } from 'react';
  * legible — worse in the Instruments log, where results are stacked one above another and the
  * punctuation is most of what you see.
  *
- * So: keys become labels, unit suffixes move out of the name and next to the number where they
- * read as units, and nesting becomes indentation instead of braces. The raw JSON stays one click
- * away, because "what exactly did the driver send" is a real question too — just not the common
- * one.
+ * So: one Field | Value row per leaf, keyed by the driver's own field names. Field names are shown
+ * as written — units are deliberately not guessed from suffixes (`_c` as °C, `_m` as metres or
+ * molar?), since a wrong unit beside a number is worse than none. The raw JSON stays one click
+ * away, because "what exactly did the driver send" is a real question too.
  */
-
-// Only suffixes that are unambiguous in this domain. `_m` (metres? molar?) and `_mm`
-// (millimetres? millimolar?) are deliberately absent: guessing wrong puts a false unit next to a
-// number, which is worse than leaving the suffix in the label where it is at least honest.
-// Longest first, so `_ml_per_min` is not eaten by `_min`, and `_celsius` not by `_c`.
-const UNIT_SUFFIXES: ReadonlyArray<readonly [string, string]> = [
-  ['_ml_per_min', 'mL/min'],
-  ['_ml_min', 'mL/min'],
-  ['_deg_c', '°C'],
-  ['_celsius', '°C'],
-  ['_seconds', 's'],
-  ['_minutes', 'min'],
-  ['_percent', '%'],
-  ['_hours', 'h'],
-  ['_pct', '%'],
-  ['_rpm', 'rpm'],
-  ['_sec', 's'],
-  ['_min', 'min'],
-  ['_ml', 'mL'],
-  ['_ul', 'µL'],
-  ['_mg', 'mg'],
-  ['_kg', 'kg'],
-  ['_nm', 'nm'],
-  ['_cm', 'cm'],
-  ['_hr', 'h'],
-  ['_g', 'g'],
-  ['_c', '°C'],
-];
-
-/** Split a key into the label people read and the unit that belongs beside the value. */
-export function labelAndUnit(key: string): { label: string; unit: string } {
-  const lower = key.toLowerCase();
-  for (const [suffix, unit] of UNIT_SUFFIXES) {
-    // Never strip a key down to nothing: a field literally called "min" is a name, not a unit.
-    if (lower.endsWith(suffix) && lower.length > suffix.length) {
-      return { label: humanize(key.slice(0, key.length - suffix.length)), unit };
-    }
-  }
-  return { label: humanize(key), unit: '' };
-}
-
-/** "substrate_remaining_percent" -> "Substrate remaining". Sentence case, not Title Case: a row
- *  of Capitalised Words reads like a headline and is harder to scan than a phrase. */
-function humanize(key: string): string {
-  const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
-  if (!words) return key;
-  return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
-}
 
 /** Floats out of a simulation arrive as 0.30000000000000004; nobody needs those digits. */
 function formatNumber(n: number): string {
@@ -89,64 +41,50 @@ function Scalar({ value }: { value: unknown }) {
   return <span>{String(value)}</span>;
 }
 
-function Rows({ value, depth }: { value: Record<string, unknown>; depth: number }) {
+/**
+ * One table row per leaf, keyed by its dotted path. Nested models used to render as indented
+ * blocks with dotted leaders, which read as prose rather than data; a flat Field | Value table is
+ * what people scan down, and the path still says where a nested value came from.
+ */
+function flatten(value: unknown, path: string[], out: { path: string[]; value: unknown }[]) {
+  if (isPlainObject(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 0) out.push({ path, value: '' });
+    for (const [k, v] of entries) flatten(v, [...path, k], out);
+  } else if (Array.isArray(value) && value.some(item => isPlainObject(item) || Array.isArray(item))) {
+    value.forEach((item, i) => flatten(item, [...path, String(i + 1)], out));
+  } else {
+    out.push({ path, value });
+  }
+  return out;
+}
+
+function ResultTable({ value }: { value: unknown }) {
+  const leaves = flatten(value, [], []);
   return (
-    <div className={depth > 0 ? 'pl-3 border-l border-gray-200 dark:border-white/10 space-y-0.5' : 'space-y-0.5'}>
-      {Object.entries(value).map(([key, v]) => {
-        const { label, unit } = labelAndUnit(key);
-
-        if (isPlainObject(v)) {
+    <table className="w-full text-xs border-collapse">
+      <tbody>
+        {leaves.map(({ path, value: v }) => {
+          const label = path[path.length - 1] ?? '';
+          const parents = path.slice(0, -1);
           return (
-            <div key={key} className="pt-0.5">
-              <div className="text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500">{label}</div>
-              <Rows value={v} depth={depth + 1} />
-            </div>
+            <tr key={path.join('.')} className="border-b last:border-b-0 border-gray-100 dark:border-white/5 align-top">
+              <td className="py-1 pr-4 font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap w-0">
+                {parents.length > 0 && <span className="text-gray-400 dark:text-gray-500">{parents.join('.')}.</span>}
+                {label}
+              </td>
+              <td className="py-1 text-gray-800 dark:text-gray-200 break-words" style={{ overflowWrap: 'anywhere' }}>
+                {Array.isArray(v)
+                  ? (v.length === 0
+                    ? <span className="text-gray-400 dark:text-gray-600">empty</span>
+                    : <span className="font-mono">{v.map(item => (typeof item === 'number' ? formatNumber(item) : String(item))).join(', ')}</span>)
+                  : <Scalar value={v} />}
+              </td>
+            </tr>
           );
-        }
-
-        if (Array.isArray(v)) {
-          // A list of scalars reads as a list; a list of objects needs its own indexed blocks or
-          // the fields of item 1 and item 2 run together into one undifferentiated column.
-          const allScalar = v.every(item => !isPlainObject(item) && !Array.isArray(item));
-          return (
-            <div key={key} className="pt-0.5">
-              <div className="text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500">
-                {label}{v.length > 0 && <span className="normal-case font-normal"> ({v.length})</span>}
-              </div>
-              {v.length === 0 ? (
-                <span className="text-gray-400 dark:text-gray-600">empty</span>
-              ) : allScalar ? (
-                <div className="font-mono">{v.map(item => (typeof item === 'number' ? formatNumber(item) : String(item))).join(', ')}{unit && ` ${unit}`}</div>
-              ) : (
-                <div className="pl-3 border-l border-gray-200 dark:border-white/10 space-y-1">
-                  {v.map((item, i) => (
-                    <div key={i}>
-                      <div className="text-[10px] text-gray-400">#{i + 1}</div>
-                      {isPlainObject(item)
-                        ? <Rows value={item} depth={depth + 1} />
-                        : <Scalar value={item} />}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        }
-
-        return (
-          <div key={key} className="flex items-baseline gap-2">
-            <span className="text-gray-500 dark:text-gray-400 shrink-0">{label}</span>
-            {/* The dotted leader is what makes a stack of these scannable down the value column
-                without drawing a full table around four fields. */}
-            <span className="flex-1 min-w-0 border-b border-dotted border-gray-200 dark:border-white/10 translate-y-[-3px]" />
-            <span className="shrink-0 text-gray-800 dark:text-gray-200">
-              <Scalar value={v} />
-              {unit && <span className="text-gray-400 dark:text-gray-500 ml-1">{unit}</span>}
-            </span>
-          </div>
-        );
-      })}
-    </div>
+        })}
+      </tbody>
+    </table>
   );
 }
 
@@ -170,10 +108,8 @@ export function ResultView({ value, className = '' }: { value: unknown; classNam
       </button>
       {raw ? (
         <code className="block whitespace-pre-wrap break-all font-mono text-[10px]">{JSON.stringify(value, null, 1)}</code>
-      ) : Array.isArray(value) ? (
-        <Rows value={{ items: value }} depth={0} />
       ) : (
-        <Rows value={value} depth={0} />
+        <ResultTable value={value} />
       )}
     </div>
   );

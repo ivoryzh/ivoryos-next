@@ -115,7 +115,7 @@ export default function QueuePage() {
         // status can't be trusted to say so (see ACTIVE_STATUSES), so ask /api/status too. The
         // websocket delivers the same id inline as `status.active_workflow_id`.
         const [res, statusRes] = await Promise.all([
-          fetch(`${API_BASE}/api/queue/runs`),
+          fetch(`${API_BASE}/api/queue/runs?recent=10`),
           fetch(`${API_BASE}/api/status`),
         ]);
         const data = await res.json();

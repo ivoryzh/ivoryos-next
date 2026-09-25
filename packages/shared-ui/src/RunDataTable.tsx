@@ -8,10 +8,15 @@ import { cellText } from './runRecord';
  * "Export Data" writes (`datasheetCsv`) -- both read `run.variables` and `row.values`, so they
  * cannot disagree. Used by the edge's Data History and by Cloud's view of synced results.
  */
-export function RunDataTable({ run, title = 'data', maxHeight = '420px' }: {
+export function RunDataTable({ run, title = 'data', maxHeight = '420px', batchOf }: {
   run: { variables?: string[]; rows?: { row: number; status: string; values?: unknown[] }[] };
   title?: string;
   maxHeight?: string;
+  /**
+   * Which batch a row ran in, for a batched run. Draws the same teal divider and "Batch N" label
+   * the Configure spreadsheet uses, so the record looks like the table it was run from.
+   */
+  batchOf?: Map<number, number> | null;
 }) {
   if (!run.rows?.length || !run.variables?.length) return null;
   const variables = run.variables;
@@ -31,20 +36,29 @@ export function RunDataTable({ run, title = 'data', maxHeight = '420px' }: {
             </tr>
           </thead>
           <tbody>
-            {run.rows.map((row) => (
+            {run.rows.map((row, idx) => {
+              const batch = batchOf?.get(row.row);
+              const startsBatch = batch !== undefined && (idx === 0 || batchOf?.get(run.rows![idx - 1].row) !== batch);
+              return (
               <tr
                 key={row.row}
                 title={row.status}
-                className={`border-b border-gray-100 dark:border-white/5 ${row.status === 'error' ? 'bg-red-50/60 dark:bg-red-900/10' : 'hover:bg-gray-50 dark:hover:bg-white/[0.02]'}`}
+                className={`border-b border-gray-100 dark:border-white/5 ${startsBatch && idx > 0 ? 'border-t-2 border-t-teal-300 dark:border-t-teal-700/60' : ''} ${row.status === 'error' ? 'bg-red-50/60 dark:bg-red-900/10' : 'hover:bg-gray-50 dark:hover:bg-white/[0.02]'}`}
               >
-                <td className="px-3 py-1 text-right text-gray-400">{row.row}</td>
+                <td className="px-3 py-1 text-right text-gray-400 whitespace-nowrap">
+                  {startsBatch && (
+                    <span className="mr-1.5 text-[9px] font-sans font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400">Batch {batch}</span>
+                  )}
+                  {row.row}
+                </td>
                 {variables.map((v, i) => (
                   <td key={v} className="px-3 py-1 text-gray-800 dark:text-gray-200 whitespace-nowrap max-w-[16rem] truncate" title={cellText(row.values?.[i])}>
                     {cellText(row.values?.[i])}
                   </td>
                 ))}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

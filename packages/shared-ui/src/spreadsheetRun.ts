@@ -19,7 +19,7 @@
  *    grouping that waits for content never appears at all until someone starts typing.
  */
 
-import { RunConfigError, resolveBlockParams } from './runConfig';
+import { RunConfigError, dynamicArgumentsOf, resolveBlockParams } from './runConfig';
 import { isFlowControlInstrument } from './flowControl';
 
 export type SpreadsheetRow = Record<string, any>;
@@ -29,11 +29,14 @@ export const isRowActive = (row: SpreadsheetRow) =>
   Object.values(row || {}).some((v) => v !== undefined && v !== null && v !== '');
 
 /**
- * Rows per batch group. A blank/invalid batch size means "one group holding everything", which is
- * the legacy-equivalent behaviour — a batch step then fires exactly once for the whole run.
+ * Rows per batch group. A blank/invalid batch size means 1: each row runs the whole sequence start
+ * to finish before the next row begins, and a batch step runs once per row. Grouping rows is
+ * something a person asks for, never a default — an earlier default of "one group of every row"
+ * silently interleaved samples step by step, and counted the table's blank rows while doing it.
+ * Cloud's spreadsheet nodes already read a blank batch size this way.
  */
-export const groupSizeFor = (batchSize: string | number | undefined, rowCount: number) =>
-  Math.max(1, (typeof batchSize === 'number' ? batchSize : parseInt(String(batchSize ?? ''), 10)) || rowCount || 1);
+export const groupSizeFor = (batchSize: string | number | undefined) =>
+  Math.max(1, (typeof batchSize === 'number' ? batchSize : parseInt(String(batchSize ?? ''), 10)) || 1);
 
 export interface RowGroup {
   rows: SpreadsheetRow[];
@@ -75,6 +78,8 @@ export interface ExpandedSpreadsheetStep {
    */
   returnVar?: string;
   returnBindings?: any[];
+  /** `{argument: name}` for arguments that came from a `#name` — see `dynamicArgumentsOf`. */
+  vars?: Record<string, string>;
 }
 
 export interface ExpandOptions {
@@ -166,7 +171,7 @@ export function expandSpreadsheet(opts: ExpandOptions): ExpandedSpreadsheetStep[
     throw new RunConfigError('Fill in at least one row before running.');
   }
 
-  const groups = chunkRowGroups(rows, groupSizeFor(batchSize, rows.length));
+  const groups = chunkRowGroups(rows, groupSizeFor(batchSize));
   const segments = sequenceSegments(sequence);
 
   for (const group of groups) {
@@ -193,6 +198,7 @@ export function expandSpreadsheet(opts: ExpandOptions): ExpandedSpreadsheetStep[
             }),
             originalRow: group.start,
             originalBlockIndex: segment.start + k,
+            vars: dynamicArgumentsOf(block, skip),
             ...outputsOf(block),
           });
         });
@@ -216,6 +222,7 @@ export function expandSpreadsheet(opts: ExpandOptions): ExpandedSpreadsheetStep[
             }),
             originalRow: rowIndex,
             originalBlockIndex: segment.start + k,
+            vars: dynamicArgumentsOf(block, skip),
             ...outputsOf(block),
           });
         });
@@ -249,7 +256,12 @@ export function toSubmittedStep(step: ExpandedSpreadsheetStep) {
   return {
     instrument: step.instrument,
     method: step.method,
-    params: { ...step.params, _row: step.originalRow, _block: step.originalBlockIndex },
+    params: {
+      ...step.params,
+      _row: step.originalRow,
+      _block: step.originalBlockIndex,
+      ...(step.vars && Object.keys(step.vars).length ? { _vars: step.vars } : {}),
+    },
     ...(step.returnVar ? { returnVar: step.returnVar } : {}),
     ...(step.returnBindings?.length ? { returnBindings: step.returnBindings } : {}),
   };
@@ -274,7 +286,7 @@ export function buildSpreadsheetParameters(opts: {
     type: variables.length > 0 ? 'Spreadsheet' : 'Simple',
     variables,
     rows: variables.length > 0 ? rows.filter(isRowActive) : [],
-    ...(variables.length > 0 ? { batch_size: groupSizeFor(batchSize, rows.length) } : {}),
+    ...(variables.length > 0 ? { batch_size: groupSizeFor(batchSize) } : {}),
     sequence_template: sequence.map((b) => ({
       instrument: b.instrument,
       method: b.method,

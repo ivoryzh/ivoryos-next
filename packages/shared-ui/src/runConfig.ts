@@ -126,6 +126,24 @@ export interface ResolvedStep {
 }
 
 /**
+ * Which of a block's arguments are `#name` references, as `{argument: name}`.
+ *
+ * A step is recorded with its values already substituted, so without this a finished run cannot
+ * say which of its arguments came from a spreadsheet column, a fixed value or the optimizer and
+ * which were typed into the step itself. Carried on the submitted step as `_vars` — metadata the
+ * edge never forwards to a driver (`cast_arguments` drops `_`-prefixed keys) — and read by Data
+ * History to mark those arguments.
+ */
+export function dynamicArgumentsOf(block: any, skip?: (name: string) => boolean): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(block?.params || {})) {
+    const m = typeof value === 'string' ? /^#(\w+)$/.exec(value.trim()) : null;
+    if (m && !key.startsWith('_') && !skip?.(m[1])) out[key] = m[1];
+  }
+  return out;
+}
+
+/**
  * Resolve a Prep/Cleanup block against the run's fixed values. These run once for the whole run,
  * so every `#name` in them must have a value before dispatch.
  */
@@ -140,10 +158,11 @@ export function resolveFixedBlock(
     onMissing: 'throw',
     numeric: opts.numeric ?? 'strict',
   });
+  const vars = dynamicArgumentsOf(block);
   return {
     instrument: block.instrument,
     method: block.method,
-    params,
+    params: Object.keys(vars).length ? { ...params, _vars: vars } : params,
     returnVar: block.returnVar,
     ...(block.returnBindings ? { returnBindings: block.returnBindings } : {}),
   };

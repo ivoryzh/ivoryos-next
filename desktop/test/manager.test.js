@@ -6,7 +6,7 @@ const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { ProfileManager } = require('../src/manager');
+const { ProfileManager, portIsFree } = require('../src/manager');
 
 const FAKE = path.join(__dirname, 'fake-edge.js');
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ivoryos-mgr-'));
@@ -116,4 +116,20 @@ test('script profiles have no deck to edit', () => {
     const mgr = new ProfileManager({ home: tmp(), getRuntime: async () => fakeRuntime() });
     const p = mgr.create({ kind: 'script', script: FAKE });
     assert.throws(() => mgr.readDeck(p.id), /Only deck profiles/);
+});
+
+test('overlapping restarts and edits leave exactly one process, and Stop reaches it', async (t) => {
+    const home = tmp();
+    const mgr = new ProfileManager({ home, getRuntime: async () => fakeRuntime() });
+    t.after(() => mgr.stopAll());
+    const port = await freePort();
+    const p = mgr.create({ kind: 'script', name: 'Busy bench', script: FAKE, port });
+    await mgr.start(p.id);
+    // What rapid clicking in the launcher does: several restarts in flight at once.
+    await Promise.all([mgr.restart(p.id), mgr.restart(p.id), mgr.restart(p.id), mgr.start(p.id)]);
+    const tracked = mgr.running.get(p.id).supervisor.child.pid;
+    assert.equal((await getJson(port, '/api/status')).pid, tracked, 'the process answering is the one the manager tracks');
+    await mgr.stop(p.id);
+    assert.equal(mgr.statusOf(p.id).state, 'stopped');
+    assert.ok(await portIsFree(port), 'nothing is left listening: no untracked edge survived');
 });

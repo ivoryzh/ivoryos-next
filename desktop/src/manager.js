@@ -42,6 +42,26 @@ class ProfileManager extends EventEmitter {
         this.store = loadProfiles(home);
         this.running = new Map(); // id -> { supervisor }
         this.status = new Map(); // id -> { state, message, port, error }
+        this.locks = new Map(); // id -> the tail of that profile's operation queue
+    }
+
+    /**
+     * Run `fn` after every earlier operation on this profile has finished.
+     *
+     * Start, stop, restart, installs and deck edits all spawn or kill the profile's process, and
+     * they used to be free to overlap. Two deck edits in quick succession each restarted the deck;
+     * both starts passed the "already running?" check before either had registered its process, so
+     * two edges were spawned, the manager kept one, and the other ran on untracked -- which Stop
+     * could then never reach. Queuing per profile makes each operation see the state the previous
+     * one left, while different profiles still start and stop independently.
+     */
+    _exclusive(id, fn) {
+        const previous = this.locks.get(id) || Promise.resolve();
+        const run = previous.catch(() => {}).then(fn);
+        const tail = run.catch(() => {});
+        this.locks.set(id, tail);
+        tail.then(() => { if (this.locks.get(id) === tail) this.locks.delete(id); });
+        return run;
     }
 
     // --- profiles ---------------------------------------------------------------------------
@@ -85,8 +105,12 @@ class ProfileManager extends EventEmitter {
         return this.store.profiles[at];
     }
 
-    async remove(id) {
-        await this.stop(id);
+    remove(id) {
+        return this._exclusive(id, () => this._remove(id));
+    }
+
+    async _remove(id) {
+        await this._stop(id);
         this.store.profiles = this.store.profiles.filter((p) => p.id !== id);
         this.status.delete(id);
         this._save(); // the deck and data folders stay on disk; removing a profile loses no runs
@@ -117,7 +141,22 @@ class ProfileManager extends EventEmitter {
         this.emit('changed');
     }
 
-    async start(id) {
+    start(id) {
+        return this._exclusive(id, () => this._start(id));
+    }
+
+    stop(id) {
+        return this._exclusive(id, () => this._stop(id));
+    }
+
+    restart(id) {
+        return this._exclusive(id, async () => {
+            await this._stop(id);
+            return this._start(id);
+        });
+    }
+
+    async _start(id) {
         const profile = this.get(id);
         if (this.running.has(id)) return this.statusOf(id);
         const problems = validateProfile(profile);
@@ -168,18 +207,13 @@ class ProfileManager extends EventEmitter {
         }
     }
 
-    async stop(id) {
+    async _stop(id) {
         const run = this.running.get(id);
         if (!run) return;
         this._setStatus(id, { state: 'stopping', message: 'Stopping…' });
         await run.supervisor.stop();
         this.running.delete(id);
         this._setStatus(id, { state: 'stopped', message: 'Stopped', logTail: run.supervisor.logTail });
-    }
-
-    async restart(id) {
-        await this.stop(id);
-        return this.start(id);
     }
 
     async stopAll() {
@@ -199,13 +233,18 @@ class ProfileManager extends EventEmitter {
     }
 
     /** Apply a deck edit and, if the profile is running, restart it so the edge loads it. */
-    async _editDeck(id, edit) {
-        const profile = this._deckProfile(id);
-        const next = edit(readDeckFile(profile.deck));
-        writeDeckFile(profile.deck, next);
-        this.emit('changed');
-        if (this.running.has(id)) await this.restart(id);
-        return next;
+    _editDeck(id, edit) {
+        return this._exclusive(id, async () => {
+            const profile = this._deckProfile(id);
+            const next = edit(readDeckFile(profile.deck));
+            writeDeckFile(profile.deck, next);
+            this.emit('changed');
+            if (this.running.has(id)) {
+                await this._stop(id);
+                await this._start(id);
+            }
+            return next;
+        });
     }
 
     saveInstrument(id, originalName, entry) {
@@ -228,12 +267,16 @@ class ProfileManager extends EventEmitter {
      * written once every package installed, so a failed install leaves the deck as it was.
      * @returns {{added: string[], replaced: string[]}}
      */
-    async install(id, manifestInput, { allowPaths = false } = {}) {
+    install(id, manifestInput, options) {
+        return this._exclusive(id, () => this._install(id, manifestInput, options));
+    }
+
+    async _install(id, manifestInput, { allowPaths = false } = {}) {
         const profile = this._deckProfile(id);
         const { manifest } = validateManifest(manifestInput, { allowPaths });
         const merged = mergeIntoDeck(readDeckFile(profile.deck), manifest);
         const wasRunning = this.running.has(id);
-        await this.stop(id);
+        await this._stop(id);
         try {
             this._setStatus(id, { state: 'installing', message: 'Installing drivers…' });
             const runtime = await this.getRuntime();
@@ -245,10 +288,10 @@ class ProfileManager extends EventEmitter {
             this._setStatus(id, { state: 'stopped', message: 'Installed' });
         } catch (e) {
             this._setStatus(id, { state: 'error', message: `Install failed: ${e.message}`, error: e.message, logTail: e.output || '' });
-            if (wasRunning) this.start(id).catch(() => {});
+            if (wasRunning) await this._start(id).catch(() => {});
             throw e;
         }
-        if (wasRunning) await this.start(id);
+        if (wasRunning) await this._start(id);
         return { added: merged.added, replaced: merged.replaced };
     }
 }

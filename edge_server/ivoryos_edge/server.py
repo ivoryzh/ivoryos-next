@@ -25,7 +25,7 @@ from . import runtime
 from . import workflows as wf
 from .workflows import WorkflowError, expand_workflow_blocks
 
-ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+from .paths import ENV_PATH, CERTS_DIR, WORKFLOWS_DIR, SCHEMA_DUMP_PATH
 load_dotenv(ENV_PATH)
 
 app = FastAPI(title="IvoryOS Edge Server")
@@ -604,7 +604,7 @@ async def setup_broker():
             global_broker = LocalMQTTBroker(client_id, endpoint, port)
         elif protocol == "aws_iot":
             certs = token_data.get("certs", {})
-            cert_dir = os.path.join(os.path.dirname(__file__), ".certs")
+            cert_dir = CERTS_DIR
             os.makedirs(cert_dir, exist_ok=True)
             
             ca_cert_path = os.path.join(cert_dir, "root-CA.crt")
@@ -730,7 +730,7 @@ async def startup_event():
         
     try:
         import json
-        with open("ivoryos_schema.json", "w") as f:
+        with open(SCHEMA_DUMP_PATH, "w") as f:
             json.dump({
                 "instruments": app.state.instrument_schemas,
                 "instrument_meta": app.state.instrument_meta
@@ -753,7 +753,69 @@ def get_status():
         "active_workflow_id": queue_manager.active_run_id,
         "queue_paused": queue_manager.paused,
         "cloud_queue": queue_manager.cloud_queue,
+        # Instruments the deck file lists that did not load (deck_config.py), so the Instruments
+        # page can say "pump_2: could not open COM4" instead of the pump silently not existing.
+        "instrument_errors": getattr(app.state, "instrument_errors", []),
     }
+
+
+# --- Process control ------------------------------------------------------------------------
+# Exit code that asks a supervisor (the desktop app) to start this process again. 75 is
+# EX_TEMPFAIL in sysexits.h: "try again", which is what a restart is.
+RESTART_EXIT_CODE = 75
+
+
+def _supervised() -> bool:
+    return os.environ.get("IVORYOS_SUPERVISED") == "1"
+
+
+@app.get("/api/system")
+def system_info():
+    """What this process is and where it keeps things -- for the desktop app and for support."""
+    from . import paths
+    import platform
+    return {
+        "pid": os.getpid(),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "supervised": _supervised(),
+        "deck_path": getattr(app.state, "deck_path", None),
+        "data_dir": paths.DATA_DIR,
+        "workflows_dir": WORKFLOWS_DIR,
+    }
+
+
+def _relaunch():
+    """Replace this process with a fresh one, or exit so the supervisor starts one."""
+    try:
+        if global_broker:
+            global_broker.disconnect()
+    except Exception:
+        pass
+    if _supervised():
+        os._exit(RESTART_EXIT_CODE)
+    # Unsupervised (`python demo.py`, `python -m ivoryos_edge`): exec the same command line.
+    # sys.orig_argv keeps `-m ivoryos_edge`, which sys.argv has already rewritten to a file path.
+    argv = getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv]
+    sys.stdout.flush()
+    os.execv(sys.executable, argv)
+
+
+@app.post("/api/system/restart")
+async def restart_server(force: bool = False):
+    """Restart the edge process: reload the deck file, retry instruments that failed to load.
+
+    Refused while a run is in progress unless forced, because restarting stops it mid-step on
+    real hardware. The response is sent first; the process goes away a moment later, and the
+    page reconnects by polling /api/status.
+    """
+    if queue_manager.active_run_id and not force:
+        return JSONResponse(status_code=409, content={
+            "error": "A run is in progress. Restarting now would stop it mid-step.",
+            "active_run_id": queue_manager.active_run_id,
+        })
+    asyncio.get_running_loop().call_later(0.3, _relaunch)
+    return {"status": "restarting", "mode": "supervisor" if _supervised() else "exec"}
 
 @app.get("/api/optimizers")
 def get_optimizers():
@@ -1139,7 +1201,6 @@ async def kill_execution(task_id: str):
     task.cancel()
     return {"status": "cancelled", "task_id": task_id}
 
-WORKFLOWS_DIR = os.path.join(os.path.dirname(__file__), "workflows")
 os.makedirs(WORKFLOWS_DIR, exist_ok=True)
 
 def _workflow_error(e, status=400, forceable=None):
@@ -1499,73 +1560,100 @@ def remove_workflow(name: str, force: bool = False):
 
 
 
-def run(module_name: str, port: int = 8080, plugins: list = None):
-    """
-    Entry point to start the Edge Server. 
-    It inspects the caller module for initialized instruments.
-    """
-    app.state.plugins = []
-    
-    # Auto-discover static plugins from a 'plugins' directory next to the caller script
-    if module_name in sys.modules:
-        caller_mod = sys.modules[module_name]
-        if hasattr(caller_mod, '__file__') and caller_mod.__file__:
-            caller_dir = os.path.dirname(os.path.abspath(caller_mod.__file__))
-            plugins_dir = os.path.join(caller_dir, "plugins")
-            if os.path.exists(plugins_dir) and os.path.isdir(plugins_dir):
-                for folder in os.listdir(plugins_dir):
-                    folder_path = os.path.join(plugins_dir, folder)
-                    if os.path.isdir(folder_path):
-                        if plugins is None:
-                            plugins = []
-                        # Avoid duplicates if user explicitly passed it
-                        if not any(p.get("id") == folder for p in plugins):
-                            plugins.append({
-                                "id": folder,
-                                "name": folder.replace("_", " ").title(),
-                                "path": folder_path
-                            })
+def _discover_plugins(plugins_dir, plugins):
+    """Every subfolder of `plugins_dir` as a static plugin, unless one with that id was passed."""
+    plugins = list(plugins or [])
+    if plugins_dir and os.path.isdir(plugins_dir):
+        for folder in sorted(os.listdir(plugins_dir)):
+            folder_path = os.path.join(plugins_dir, folder)
+            if os.path.isdir(folder_path) and not any(p.get("id") == folder for p in plugins):
+                plugins.append({"id": folder, "name": folder.replace("_", " ").title(), "path": folder_path})
+    return plugins
 
-    if plugins:
-        for p in plugins:
-            if "path" in p:
-                if not os.path.exists(p["path"]):
-                    print(f"Warning: Plugin path '{p['path']}' does not exist.")
-                    continue
-                app.mount(f"/plugins/{p['id']}", StaticFiles(directory=p["path"], html=True), name=f"plugin_{p['id']}")
-                app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html"})
-            elif "url" in p:
-                app.state.plugins.append(p)
-                
-    instruments = {}
-    
-    if module_name in sys.modules:
+
+def _default_frontend_dir():
+    """The built UI: IVORYOS_FRONTEND_DIR, else frontend/out beside a source checkout."""
+    configured = os.environ.get("IVORYOS_FRONTEND_DIR")
+    if configured:
+        return configured
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend", "out")
+
+
+def run(module_name: str = None, port: int = None, plugins: list = None, *,
+        instruments: dict = None, instrument_errors: list = None, deck_path: str = None,
+        host: str = None, frontend_dir: str = None, plugins_dir: str = None):
+    """
+    Entry point to start the Edge Server.
+
+    Two ways to say what is on the deck:
+      run(__name__)                 every instrument object defined in the calling script
+                                    (the original, script-based deck -- example/demo.py)
+      run(instruments={...})        an explicit mapping, which is what `python -m ivoryos_edge
+                                    --deck deck.json` passes after loading the file
+                                    (deck_config.py), together with `instrument_errors` for
+                                    the ones that did not load
+    """
+    # A launcher running someone's script (a desktop "script profile") chooses the port and
+    # interface through the environment, since the script itself just says run(__name__).
+    # An explicit argument still wins.
+    if port is None:
+        port = int(os.environ.get("IVORYOS_PORT", 8080))
+    if host is None:
+        host = os.environ.get("IVORYOS_HOST", "0.0.0.0")
+
+    app.state.plugins = []
+
+    # Static plugins: a 'plugins' folder beside the calling script, or the one given explicitly.
+    if plugins_dir is None and module_name in sys.modules:
         caller_mod = sys.modules[module_name]
-        # Inspect for objects that look like custom classes/instruments
-        for var_name, var_value in vars(caller_mod).items():
-            if var_name.startswith("_"):
+        if getattr(caller_mod, "__file__", None):
+            plugins_dir = os.path.join(os.path.dirname(os.path.abspath(caller_mod.__file__)), "plugins")
+    plugins = _discover_plugins(plugins_dir, plugins)
+
+    for p in plugins:
+        if "path" in p:
+            if not os.path.exists(p["path"]):
+                print(f"Warning: Plugin path '{p['path']}' does not exist.")
                 continue
-            # Basic filter: must be an object instance (not a primitive, function, or class itself)
-            if not inspect.isclass(var_value) and not inspect.isfunction(var_value) and not inspect.ismodule(var_value):
-                # Ignore basic types
-                if type(var_value).__module__ != "builtins":
-                    instruments[var_name] = var_value
-                    
-    print(f"Found instruments in {module_name}: {list(instruments.keys())}")
-    
+            app.mount(f"/plugins/{p['id']}", StaticFiles(directory=p["path"], html=True), name=f"plugin_{p['id']}")
+            app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html"})
+        elif "url" in p:
+            app.state.plugins.append(p)
+
+    if instruments is None:
+        instruments = {}
+        if module_name in sys.modules:
+            caller_mod = sys.modules[module_name]
+            # Inspect for objects that look like custom classes/instruments
+            for var_name, var_value in vars(caller_mod).items():
+                if var_name.startswith("_"):
+                    continue
+                # Basic filter: must be an object instance (not a primitive, function, or class itself)
+                if not inspect.isclass(var_value) and not inspect.isfunction(var_value) and not inspect.ismodule(var_value):
+                    # Ignore basic types
+                    if type(var_value).__module__ != "builtins":
+                        instruments[var_name] = var_value
+        print(f"Found instruments in {module_name}: {list(instruments.keys())}")
+    else:
+        print(f"Instruments from deck: {list(instruments.keys())}")
+    for err in instrument_errors or []:
+        print(f"Instrument '{err.get('name')}' did not load ({err.get('stage')}): {err.get('error')}")
+
     # Bind to app state
     app.state.instruments = instruments
-    
+    app.state.instrument_errors = list(instrument_errors or [])
+    app.state.deck_path = deck_path
+
     # Serve the static Next.js export last so it doesn't intercept plugin routes
-    frontend_out = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend/out")
+    frontend_out = frontend_dir or _default_frontend_dir()
     if os.path.exists(frontend_out):
         app.mount("/", StaticFiles(directory=frontend_out, html=True), name="static")
     else:
         print(f"Warning: Frontend build directory not found at {frontend_out}")
-    
+
     # Start uvicorn
-    print(f"Starting IvoryOS Edge Server on port {port}...")
+    print(f"Starting IvoryOS Edge Server on {host}:{port}...")
     # NOTE: In an actual production package we would point uvicorn to the module path string
-    # For this dynamic state passing, we must pass the app instance directly. 
+    # For this dynamic state passing, we must pass the app instance directly.
     # (reload=True is not allowed when passing the app instance directly).
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host=host, port=port, reload=False)

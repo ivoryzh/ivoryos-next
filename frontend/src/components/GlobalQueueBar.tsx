@@ -1,6 +1,7 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo, HandHelping } from 'lucide-react';
 import { setPromptMinimized } from '@/inputPrompt';
 
@@ -11,8 +12,12 @@ export default function GlobalQueueBar() {
   const [queue, setQueue] = useState<any[]>([]);
   // Counted from the whole run list, not the 3-item preview, so the idle chip reports the real depth.
   const [pendingCount, setPendingCount] = useState(0);
+  // The desktop launcher page is served by the app itself, not by an edge, so there is no queue
+  // to watch there (and nothing at /api to ask).
+  const onLauncher = (usePathname() || '').startsWith('/launcher');
 
   useEffect(() => {
+    if (onLauncher) return;
     const fetchInitial = async () => {
         try {
             const [statusRes, queueRes] = await Promise.all([
@@ -61,7 +66,7 @@ export default function GlobalQueueBar() {
     return () => {
         ws.close();
     };
-  }, []);
+  }, [onLauncher]);
 
   const handleRunControl = async (action: 'pause' | 'resume' | 'cancel') => {
     if (!activeRun) return;
@@ -95,6 +100,8 @@ export default function GlobalQueueBar() {
   // page and know whether the platform was idle, running, paused or stuck. Hiding the bar when
   // nothing is running loses that: "no bar" and "page still loading" look identical. So when
   // there's no active run, fall back to a compact idle chip that still reports the queue depth.
+  if (onLauncher) return null;
+
   if (!activeRun) {
     return (
       <a

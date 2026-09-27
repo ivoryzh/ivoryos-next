@@ -86,3 +86,12 @@ edge_server/ivoryos_edge/workflows/.meta.json
 # Agent provider settings — endpoint, model, and possibly an API key. Runtime state that lives
 # beside the workflow store (see agent/routes.py), never something to commit.
 edge_server/ivoryos_edge/agent_settings.json
+
+# Desktop app (desktop/): its own node_modules, the resources prepare-resources.js assembles for
+# packaging (a uv binary, the edge wheel, a copy of frontend/out), and electron-builder output.
+desktop/node_modules/
+desktop/resources/
+desktop/dist/
+# ...but desktop/build/ is electron-builder's input folder (the app icon and its source logo),
+# which the Python `build/` rule above would otherwise swallow.
+!desktop/build/

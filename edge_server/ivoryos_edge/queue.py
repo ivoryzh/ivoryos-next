@@ -1213,7 +1213,8 @@ class WorkflowQueueManager:
         if not OptClass:
             raise Exception(f"Optimizer {opt_name} not found")
 
-        optimizer_data_dir = os.path.join(os.path.dirname(__file__), "optimizer_data")
+        from .paths import OPTIMIZER_DATA_DIR
+        optimizer_data_dir = OPTIMIZER_DATA_DIR
         os.makedirs(optimizer_data_dir, exist_ok=True)
 
         optimizer = OptClass(

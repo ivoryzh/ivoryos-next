@@ -1,0 +1,30 @@
+{
+  "format": "ivoryos-deck/1",
+  "name": "Suzuki coupling demo",
+  "packages": [],
+  "paths": ["."],
+  "instruments": [
+    {
+      "name": "pump_1",
+      "import": "lab_drivers",
+      "class": "SyringePump",
+      "args": { "reagent": "4-bromoanisole, 0.50 M in dioxane", "role": "substrate", "concentration_m": 0.5 }
+    },
+    {
+      "name": "pump_2",
+      "import": "lab_drivers",
+      "class": "SyringePump",
+      "args": { "reagent": "phenylboronic acid, 0.50 M in dioxane", "role": "boronic_acid", "concentration_m": 0.5 }
+    },
+    {
+      "name": "pump_3",
+      "import": "lab_drivers",
+      "class": "SyringePump",
+      "args": { "reagent": "Pd(dppf)Cl2, 10 mM in dioxane", "role": "catalyst", "concentration_m": 0.01 }
+    },
+    { "name": "reactor", "import": "lab_drivers", "class": "HeaterStirrer", "args": { "max_temperature_c": 150.0 } },
+    { "name": "balance", "import": "lab_drivers", "class": "AnalyticalBalance" },
+    { "name": "uv_vis", "import": "lab_drivers", "class": "UVVisSpectrometer", "args": { "path_length_cm": 1.0 } },
+    { "name": "hplc", "import": "lab_drivers", "class": "HPLC" }
+  ]
+}

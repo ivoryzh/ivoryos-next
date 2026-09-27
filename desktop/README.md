@@ -1,0 +1,141 @@
+# IvoryOS desktop
+
+> New to this? Start with the plain-language guide: [docs/desktop_launcher_guide.md](../docs/desktop_launcher_guide.md).
+
+A desktop app around the IvoryOS edge server. It is a **launcher and a window**, not a second
+implementation: the edge is the same Python program as `python example/demo.py`, and the window
+shows the edge's own web UI. The app sets up Python, keeps the edge running, and installs drivers.
+
+```
+┌──────────── Electron app (this folder) ──────────┐
+│  window ──► http://127.0.0.1:<port> (edge web UI) │
+│  menus · ivoryos:// links · driver installs       │
+│        │ starts / restarts / stops                │
+│        ▼                                          │
+│  ┌──── python -m ivoryos_edge --deck deck.json ─┐ │
+│  │ FastAPI · queue · drivers · SQLite · MQTT    │─┼──► instruments
+│  └──────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────┘
+```
+
+## The launcher
+
+The app opens on the **launcher**: a list of saved **profiles**, each one way of starting an edge,
+in the spirit of a `launch.json`. Several can run at once on different ports.
+
+| Kind | What it runs | Where instruments are configured |
+|---|---|---|
+| **Deck** | `python -m ivoryos_edge --deck deck.json` | In the launcher: the Instruments tab edits each one's arguments (COM port, IP, …), switches it off, or adds one from the Hub. |
+| **Python script** | Any script ending in `ivoryos_edge.run(__name__)`, such as `example/demo.py` | In the script. Read a port from an environment variable (`os.environ.get("PUMP_PORT", "COM3")`) and set the variable in the profile's Configuration tab. |
+
+For each profile the launcher shows its state, Start / Stop / Restart / **Open**, and a live log.
+Open shows the edge's UI as a **tab in the launcher window** (a `WebContentsView` laid under the
+tab bar, one per open profile), so the app is one window however many decks run. ↗ opens the
+same page in the system browser; the edge is an ordinary web server either way. A deck profile also shows whether each instrument loaded,
+and why not when it didn't. A script profile runs with the launcher's Python by default (which
+has the edge and every driver installed from the Hub), or with an interpreter you choose. It keeps
+the script's own runs and workflows unless you give it a separate data folder.
+
+The launcher page is part of the IvoryOS frontend (`frontend/src/app/launcher`), served by the app
+over `ivoryos-app://`, so it works before any edge is running. It reaches the app through
+`src/preload.js`. Every launcher call is refused unless it comes from that page, so an edge's own
+page, or a plugin inside it, cannot start processes or install packages.
+
+## Running it
+
+```bash
+cd frontend && npm run build   # the launcher page and the edge UI
+cd ../desktop
+npm install
+npm start            # the app, using ../edge_server (editable) and ../frontend/out
+npm test             # supervisor, profiles, manager and manifest tests (no Electron, no Python)
+npm run smoke        # boot headless, start the first profile, check the launcher, exit
+```
+
+Development uses the repository directly: the edge is installed as an editable package, so a
+Python change applies on the next Restart, and the UI comes from `frontend/out`. `uv` must be
+installed. `IVORYOS_DESKTOP_HOME=/some/folder npm start` uses a separate profile folder;
+`IVORYOS_HUB_URL=http://localhost:3000` points "Add from Hub" at a local Hub (also settable in the
+launcher header).
+
+## What lives where
+
+Everything is in the app's per-user folder (`~/Library/Application Support/IvoryOS` on macOS,
+`%APPDATA%\IvoryOS` on Windows, `~/.config/IvoryOS` on Linux), never inside the app bundle:
+
+| Path | What |
+|---|---|
+| `profiles.json` | Saved profiles and the Hub address. |
+| `profiles/<id>/deck.json` | A deck profile's instruments. |
+| `profiles/<id>/data/` | That deck's runs, workflows and Cloud settings (`IVORYOS_DATA_DIR`). |
+| `runtime/venv/` | The Python environment every profile runs in. uv creates it on first launch and downloads Python if the machine has none. |
+| `logs/<id>.log` | Each profile's edge output, kept across restarts. |
+
+A launcher from before profiles existed kept one deck in `data/`; it becomes the first profile.
+
+## Decks and installing drivers
+
+A deck file lists pip `packages` to install and `instruments` to build from them. The format is
+documented at the top of `edge_server/ivoryos_edge/deck_config.py`; `example/deck.json` is the
+demo deck written that way.
+
+An **install manifest** is a deck file describing only what to add. Drivers reach a deck three
+ways, all through the same install path:
+
+- **Add from Hub** on a deck's Instruments tab: search the Hub's drivers, fill in the settings
+  form the Hub provides for that driver (connection, port, init arguments), and add. The Hub
+  turns the choice into a deck entry (`/api/catalog/deck-entry` in the Hub repo).
+- **Open in IvoryOS** on the Hub's build page: the whole cart, as an
+  `ivoryos://install?deck=<base64url JSON>` link. The launcher asks which deck to install into.
+  `ivoryos://install?manifest=https://…` (a manifest by URL) works too.
+- **Install from deck file…**: a deck JSON on disk.
+
+Installing asks for confirmation (listing the packages and instruments, and warning about any
+package not pinned to one version), then stops the edge, runs `uv pip install`, writes the deck,
+and starts the edge again. If the install fails, the deck is left unchanged and the old edge
+comes back. Instruments that fail to load (a missing driver, an unplugged device) are marked in
+the launcher and under **Not loaded** on the edge's Instruments page, with the reason.
+
+**Drivers are code with access to the instruments.** A manifest may not pass pip options, and a
+downloaded one may not add import folders, but the packages themselves run unsandboxed: that is
+what lets them talk to hardware. Only install from sources you trust.
+
+## The contract with the edge
+
+- The app starts `python -m ivoryos_edge --deck … --data-dir … --port … --host …` with
+  `IVORYOS_SUPERVISED=1`, and waits until `GET /api/status` answers before showing the UI.
+- `POST /api/system/restart` (the Restart button) makes a supervised edge exit with code **75**;
+  the app starts it again. Any other exit is a crash, shown with the end of the log.
+- Driver installs happen with the edge stopped, because a running interpreter holds its packages'
+  compiled files open (on Windows they cannot be replaced until it exits).
+
+## Packaging
+
+```bash
+cd frontend && npm run build          # the UI to bundle
+cd ../desktop && npm run dist          # prepare-resources + electron-builder
+```
+
+`scripts/prepare-resources.js` copies this machine's `uv`, builds the edge wheel and copies the
+UI into `resources/`, which is bundled into the app. Build on each target OS, since `uv` is a
+native binary. `npm run dist:dir` builds an unpacked app for testing, and
+`<app> --smoke-test` checks a build on a clean machine.
+
+**App icon:** `build/icon.png` (1024×1024) is generated from `build/logo.png` by
+`uv run --with pillow python scripts/make-icon.py`. electron-builder makes the macOS and Windows
+icon formats from that one PNG, so a PNG logo is enough and no SVG is needed. In development the
+Dock shows the icon, but the menu bar still says "Electron" (it is Electron's own program);
+packaged builds are named IvoryOS throughout.
+
+## Not done yet
+
+- **Code signing and notarization.** Builds are unsigned, so macOS Gatekeeper and Windows
+  SmartScreen will warn. This needs an Apple Developer ID and a Windows signing certificate in CI.
+- **Auto-update** (electron-updater plus a release feed).
+- **Offline first launch.** uv downloads Python on first run; bundling a standalone Python would
+  remove that.
+- **Tray icon.** Closing the launcher on macOS leaves running decks running (Dock icon), but there
+  is no menu-bar status yet.
+- **The Hub's download bundle still targets the legacy `ivoryos` package** (`import ivoryos` in
+  the generated `main.py`); "Open in IvoryOS" targets this edge.
+- **Tested on macOS (arm64) only.** Windows and Linux builds should work but have not been run.

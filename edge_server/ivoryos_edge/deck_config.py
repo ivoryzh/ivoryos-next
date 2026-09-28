@@ -34,6 +34,9 @@ same information lives in a JSON file:
 - `calls` run after construction, in order: the structured form of the Hub's `python_command`
   (e.g. `device.connect()`), without evaluating a string of code.
 - `"enabled": false` keeps an entry without loading it, e.g. an instrument that is unplugged.
+- `plugins` lists Python plugins as "package.module:attribute" (ivoryos_edge.plugins.Plugin
+  objects). They are imported after the instruments are built and receive those same objects;
+  see docs/plugins.md.
 
 **One instrument failing never stops the others.** A driver whose constructor cannot open its
 serial port, a package that is not installed, a typo in a class name: each becomes an entry in
@@ -81,7 +84,7 @@ def read_deck(path: str) -> Dict[str, Any]:
     fmt = config.get("format", DECK_FORMAT)
     if fmt != DECK_FORMAT:
         raise DeckFileError(f"Unsupported deck format '{fmt}' (this edge reads '{DECK_FORMAT}')")
-    for key in ("instruments", "packages", "paths"):
+    for key in ("instruments", "packages", "paths", "plugins"):
         if key in config and not isinstance(config[key], list):
             raise DeckFileError(f"'{key}' must be a list in {path}")
     return config

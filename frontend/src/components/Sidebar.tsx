@@ -2,10 +2,11 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, Gauge, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, PanelRight, Gauge, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
+import { isPanelPlugin, openInPanel, setPanel, usePanel } from '@/pluginPanel';
 import { lastRunTabHref, runTabForPath, samePath } from './RunTabs';
 
 interface SidebarProps {
@@ -25,6 +26,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
   // hydration constraint as isExpanded above — start at the default, correct after mount.
   const [runHref, setRunHref] = useState('/execution');
   const pathname = usePathname();
+  const panel = usePanel();
 
   useEffect(() => {
     const saved = localStorage.getItem('ivoryos_sidebar_expanded');
@@ -140,6 +142,27 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
     }
   };
 
+  const panelItem = (p: { id: string; name: string; placement?: string }) => {
+    const isOpen = panel.open === p.id && !panel.minimized;
+    return (
+      <button
+        type="button"
+        onClick={() => (isOpen ? setPanel({ minimized: true }) : openInPanel(p.id, p.placement))}
+        title={isOpen ? `Minimize ${p.name}` : `Show ${p.name} beside the page`}
+        className={`w-[calc(100%-1.5rem)] flex items-center py-3 rounded-lg overflow-hidden mx-3 text-left ${
+          isOpen
+            ? 'bg-indigo-50 dark:bg-white/10 text-indigo-600 dark:text-white'
+            : 'hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'
+        }`}
+      >
+        <div className="w-5 h-5 flex justify-center shrink-0 ml-3">
+          <PanelRight className="w-5 h-5 shrink-0" />
+        </div>
+        {isExpanded && <span className="ml-4 whitespace-nowrap truncate">{p.name}</span>}
+      </button>
+    );
+  };
+
   const navItem = (href: string, label: string, icon: React.ReactNode, alsoActiveOn: string[] = []) => {
     // samePath, not ===: with trailingSlash the pathname is "/library/" and every href here is
     // written "/library", so no entry had ever highlighted as current.
@@ -249,7 +272,11 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
                 <div className="space-y-2">
                     {plugins.map(p => (
                         <div key={p.id}>
-                            {navItem(`/plugin?id=${p.id}`, p.name, <Plug className="w-5 h-5 shrink-0" />)}
+                            {/* A panel plugin opens beside the page (PluginPanel) and stays there as
+                                you move around; a tab plugin is a page of its own. */}
+                            {isPanelPlugin(p)
+                              ? panelItem(p)
+                              : navItem(`/plugin?id=${p.id}`, p.name, <Plug className="w-5 h-5 shrink-0" />)}
                         </div>
                     ))}
                 </div>

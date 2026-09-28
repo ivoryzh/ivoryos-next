@@ -17,6 +17,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from .introspection import inspect_device_module
+from .plugins import Plugin, PluginFiles, start_plugin
 from .models import init_db, async_session, WorkflowRun
 from sqlalchemy import func, select
 from .queue import WorkflowQueueManager
@@ -1327,7 +1328,7 @@ app.include_router(agent_router)
 
 @app.get("/api/plugins")
 def list_plugins():
-    return {"plugins": getattr(app.state, "plugins", [])}
+    return {"plugins": getattr(app.state, "plugins", []), "errors": getattr(app.state, "plugin_errors", [])}
 
 
 @app.post("/api/workflows/expand")
@@ -1579,9 +1580,27 @@ def _default_frontend_dir():
     return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend", "out")
 
 
+def _alias_main_script(module_name):
+    """Make `import demo` from inside a plugin return the running script, not a second copy.
+
+    A script started as `python demo.py` is the module `__main__`, not `demo`, so Python treats
+    `import demo` as a different module and executes the file again -- constructing every
+    instrument a second time, which reopens (or fails to open) each serial port. Registering the
+    running module under its file name as well makes that import a lookup. It only helps imports
+    that happen after run() is called, i.e. inside a route or hook; see docs/plugins.md.
+    """
+    main = sys.modules.get(module_name)
+    path = getattr(main, "__file__", None)
+    if module_name != "__main__" or not path:
+        return
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.isidentifier():
+        sys.modules.setdefault(stem, main)
+
+
 def run(module_name: str = None, port: int = None, plugins: list = None, *,
         instruments: dict = None, instrument_errors: list = None, deck_path: str = None,
-        host: str = None, frontend_dir: str = None, plugins_dir: str = None):
+        host: str = None, frontend_dir: str = None, plugins_dir: str = None, plugin_errors: list = None):
     """
     Entry point to start the Edge Server.
 
@@ -1592,6 +1611,9 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
                                     --deck deck.json` passes after loading the file
                                     (deck_config.py), together with `instrument_errors` for
                                     the ones that did not load
+
+    `plugins` takes ivoryos_edge.plugins.Plugin objects (a page plus an API, handed the
+    instruments above) and the older static entries ({id, name, path} or {id, name, url}).
     """
     # A launcher running someone's script (a desktop "script profile") chooses the port and
     # interface through the environment, since the script itself just says run(__name__).
@@ -1600,25 +1622,6 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
         port = int(os.environ.get("IVORYOS_PORT", 8080))
     if host is None:
         host = os.environ.get("IVORYOS_HOST", "0.0.0.0")
-
-    app.state.plugins = []
-
-    # Static plugins: a 'plugins' folder beside the calling script, or the one given explicitly.
-    if plugins_dir is None and module_name in sys.modules:
-        caller_mod = sys.modules[module_name]
-        if getattr(caller_mod, "__file__", None):
-            plugins_dir = os.path.join(os.path.dirname(os.path.abspath(caller_mod.__file__)), "plugins")
-    plugins = _discover_plugins(plugins_dir, plugins)
-
-    for p in plugins:
-        if "path" in p:
-            if not os.path.exists(p["path"]):
-                print(f"Warning: Plugin path '{p['path']}' does not exist.")
-                continue
-            app.mount(f"/plugins/{p['id']}", StaticFiles(directory=p["path"], html=True), name=f"plugin_{p['id']}")
-            app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html"})
-        elif "url" in p:
-            app.state.plugins.append(p)
 
     if instruments is None:
         instruments = {}
@@ -1631,13 +1634,49 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
                 # Basic filter: must be an object instance (not a primitive, function, or class itself)
                 if not inspect.isclass(var_value) and not inspect.isfunction(var_value) and not inspect.ismodule(var_value):
                     # Ignore basic types
-                    if type(var_value).__module__ != "builtins":
+                    if type(var_value).__module__ != "builtins" and not isinstance(var_value, Plugin):
                         instruments[var_name] = var_value
         print(f"Found instruments in {module_name}: {list(instruments.keys())}")
+        _alias_main_script(module_name)
     else:
         print(f"Instruments from deck: {list(instruments.keys())}")
     for err in instrument_errors or []:
         print(f"Instrument '{err.get('name')}' did not load ({err.get('stage')}): {err.get('error')}")
+
+    app.state.plugins = []
+    app.state.plugin_errors = list(plugin_errors or [])
+
+    # Static plugins: a 'plugins' folder beside the calling script, or the one given explicitly.
+    if plugins_dir is None and module_name in sys.modules:
+        caller_mod = sys.modules[module_name]
+        if getattr(caller_mod, "__file__", None):
+            plugins_dir = os.path.join(os.path.dirname(os.path.abspath(caller_mod.__file__)), "plugins")
+    python_plugins = [p for p in (plugins or []) if isinstance(p, Plugin)]
+    plugins = _discover_plugins(plugins_dir, [p for p in (plugins or []) if not isinstance(p, Plugin)])
+
+    # Python plugins first: they receive the deck's own instrument mapping (never a copy, never
+    # reconstructed), and their on_start hooks run before startup introspection reads the schema.
+    for p in python_plugins:
+        if any(existing["id"] == p.id for existing in app.state.plugins):
+            app.state.plugin_errors.append({"plugin": p.id, "stage": "load", "error": "another plugin already uses this id"})
+            continue
+        error = start_plugin(app, p, instruments)
+        if error:
+            app.state.plugin_errors.append(error)
+        app.state.plugins.append(p.describe())
+
+    for p in plugins:
+        if any(existing["id"] == p.get("id") for existing in app.state.plugins):
+            continue
+        if "path" in p:
+            if not os.path.exists(p["path"]):
+                print(f"Warning: Plugin path '{p['path']}' does not exist.")
+                continue
+            app.mount(f"/plugins/{p['id']}", PluginFiles(p["path"]), name=f"plugin_{p['id']}")
+            app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html",
+                                      "placement": p.get("placement", "tab"), "kind": "static"})
+        elif "url" in p:
+            app.state.plugins.append({"placement": "tab", "kind": "link", **p})
 
     # Bind to app state
     app.state.instruments = instruments

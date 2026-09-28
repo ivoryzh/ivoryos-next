@@ -53,11 +53,17 @@ def main(argv=None):
     from .server import run
 
     loaded = load_deck(deck_path)
+    # Python plugins the deck lists ("package.module:plugin"), imported after the deck so a
+    # plugin in one of the deck's `paths` is importable. Each receives the instruments just built.
+    from .plugins import load_plugin_refs
+    plugins, plugin_errors = load_plugin_refs(loaded.config.get("plugins") or [])
     plugins_dir = args.plugins_dir or os.path.join(os.path.dirname(deck_path), "plugins")
     run(
         port=args.port,
         host=args.host,
         instruments=loaded.instruments,
+        plugins=plugins,
+        plugin_errors=plugin_errors,
         instrument_errors=loaded.errors,
         deck_path=deck_path,
         frontend_dir=args.frontend_dir,

@@ -81,7 +81,7 @@ test('an edge that dies while starting fails start() with its error in the log',
 
 test('an edge that never answers is stopped after the timeout', async () => {
     const { sup } = await supervisorFor({ FAKE_NEVER_READY: '1' }, { readyTimeoutMs: 1500 });
-    await assert.rejects(sup.start(), /did not become ready/);
+    await assert.rejects(sup.start(), /did not start IvoryOS in time/); // never announced a server
     assert.equal(sup.child, null);
 });
 
@@ -107,4 +107,24 @@ test('output is appended to the log file across restarts', async () => {
     const text = fs.readFileSync(logFile, 'utf8');
     assert.equal((text.match(/--- starting edge/g) || []).length, 2);
     assert.match(text, /fake edge listening/);
+});
+
+test('a script on its own port is followed, and the difference is reported', async (t) => {
+    const own = await freePort();
+    const { sup, port } = await supervisorFor({ FAKE_OWN_PORT: String(own) });
+    t.after(() => sup.stop());
+    const moved = new Promise((resolve) => sup.once('port', (actual, requested) => resolve({ actual, requested })));
+    await sup.start();
+    assert.deepEqual(await moved, { actual: own, requested: port });
+    assert.equal(sup.port, own);
+    await sup.stop();
+    // The next start asks for the configured port again rather than the one it moved to.
+    const again = new Promise((resolve) => sup.once('port', (actual, requested) => resolve(requested)));
+    await sup.start();
+    assert.equal(await again, port);
+});
+
+test('a script that ends without starting IvoryOS says what is missing', async () => {
+    const { sup } = await supervisorFor({ FAKE_NO_RUN: '1' });
+    await assert.rejects(sup.start(), /ivoryos_edge\.run\(__name__\)/);
 });

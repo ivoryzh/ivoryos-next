@@ -189,7 +189,12 @@ export default function LauncherPage() {
                 <div className="flex items-center gap-2">
                   <StatusDot status={p.status} />
                   <span className="text-sm font-medium truncate flex-1">{p.name}</span>
-                  <span className="text-[11px] font-mono text-gray-400">:{p.status.port}</span>
+                  <span
+                    title={p.status.portNote ? `Started on ${p.status.portNote.actual}, not the profile's ${p.status.portNote.requested}` : undefined}
+                    className={`text-[11px] font-mono ${p.status.portNote ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}
+                  >
+                    {p.status.portNote && <AlertTriangle className="inline w-3 h-3 mr-0.5 -mt-0.5" />}:{p.status.port}
+                  </span>
                 </div>
                 <div className="mt-0.5 pl-4 flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                   {p.kind === 'deck' ? <Layers className="w-3 h-3" /> : <FileCode2 className="w-3 h-3" />}
@@ -383,6 +388,7 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, tab, setTab, log, r
         </div>
       </div>
 
+      {s.portNote && <PortNote profile={profile} note={s.portNote} openSettings={() => setTab('settings')} />}
       {profile.problems.length > 0 && (
         <div className="text-sm rounded-lg p-3 bg-amber-50 text-amber-800 dark:bg-amber-900/15 dark:text-amber-300">{profile.problems.join(' ')}</div>
       )}
@@ -409,6 +415,38 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, tab, setTab, log, r
         : <ScriptOverview api={api} profile={profile} openSettings={() => setTab('settings')} />)}
       {tab === 'log' && <LogPanel api={api} profile={profile} lines={log} />}
       {tab === 'settings' && <ProfileSettings api={api} profile={profile} onRemoved={onRemoved} />}
+    </div>
+  );
+}
+
+/**
+ * The edge is not on the port this profile asked for. The launcher follows it (the tab and links
+ * use the real port), but says so: otherwise the Port setting looks like it does nothing, and a
+ * second profile on the "free" port collides with this one.
+ */
+function PortNote({ profile, note, openSettings }: { profile: Profile; note: { requested: number; actual: number }; openSettings: () => void }) {
+  const script = profile.kind === 'script';
+  return (
+    <div className="rounded-lg border border-amber-200 dark:border-amber-500/30 bg-amber-50/70 dark:bg-amber-900/10 p-3 text-sm text-amber-900 dark:text-amber-200">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+        <div className="flex-1 space-y-1.5">
+          <div>
+            <b>Started on port {note.actual}, not {note.requested}.</b> This profile&apos;s port setting was not used.
+          </div>
+          {script ? (
+            <div className="text-amber-800 dark:text-amber-300/90">
+              The script picks its own port: either it passes one to <code className="font-mono">ivoryos_edge.run()</code>, or the IvoryOS it imports is older than the launcher and ignores it.
+              End the script with
+              <code className="block my-1 px-2 py-1 rounded bg-white/70 dark:bg-black/30 font-mono text-xs">ivoryos_edge.run(__name__, port=int(os.environ.get(&quot;IVORYOS_PORT&quot;, 8080)))</code>
+              or set this profile&apos;s port to {note.actual}.
+            </div>
+          ) : (
+            <div className="text-amber-800 dark:text-amber-300/90">The edge chose another port. Set this profile&apos;s port to {note.actual}, or restart it.</div>
+          )}
+        </div>
+        <Button small tone="ghost" onClick={openSettings}>{script ? 'Configuration' : 'Settings'}</Button>
+      </div>
     </div>
   );
 }

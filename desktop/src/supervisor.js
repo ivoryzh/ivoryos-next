@@ -80,13 +80,18 @@ class EdgeSupervisor extends EventEmitter {
         }
         for (const line of text.split(/\r?\n/)) {
             if (!line) continue;
-            // The edge prints the address it is about to bind (server.py's run()). A script that
-            // hardcodes run(port=9000) ignores the port it was offered, so readiness is checked
-            // on the port it actually announced rather than on the one requested.
-            const announced = /Starting IvoryOS Edge Server on [^\s:]+:(\d+)/.exec(line);
-            if (announced && Number(announced[1]) !== this.opts.port) {
-                this.opts.port = Number(announced[1]);
-                this.emit('port', this.opts.port);
+            // The edge prints the port it is about to bind (server.py's run()): "on 127.0.0.1:8085"
+            // now, "on port 8080" from an ivoryos_edge older than the launcher. A script that
+            // hardcodes run(port=9000), or an older run() that ignores IVORYOS_PORT, does not use
+            // the port it was offered, so readiness is checked on the one it announced, and the
+            // difference is reported ('port', actual, requested) so the launcher can say so.
+            const announced = /Starting IvoryOS Edge Server on (?:port |[^\s:]+:)(\d+)/.exec(line);
+            if (announced) {
+                this.announced = true;
+                if (Number(announced[1]) !== this.opts.port) {
+                    this.opts.port = Number(announced[1]);
+                    this.emit('port', this.opts.port, this.requestedPort);
+                }
             }
             this.lines.push(line);
             this.emit('log', line);
@@ -99,6 +104,10 @@ class EdgeSupervisor extends EventEmitter {
         if (this.child) return;
         this._stopping = false;
         const generation = ++this._generation;
+        // Every start asks for the configured port again; a previous run may have moved to another.
+        if (this.requestedPort === undefined) this.requestedPort = this.opts.port;
+        this.opts.port = this.requestedPort;
+        this.announced = false;
         this._setState('starting');
         if (this.opts.logFile) {
             fs.mkdirSync(path.dirname(this.opts.logFile), { recursive: true });
@@ -130,6 +139,11 @@ class EdgeSupervisor extends EventEmitter {
         const deadline = Date.now() + this.opts.readyTimeoutMs;
         while (Date.now() < deadline) {
             if (exited || generation !== this._generation) {
+                // Exiting cleanly without ever announcing a server is a script that ran to the
+                // end and stopped: nothing in it started IvoryOS.
+                if (exited && exited.code === 0 && !this.announced) {
+                    throw new Error('The script finished without starting IvoryOS. A script profile has to end with ivoryos_edge.run(__name__).');
+                }
                 throw new Error(`The edge exited before it was ready (code ${exited ? exited.code : '?'})`);
             }
             if (await probe(this.opts.host, this.opts.port)) {
@@ -141,7 +155,9 @@ class EdgeSupervisor extends EventEmitter {
         }
         this._log(`Edge did not answer on port ${this.opts.port} within ${Math.round(this.opts.readyTimeoutMs / 1000)}s; stopping it.\n`);
         await this.stop();
-        throw new Error('The edge did not become ready in time');
+        throw new Error(this.announced
+            ? `The edge did not answer on port ${this.opts.port} in time`
+            : 'The script did not start IvoryOS in time. Does it call ivoryos_edge.run(__name__)?');
     }
 
     _onExit(child, { code, signal, error }) {

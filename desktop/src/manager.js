@@ -193,7 +193,7 @@ class ProfileManager extends EventEmitter {
             this._setStatus(id, { state: 'error', message: problems.join(' ') });
             throw new Error(problems.join(' '));
         }
-        this._setStatus(id, { state: 'starting', message: 'Preparing Python…', error: null, port: profile.port });
+        this._setStatus(id, { state: 'starting', message: 'Preparing Python…', error: null, port: profile.port, portNote: null });
         try {
             const runtime = await this.getRuntime();
             if (profile.kind === 'deck') {
@@ -217,7 +217,9 @@ class ProfileManager extends EventEmitter {
             const supervisor = new EdgeSupervisor({ ...cmd, logFile: this.logFile(id) });
             this.running.set(id, { supervisor });
             supervisor.on('log', (line) => this.emit('log', id, line));
-            supervisor.on('port', (port) => this._setStatus(id, { port }));
+            // The edge chose another port than the profile's: follow it, and keep why for the
+            // launcher to show (the script sets its own port, or its IvoryOS ignores IVORYOS_PORT).
+            supervisor.on('port', (port, requested) => this._setStatus(id, { port, portNote: { requested, actual: port } }));
             supervisor.on('restart-requested', () => this._setStatus(id, { state: 'starting', message: 'Restarting…' }));
             supervisor.on('ready', () => this._setStatus(id, { state: 'running', message: 'Running', error: null }));
             supervisor.on('crashed', (info) => {

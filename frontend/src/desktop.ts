@@ -13,6 +13,8 @@ export type ProfileStatus = {
   logTail?: string;
   port: number;
   url: string | null;
+  /** The edge started on another port than the profile's (desktop/src/supervisor.js). */
+  portNote?: { requested: number; actual: number } | null;
 };
 
 export type Profile = {

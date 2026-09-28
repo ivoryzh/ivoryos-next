@@ -79,5 +79,7 @@ test_math_driver = DummyMathDriver()
 test_variadics = VariadicProbe()
 test_vendor_bridge = VendorBridge()
 
-# Run edge server
-ivoryos_edge.run(__name__)
+# Run edge server. The port is the desktop launcher's (a script profile's Port setting, passed as
+# IVORYOS_PORT) and 8080 from a terminal. Passed explicitly rather than left to run(), so it also
+# holds with an ivoryos_edge whose run() predates the launcher and would otherwise always use 8080.
+ivoryos_edge.run(__name__, port=int(os.environ.get("IVORYOS_PORT", 8080)))

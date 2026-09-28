@@ -136,6 +136,17 @@ class ProfileManager extends EventEmitter {
         this._save();
     }
 
+    /** Window preferences: 'minimizeToTray' and 'closeToTray' (default on), 'trayHintShown'. */
+    windowPref(key) {
+        return key === 'trayHintShown' ? !!this.store.trayHintShown : this.store[key] !== false;
+    }
+
+    setWindowPref(key, on) {
+        if (!['minimizeToTray', 'closeToTray', 'trayHintShown'].includes(key)) throw new Error(`Unknown setting: ${key}`);
+        this.store[key] = !!on;
+        this._save();
+    }
+
     /** Where decks pair with IvoryOS Cloud: the hosted service unless a lab runs its own. */
     get cloudUrl() {
         return this.store.cloudUrl || process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app';

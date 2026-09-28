@@ -107,6 +107,10 @@ function loadProfiles(home) {
             cloudUrl: stored.cloudUrl || null,
             // Missing means on: only an explicit "no" turns automatic update downloads off.
             autoUpdate: stored.autoUpdate !== false,
+            // The tray (Windows/Linux): minimizing and closing hide the window, decks keep running.
+            minimizeToTray: stored.minimizeToTray !== false,
+            closeToTray: stored.closeToTray !== false,
+            trayHintShown: !!stored.trayHintShown,
             profiles: stored.profiles.map((p) => withDefaults(home, p)),
         };
     }

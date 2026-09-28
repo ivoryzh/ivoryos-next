@@ -20,7 +20,7 @@
 //   <userData>/git.bin               GitHub/GitLab tokens for private drivers (encrypted)
 //   <userData>/private-packages/     private repositories downloaded at one commit each
 
-const { app, BrowserWindow, WebContentsView, Menu, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, safeStorage } = require('electron');
+const { app, BrowserWindow, WebContentsView, Menu, Tray, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, safeStorage } = require('electron');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -68,6 +68,11 @@ let updates = null;
 let runtimePromise = null;
 let runtimeStatus = { state: 'idle', message: '' };
 let quitting = false;
+// Set as soon as the app is really quitting (tray Quit, an update install, the OS logging off),
+// so closing the window then closes it instead of hiding it in the tray.
+let exiting = false;
+let tray = null;
+let trayMenuLabels = []; // what the tray menu last showed, for the smoke test to report
 const pendingLinks = [];
 
 // --- Python ------------------------------------------------------------------------------------
@@ -154,6 +159,29 @@ function showLauncher() {
     if (resources().frontendDir) launcherWindow.loadURL(LAUNCHER_URL);
     else launcherWindow.loadFile(path.join(__dirname, 'status.html')); // a build without the UI
     launcherWindow.on('resize', layoutTabs);
+    // The tray (Windows/Linux): minimizing, and closing, hide the window instead, so running
+    // decks are not one misclick away from being stopped. macOS keeps its own conventions:
+    // minimize goes to the Dock, and closing the window already leaves the app running.
+    launcherWindow.on('minimize', (event) => {
+        if (!tray || process.platform === 'darwin' || !manager || !manager.windowPref('minimizeToTray')) return;
+        event.preventDefault();
+        launcherWindow.hide();
+    });
+    launcherWindow.on('close', (event) => {
+        if (exiting || !tray || process.platform === 'darwin' || !manager || !manager.windowPref('closeToTray')) return;
+        event.preventDefault();
+        launcherWindow.hide();
+        // Once, so "I closed it but it is still running" is never a surprise.
+        if (!manager.windowPref('trayHintShown')) {
+            manager.setWindowPref('trayHintShown', true);
+            const running = manager.running.size;
+            tray.displayBalloon?.({
+                iconType: 'info',
+                title: 'IvoryOS is still running',
+                content: `${running ? `${running} deck${running === 1 ? ' keeps' : 's keep'} running. ` : ''}Open it from the tray icon, or Quit there. Settings can change this.`,
+            });
+        }
+    });
     launcherWindow.on('closed', () => {
         launcherWindow = null;
         for (const view of edgeTabs.values()) view.webContents.close();
@@ -540,6 +568,7 @@ function snapshot() {
         account: account.describe(),
         update: updates.status(),
         autoUpdate: manager.autoUpdate,
+        tray: { available: !!tray, minimizeToTray: manager.windowPref('minimizeToTray'), closeToTray: manager.windowPref('closeToTray') },
         // False where the OS has no keychain: sign-ins then last until the app quits.
         secretsPersist: safeStorage.isEncryptionAvailable(),
     };
@@ -669,13 +698,83 @@ function registerIpc() {
     // The app itself.
     handle('update:check', () => updates.check());
     handle('update:download', () => updates.download());
-    handle('update:install', () => updates.install(async () => { quitting = true; await manager.stopAll(); }));
+    handle('update:install', () => updates.install(async () => { exiting = true; quitting = true; await manager.stopAll(); }));
     handle('update:open-page', () => {
         const u = updates.status();
         return shell.openExternal(u.downloadUrl || u.releaseUrl || 'https://github.com/ivoryzh/ivoryos-next/releases');
     });
     handle('app:set-auto-update', (on) => { manager.setAutoUpdate(on); broadcast('launcher:changed'); });
+    handle('app:set-window-pref', (key, on) => {
+        if (!['minimizeToTray', 'closeToTray'].includes(key)) throw new Error(`Unknown setting: ${key}`);
+        manager.setWindowPref(key, on);
+        broadcast('launcher:changed');
+    });
     handle('app:reveal-data', () => shell.openPath(home()));
+}
+
+// --- tray ----------------------------------------------------------------------------------------
+
+/** The icon at tray size; the 1024px app icon scaled down (a separate small asset is not needed). */
+function trayImage() {
+    if (!fs.existsSync(ICON)) return nativeImage.createEmpty();
+    const size = process.platform === 'darwin' ? 18 : 16;
+    const img = nativeImage.createFromPath(ICON);
+    const small = img.resize({ width: size, height: size, quality: 'best' });
+    small.addRepresentation({ scaleFactor: 2, width: size * 2, height: size * 2, buffer: img.resize({ width: size * 2, height: size * 2, quality: 'best' }).toPNG() });
+    return small;
+}
+
+function openFromTray(profileId) {
+    showLauncher();
+    if (profileId && manager.statusOf(profileId).state === 'running') openEdgeTab(profileId);
+    else showTab(null);
+}
+
+/** The tray's menu and tooltip, rebuilt whenever a profile changes state. */
+function refreshTray() {
+    if (!tray || !manager) return;
+    const profiles = manager.list();
+    const running = profiles.filter((p) => p.status.state === 'running');
+    tray.setToolTip(running.length ? `IvoryOS: ${running.length} running` : 'IvoryOS');
+    const label = { running: 'Running', starting: 'Starting', stopping: 'Stopping', installing: 'Installing', crashed: 'Stopped unexpectedly', error: 'Could not start', stopped: 'Stopped' };
+    const act = (fn) => () => fn().catch((e) => dialog.showMessageBox(showLauncher(), { type: 'error', message: e.message }));
+    const template = [
+        { label: 'Open IvoryOS', click: () => openFromTray(null) },
+        { type: 'separator' },
+        ...profiles.map((p) => {
+            const state = p.status.state;
+            const busy = ['starting', 'stopping', 'installing'].includes(state);
+            return {
+                label: `${state === 'running' ? '\u25CF' : '\u25CB'}  ${p.name}   ${label[state] || state}${state === 'running' ? ` :${p.status.port}` : ''}`,
+                submenu: [
+                    { label: 'Open', enabled: state === 'running', click: () => openFromTray(p.id) },
+                    state === 'running' || busy
+                        ? { label: 'Stop', enabled: !busy, click: act(async () => { closeEdgeTab(p.id); await manager.stop(p.id); }) }
+                        : { label: 'Start', enabled: p.problems.length === 0, click: act(() => manager.start(p.id)) },
+                    { label: 'Restart', enabled: state === 'running', click: act(async () => { await manager.restart(p.id); reloadEdgeTab(p.id); }) },
+                ],
+            };
+        }),
+        ...(profiles.length ? [{ type: 'separator' }] : []),
+        { label: running.length ? `Quit IvoryOS (stops ${running.length} running)` : 'Quit IvoryOS', click: () => app.quit() },
+    ];
+    trayMenuLabels = template.filter((i) => i.label).map((i) => i.label);
+    tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+function createTray() {
+    try {
+        tray = new Tray(trayImage());
+    } catch (e) {
+        // Some Linux desktops have no tray; the window then minimizes and closes as usual.
+        console.warn(`No system tray: ${e.message}`);
+        tray = null;
+        return;
+    }
+    // Windows and Linux: a click opens the window (the menu is on right-click). macOS shows the
+    // menu on click, which is its convention for menu bar icons.
+    if (process.platform !== 'darwin') tray.on('click', () => openFromTray(null));
+    refreshTray();
 }
 
 // --- menus ---------------------------------------------------------------------------------------
@@ -781,7 +880,7 @@ app.whenReady().then(async () => {
     if (process.platform === 'darwin' && app.dock && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
     serveFrontend();
     manager = new ProfileManager({ home: home(), getRuntime, frontendDir: resources().frontendDir });
-    manager.on('changed', () => broadcast('launcher:changed'));
+    manager.on('changed', () => { broadcast('launcher:changed'); refreshTray(); });
     manager.on('log', (id, line) => broadcast('launcher:log', id, line));
     manager.on('crashed', (id) => closeEdgeTab(id));
     account = new Account({ fetch: (...a) => net.fetch(...a), store: secretFile(path.join(home(), 'account.bin'), safeStorage) });
@@ -802,6 +901,7 @@ app.whenReady().then(async () => {
 
     registerIpc();
     buildMenu();
+    if (!SMOKE_TEST) createTray();
     showLauncher();
     getRuntime().catch(() => {}); // warm Python up while the launcher draws
 
@@ -899,6 +999,23 @@ async function smokeTest() {
             await shoot('profile-cloud', `(([...document.querySelectorAll('h3')].find(h => h.textContent.includes('Cloud connection')) || { scrollIntoView() {} }).scrollIntoView({ block: 'center' }), null)`);
         }
         launcher.menuBar = Menu.getApplicationMenu() ? 'present' : 'none';
+        if (process.env.IVORYOS_SMOKE_TRAY) {
+            // The tray, as a person would use it: minimize and close must hide, not quit.
+            createTray();
+            launcherWindow.show();
+            const settle = () => new Promise((r) => setTimeout(r, 800));
+            const t = { created: !!tray };
+            launcherWindow.minimize(); await settle();
+            t.minimizeHides = !launcherWindow.isVisible() && !launcherWindow.isDestroyed();
+            showLauncher(); await settle();
+            t.showsAgain = launcherWindow.isVisible();
+            launcherWindow.close(); await settle();
+            t.closeHides = !!launcherWindow && !launcherWindow.isDestroyed() && !launcherWindow.isVisible();
+            t.hintShown = manager.windowPref('trayHintShown');
+            refreshTray();
+            t.menu = trayMenuLabels;
+            launcher.tray = t;
+        }
         if (process.env.IVORYOS_SMOKE_UPDATE) launcher.update = await updates.check();
         Object.assign(report, {
             ok: true,
@@ -919,7 +1036,8 @@ async function smokeTest() {
 app.on('activate', () => showLauncher());
 
 // Closing the last window does not stop running decks on macOS (the Dock icon keeps the app, and
-// its edges, alive); elsewhere it quits, which stops them.
+// its edges, alive); elsewhere it quits, which stops them. (With the tray, closing only hides the
+// window, so this is reached when the tray is off or unavailable.)
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
 });
@@ -927,6 +1045,7 @@ app.on('window-all-closed', () => {
 // Stop every edge before exiting, so each can close its serial ports and database cleanly rather
 // than being orphaned or killed mid-write.
 app.on('before-quit', (event) => {
+    exiting = true;
     if (quitting || !manager || manager.running.size === 0) return;
     event.preventDefault();
     quitting = true;

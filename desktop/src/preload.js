@@ -81,5 +81,6 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     installUpdate: () => call('update:install'),
     openUpdatePage: () => call('update:open-page'),
     setAutoUpdate: (on) => call('app:set-auto-update', on),
+    setWindowPref: (key, on) => call('app:set-window-pref', key, on),
     revealData: () => call('app:reveal-data'),
 });

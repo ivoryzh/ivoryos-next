@@ -41,6 +41,21 @@ export default function SettingsPanel({ api, snap, theme, setTheme }: {
         </div>
       </Section>
 
+      {snap.tray?.available && !isMac && (
+        <Section title="Window">
+          <div className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200">
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="accent-indigo-600 mt-0.5" checked={snap.tray.minimizeToTray} onChange={e => api.setWindowPref('minimizeToTray', e.target.checked)} />
+              <span>Minimize to the system tray<span className="block text-xs text-gray-500 dark:text-gray-400">The window leaves the taskbar; click the IvoryOS icon in the tray to bring it back.</span></span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="accent-indigo-600 mt-0.5" checked={snap.tray.closeToTray} onChange={e => api.setWindowPref('closeToTray', e.target.checked)} />
+              <span>Keep running in the tray when the window is closed<span className="block text-xs text-gray-500 dark:text-gray-400">Decks keep running. Quit from the tray icon&apos;s menu stops them. Off: closing the window quits IvoryOS and stops every deck.</span></span>
+            </label>
+          </div>
+        </Section>
+      )}
+
       <Section title="Updates">
         <UpdateRow api={api} update={snap.update} />
         {snap.update.state !== 'unsupported' && !snap.update.manual && (

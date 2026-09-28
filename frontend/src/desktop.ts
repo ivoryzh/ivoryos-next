@@ -81,6 +81,8 @@ export type GitImport = { file: string; sha: string; ref: string; scan: DriverSc
 export type Snapshot = {
   profiles: Profile[]; runtime: RuntimeStatus; hubUrl: string; cloudUrl: string; dataRoot: string; version: string; tabs: Tabs;
   platform: string; account: AccountInfo; update: UpdateStatus; autoUpdate: boolean; secretsPersist: boolean;
+  /** Windows/Linux: whether a tray icon exists, and what minimizing / closing the window do. */
+  tray: { available: boolean; minimizeToTray: boolean; closeToTray: boolean };
 };
 
 /** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
@@ -202,6 +204,7 @@ export interface DesktopApi {
   installUpdate(): Promise<void>;
   openUpdatePage(): Promise<void>;
   setAutoUpdate(on: boolean): Promise<void>;
+  setWindowPref(key: 'minimizeToTray' | 'closeToTray', on: boolean): Promise<void>;
   revealData(): Promise<void>;
 }
 

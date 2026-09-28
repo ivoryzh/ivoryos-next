@@ -127,3 +127,19 @@ test('a profiles.json saved with a byte-order mark is read, not replaced by defa
     assert.equal(again.id, first.id);
     assert.equal(again.port, 8095);
 });
+
+test('tray preferences default to on, persist, and refuse unknown keys', () => {
+    const { ProfileManager } = require('../src/manager');
+    const home = tmp();
+    const mgr = new ProfileManager({ home, getRuntime: async () => ({}) });
+    assert.equal(mgr.windowPref('minimizeToTray'), true);
+    assert.equal(mgr.windowPref('closeToTray'), true);
+    assert.equal(mgr.windowPref('trayHintShown'), false);
+    mgr.setWindowPref('closeToTray', false);
+    mgr.setWindowPref('trayHintShown', true);
+    const again = new ProfileManager({ home, getRuntime: async () => ({}) });
+    assert.equal(again.windowPref('closeToTray'), false, 'kept across launches');
+    assert.equal(again.windowPref('minimizeToTray'), true);
+    assert.equal(again.windowPref('trayHintShown'), true, 'the hint is shown once, not every launch');
+    assert.throws(() => mgr.setWindowPref('launchMissiles', true), /Unknown setting/);
+});

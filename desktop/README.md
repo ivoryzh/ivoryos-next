@@ -128,6 +128,16 @@ which is at the top of the screen and is what makes copy/paste work in text fiel
   the deck lists `private-packages/<provider>-<repo>-<commit>.tar.gz`, never the token. Importing
   again moves the deck to the newer commit (`packageKey` treats it as the same package).
 
+## The tray
+
+A tray icon (menu bar on macOS) lists every profile with its state and port, each with Open /
+Start / Stop / Restart, plus Open IvoryOS and Quit (which says how many decks it will stop). On
+Windows and Linux, minimizing hides the window to the tray, and so does closing it: decks keep
+running, and the first time a balloon says so. Both are switches in Settings -> Window; with
+close-to-tray off, closing quits and stops every deck as before. Clicking the icon opens the
+window. macOS keeps its conventions (minimize to the Dock; closing already leaves the app
+running). `npm run smoke` with `IVORYOS_SMOKE_TRAY=1` checks minimize and close really hide.
+
 ## Updates
 
 `src/updater.js`, from the GitHub releases CI publishes. Windows and Linux: electron-updater
@@ -184,8 +194,6 @@ packaged builds are named IvoryOS throughout.
 - **Real plans.** The Pro switch is a preview on a user-writable field (see Accounts).
 - **Offline first launch.** uv downloads Python on first run; bundling a standalone Python would
   remove that.
-- **Tray icon.** Closing the launcher on macOS leaves running decks running (Dock icon), but there
-  is no menu-bar status yet.
 - **The Hub's download bundle still targets the legacy `ivoryos` package** (`import ivoryos` in
   the generated `main.py`); "Open in IvoryOS" targets this edge.
 - **Tested by hand on macOS (arm64) and Windows (x64).** Linux is covered only by CI's smoke

@@ -88,8 +88,11 @@ export type CloudLink = {
   paired: boolean;
   client_id?: string | null;
   broker?: string | null;
+  /** "conflict": another client is using this identity; "reconnecting": the link dropped. */
   connection_state?: string | null;
   connection_error?: string | null;
+  /** Where the edge keeps its pairing (never the token itself). Absent from older edges. */
+  pairing_file?: string | null;
 };
 
 export type ArgDef = { name: string; type?: string; default?: unknown; import_path?: string; class_name?: string; args?: ArgDef[] };

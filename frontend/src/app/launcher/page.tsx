@@ -5,9 +5,10 @@ import {
   RotateCw, Settings, Sparkles, Square, X,
 } from 'lucide-react';
 import { notify, promptDialog } from '@ivoryos/shared-ui';
-import { CLOUD_TAB, desktopApi, type AccountInfo, type DesktopApi, type Profile, type Snapshot, type Tabs, type UpdateStatus } from '@/desktop';
+import { CLOUD_TAB, desktopApi, type AccountInfo, type CloudLink, type DesktopApi, type Profile, type Snapshot, type Tabs, type UpdateStatus } from '@/desktop';
 import AccountPanel, { Avatar, type AuthMode } from '@/components/launcher/AccountPanel';
 import CloudPanel, { useCloudLinks } from '@/components/launcher/CloudPanel';
+import { sharedIdentity } from '@/components/launcher/CloudConnection';
 import DeckPanel from '@/components/launcher/DeckPanel';
 import ProfileSettings from '@/components/launcher/ProfileSettings';
 import SettingsPanel from '@/components/launcher/SettingsPanel';
@@ -252,6 +253,8 @@ export default function LauncherPage() {
               hubUrl={snap?.hubUrl || ''}
               pro={pro}
               onUpgrade={() => setUpgrade('private')}
+              link={cloudLinks[profile.id]}
+              sharedWith={sharedIdentity(profile, profiles, cloudLinks)}
               tab={tab}
               setTab={setTab}
               log={logs[profile.id] || []}
@@ -340,12 +343,14 @@ function UpdateChip({ update, onClick }: { update: UpdateStatus; onClick: () => 
   );
 }
 
-function ProfileView({ api, profile, hubUrl, pro, onUpgrade, tab, setTab, log, run, onRemoved }: {
+function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, tab, setTab, log, run, onRemoved }: {
   api: DesktopApi;
   profile: Profile;
   hubUrl: string;
   pro: boolean;
   onUpgrade: () => void;
+  link?: CloudLink;
+  sharedWith: Profile[];
   tab: 'main' | 'log' | 'settings';
   setTab: (t: 'main' | 'log' | 'settings') => void;
   log: string[];
@@ -389,6 +394,17 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, tab, setTab, log, r
       </div>
 
       {s.portNote && <PortNote profile={profile} note={s.portNote} openSettings={() => setTab('settings')} />}
+      {running && (sharedWith.length > 0 || link?.connection_state === 'conflict') && tab !== 'settings' && (
+        <div className="flex items-start gap-2 rounded-lg border border-red-200 dark:border-red-500/30 bg-red-50/60 dark:bg-red-900/10 p-3 text-sm text-red-800 dark:text-red-300">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1">
+            {sharedWith.length
+              ? <><b>{sharedWith.map(p => p.name).join(', ')}</b> is paired as the same Cloud device and running too, so the two keep kicking each other off Cloud.</>
+              : <>Another edge is using this Cloud identity (<span className="font-mono">{link?.client_id}</span>), probably a second copy of this {profile.kind === 'script' ? 'script' : 'deck'}. Both keep dropping off Cloud.</>}
+          </span>
+          <Button small tone="ghost" onClick={() => setTab('settings')}>Details</Button>
+        </div>
+      )}
       {profile.problems.length > 0 && (
         <div className="text-sm rounded-lg p-3 bg-amber-50 text-amber-800 dark:bg-amber-900/15 dark:text-amber-300">{profile.problems.join(' ')}</div>
       )}
@@ -414,7 +430,7 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, tab, setTab, log, r
         ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade} />
         : <ScriptOverview api={api} profile={profile} openSettings={() => setTab('settings')} />)}
       {tab === 'log' && <LogPanel api={api} profile={profile} lines={log} />}
-      {tab === 'settings' && <ProfileSettings api={api} profile={profile} onRemoved={onRemoved} />}
+      {tab === 'settings' && <ProfileSettings api={api} profile={profile} link={link} sharedWith={sharedWith} onRemoved={onRemoved} />}
     </div>
   );
 }

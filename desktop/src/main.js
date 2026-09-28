@@ -892,6 +892,11 @@ async function smokeTest() {
             launcher.settings = await shoot('settings', `document.querySelector('nav button[title^="Settings"]')`);
             launcher.signIn = await shoot('account', `[...document.querySelectorAll('nav button')].find(b => b.textContent.trim() === 'Sign in')`);
             launcher.upgrade = await shoot('upgrade', `[...document.querySelectorAll('nav button')].find(b => b.textContent.includes('IvoryOS Cloud'))`);
+            // The profile's own Configuration / Settings tab (its Cloud connection card).
+            await shoot('profile', `[...document.querySelectorAll('nav button')].find(b => b.textContent.includes(${JSON.stringify(target.name)}))`);
+            await new Promise((r) => setTimeout(r, 6000)); // a Cloud status poll or two
+            launcher.profileSettings = await shoot('profile-settings', `[...document.querySelectorAll('main button')].find(b => ['Configuration', 'Settings'].includes(b.textContent.trim()))`);
+            await shoot('profile-cloud', `(([...document.querySelectorAll('h3')].find(h => h.textContent.includes('Cloud connection')) || { scrollIntoView() {} }).scrollIntoView({ block: 'center' }), null)`);
         }
         launcher.menuBar = Menu.getApplicationMenu() ? 'present' : 'none';
         if (process.env.IVORYOS_SMOKE_UPDATE) launcher.update = await updates.check();

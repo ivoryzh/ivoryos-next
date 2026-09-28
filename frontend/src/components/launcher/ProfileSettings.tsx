@@ -2,8 +2,9 @@
 import React, { useEffect, useState } from 'react';
 import { FolderOpen, Trash2 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
-import type { DesktopApi, Profile } from '@/desktop';
+import type { DesktopApi, Profile, CloudLink } from '@/desktop';
 import PythonEnvironment from './PythonEnvironment';
+import CloudConnection from './CloudConnection';
 import { Button, Field, KeyValueRows, cardClass, inputClass } from './ui';
 
 type Draft = Pick<Profile, 'name' | 'port' | 'listenOnNetwork' | 'autoStart' | 'env' | 'script' | 'cwd' | 'args' | 'python' | 'dataDir'>;
@@ -19,7 +20,9 @@ const draftOf = (p: Profile): Draft => ({
  * the launcher cannot reach inside the Python code. Saved explicitly, and applied on the next
  * start, so half-typed values never restart a running bench.
  */
-export default function ProfileSettings({ api, profile, onRemoved }: { api: DesktopApi; profile: Profile; onRemoved: () => void }) {
+export default function ProfileSettings({ api, profile, link, sharedWith, onRemoved }: {
+  api: DesktopApi; profile: Profile; link?: CloudLink; sharedWith: Profile[]; onRemoved: () => void;
+}) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(profile));
   const [argsText, setArgsText] = useState((profile.args || []).join(' '));
   const [saving, setSaving] = useState(false);
@@ -126,6 +129,8 @@ export default function ProfileSettings({ api, profile, onRemoved }: { api: Desk
           </div>
         )}
       </section>
+
+      <CloudConnection api={api} profile={profile} link={link} sharedWith={sharedWith} />
 
       <div className="flex items-center justify-between">
         <Button tone="danger" onClick={async () => {

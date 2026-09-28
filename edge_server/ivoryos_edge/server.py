@@ -76,12 +76,34 @@ def get_cloud_settings():
     below, or the CLOUD_TOKEN env var for headless provisioning) — it is just no longer readable
     back out over HTTP.
     """
+    state, error = cloud_connection_state, cloud_connection_error
+    # "connected" is set once, when the first connection succeeds; the link can be lost, or
+    # be taken over by another client with this id, long after. Ask the broker how it is now.
+    health = global_broker.link_health() if global_broker and hasattr(global_broker, "link_health") else None
+    if health and state == "connected":
+        if health.get("other_session"):
+            state = "conflict"
+            error = (f"Another edge is connecting as this Cloud device ({global_client_id}). "
+                     f"It is usually a second copy of this script or deck, "
+                     f"started from the same folder, which shares its pairing. The two keep taking the "
+                     f"connection from each other. Stop the other copy, or pair this one as its own device.")
+        elif health["flapping"]:
+            state = "conflict"
+            error = (f"The Cloud connection dropped {health['recent_drops']} times in the last 30 seconds, each "
+                     f"time right after connecting. Another edge is probably using this Cloud identity "
+                     f"({global_client_id}): a second copy of this script or deck, started from the same "
+                     f"folder, shares its pairing. Stop the other copy, or pair this one as its own device.")
+        elif not health["connected"]:
+            state = "reconnecting"
     return {
         "paired": bool(CLOUD_TOKEN),
         "client_id": global_client_id,
         "broker": cloud_broker_url,
-        "connection_state": cloud_connection_state,
-        "connection_error": cloud_connection_error,
+        "connection_state": state,
+        "connection_error": error,
+        # Where the pairing is kept. Every copy of an edge started with this folder shares it,
+        # which is what makes two copies one identity. The path, never the token.
+        "pairing_file": ENV_PATH,
     }
 
 @app.post("/api/cloud-settings/pair")
@@ -657,6 +679,8 @@ async def setup_broker():
             global_broker.subscribe(f"{topic_prefix}/{client_id}/sequences-push")
             # What Cloud is holding for this device, for the Queue page (awareness only).
             global_broker.subscribe(f"{topic_prefix}/{client_id}/cloud-queue")
+            # Another process connecting under this identity: a second copy of this edge.
+            global_broker.watch_identity(f"{topic_prefix}/{client_id}/presence", global_session)
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the

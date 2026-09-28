@@ -125,6 +125,24 @@ class ProfileManager extends EventEmitter {
         this._save();
     }
 
+    /** Where decks pair with IvoryOS Cloud: the hosted service unless a lab runs its own. */
+    get cloudUrl() {
+        return this.store.cloudUrl || process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app';
+    }
+
+    /** Takes effect for each edge the next time it starts, since the edge reads it at startup. */
+    setCloudUrl(url) {
+        let value = url ? String(url).trim().replace(/\/+$/, '') : '';
+        // "localhost:3002" or "cloud.mylab.org": http for this computer or the lab network, where
+        // a Cloud normally serves plain http, https for anything else.
+        if (value && !/^https?:\/\//.test(value)) {
+            const local = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[^/:]+\.local)/.test(value);
+            value = `${local ? 'http' : 'https'}://${value}`;
+        }
+        this.store.cloudUrl = value || null;
+        this._save();
+    }
+
     logFile(id) {
         return path.join(this.home, 'logs', `${id}.log`);
     }
@@ -180,7 +198,7 @@ class ProfileManager extends EventEmitter {
                 throw new Error(`Port ${profile.port} is in use by another program. Stop it, or give this profile another port.`);
             }
 
-            const cmd = commandFor(profile, { python: runtime.python, frontendDir: this.frontendDir });
+            const cmd = commandFor(profile, { python: runtime.python, frontendDir: this.frontendDir, cloudUrl: this.store.cloudUrl || null });
             const supervisor = new EdgeSupervisor({ ...cmd, logFile: this.logFile(id) });
             this.running.set(id, { supervisor });
             supervisor.on('log', (line) => this.emit('log', id, line));

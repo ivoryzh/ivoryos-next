@@ -45,6 +45,11 @@ test('script profiles keep the script’s own data by default and pass port and 
     assert.equal(cmd.env.IVORYOS_HOST, '127.0.0.1');
     assert.equal(cmd.env.IVORYOS_DATA_DIR, undefined);
     assert.equal(commandFor({ ...p, python: '/my/venv/python' }, { python: '/venv/bin/python' }).command, '/my/venv/python');
+    // The edge keeps its own Cloud default unless the launcher was given one; a profile's env wins.
+    assert.equal(cmd.env.IVORYOS_CLOUD_URL, undefined);
+    assert.equal(commandFor(p, { python: 'py', cloudUrl: 'http://lab-cloud:3000' }).env.IVORYOS_CLOUD_URL, 'http://lab-cloud:3000');
+    const own = { ...p, env: { IVORYOS_CLOUD_URL: 'http://mine:3000' } };
+    assert.equal(commandFor(own, { python: 'py', cloudUrl: 'http://lab-cloud:3000' }).env.IVORYOS_CLOUD_URL, 'http://mine:3000');
 });
 
 test('deck profiles run the deck through the CLI with their own data folder', () => {
@@ -102,4 +107,13 @@ test('freeName makes a usable, unused instrument name', () => {
     assert.equal(freeName(deck, 'Sf10 Pump #1'), 'sf10_pump_1');
     assert.equal(freeName(deck, '1st HPLC'), 'device_1st_hplc');
     assert.equal(freeName(deck, '!!'), 'device');
+});
+
+test('launcher-wide settings survive a restart', () => {
+    const home = tmp();
+    const store = loadProfiles(home);
+    saveProfiles(home, { ...store, hubUrl: 'http://localhost:3111', cloudUrl: 'http://localhost:3002' });
+    const again = loadProfiles(home);
+    assert.equal(again.hubUrl, 'http://localhost:3111');
+    assert.equal(again.cloudUrl, 'http://localhost:3002');
 });

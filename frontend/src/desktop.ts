@@ -40,7 +40,16 @@ export type RuntimeStatus = { state: 'idle' | 'preparing' | 'ready' | 'error'; m
 
 export type Tabs = { open: string[]; active: string | null };
 
-export type Snapshot = { profiles: Profile[]; runtime: RuntimeStatus; hubUrl: string; dataRoot: string; version: string; tabs: Tabs };
+export type Snapshot = { profiles: Profile[]; runtime: RuntimeStatus; hubUrl: string; cloudUrl: string; dataRoot: string; version: string; tabs: Tabs };
+
+/** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
+export type CloudLink = {
+  paired: boolean;
+  client_id?: string | null;
+  broker?: string | null;
+  connection_state?: string | null;
+  connection_error?: string | null;
+};
 
 export type ArgDef = { name: string; type?: string; default?: unknown; import_path?: string; class_name?: string; args?: ArgDef[] };
 
@@ -67,7 +76,7 @@ export type HubModule = {
   connection?: string[] | null;
   init_args?: ArgDef[] | null;
   is_tested_with_ivoryos?: boolean | null;
-  devices?: { name?: string; vendor?: string; category?: string | null } | null;
+  devices?: { name?: string; vendor?: string; category?: string | null; image_url?: string | null } | null;
 };
 
 export interface DesktopApi {
@@ -82,7 +91,8 @@ export interface DesktopApi {
   start(id: string): Promise<ProfileStatus>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<ProfileStatus>;
-  open(id: string): Promise<void>;
+  /** `page` opens that page of the edge in its tab, e.g. '/cloud/'. */
+  open(id: string, page?: string): Promise<void>;
   openInBrowser(id: string): Promise<void>;
   showTab(id: string | null): Promise<void>;
   closeTab(id: string): Promise<void>;
@@ -101,7 +111,20 @@ export interface DesktopApi {
   installFromFile(): Promise<void>;
   freeName(id: string, suggestion: string): Promise<string>;
   setHubUrl(url: string): Promise<void>;
+  setCloudUrl(url: string): Promise<void>;
+  /** Open IvoryOS Cloud as a tab of this window (tab id CLOUD_TAB). */
+  /** The launcher's own interpreter (the environment deck profiles and Hub installs use). */
+  launcherPython(): Promise<string>;
+  /** An interpreter's version and whether IvoryOS is installed in it; null for the launcher's own. */
+  inspectPython(python: string | null): Promise<PythonInfo>;
+  /** Make (or reuse) `<folder>/.venv` with IvoryOS installed; returns its interpreter. */
+  createVenv(folder: string): Promise<string>;
+  installEdgeInto(python: string): Promise<void>;
+  openCloud(): Promise<void>;
+  openCloudInBrowser(): Promise<void>;
+  checkCloud(): Promise<CloudCheck>;
   hubSearch(q: string): Promise<{ modules: HubModule[] }>;
+  hubBrowse(): Promise<{ modules: HubModule[] }>;
   hubModule(id: number): Promise<{ module: HubModule }>;
   hubEntry(payload: {
     moduleId: number;
@@ -109,6 +132,23 @@ export interface DesktopApi {
     connection: { type?: string; port?: string; ip?: string; networkPort?: string; args?: Record<string, unknown> };
   }): Promise<{ instrument: DeckInstrument; packages: string[]; warnings: string[] }>;
 }
+
+export type PythonInfo = { ok: boolean; python: string; version?: string; edge?: string | null; prefix?: string; error?: string };
+
+/** The id of the Cloud tab among the open tabs. */
+export const CLOUD_TAB = '@cloud';
+
+export type CloudCheck = {
+  url: string;
+  reachable: boolean;
+  /** Answered like an IvoryOS Cloud (its /api/health has the expected shape). */
+  isCloud?: boolean;
+  /** Cloud's own list of what is wrong on its side, e.g. its daemon not running. */
+  problems?: string[];
+  error?: string;
+  /** When unreachable: an address that does answer as a Cloud, and why it is likely the one meant. */
+  suggestion?: { url: string; reason: string };
+};
 
 export function desktopApi(): DesktopApi | null {
   if (typeof window === 'undefined') return null;

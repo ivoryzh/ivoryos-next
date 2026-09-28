@@ -114,7 +114,9 @@ export function KeyValueRows({ value, onChange, resetKey, keyPlaceholder = 'NAME
 }
 
 export function Modal({ title, onClose, children, footer, wide }: {
-  title: React.ReactNode; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; wide?: boolean;
+  title: React.ReactNode; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode;
+  /** true: a wider form. 'browser': near full window at a fixed height, for a catalog with its own scrolling panes. */
+  wide?: boolean | 'browser';
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -125,13 +127,13 @@ export function Modal({ title, onClose, children, footer, wide }: {
     <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-6" onMouseDown={onClose}>
       <div
         onMouseDown={e => e.stopPropagation()}
-        className={`w-full ${wide ? 'max-w-4xl' : 'max-w-xl'} max-h-full flex flex-col bg-white dark:bg-[#141414] border border-gray-200 dark:border-white/10 rounded-2xl shadow-2xl`}
+        className={`w-full ${wide === 'browser' ? 'max-w-6xl h-full' : wide ? 'max-w-4xl' : 'max-w-xl'} max-h-full flex flex-col bg-white dark:bg-[#141414] border border-gray-200 dark:border-white/10 rounded-2xl shadow-2xl`}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-white/10">
           <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</h2>
           <button type="button" onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"><X className="w-4 h-4" /></button>
         </div>
-        <div className="flex-1 min-h-0 overflow-y-auto p-5">{children}</div>
+        <div className={`flex-1 min-h-0 ${wide === 'browser' ? 'flex' : 'overflow-y-auto p-5'}`}>{children}</div>
         {footer && <div className="px-5 py-3 border-t border-gray-100 dark:border-white/10 flex justify-end gap-2">{footer}</div>}
       </div>
     </div>

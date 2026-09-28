@@ -77,6 +77,49 @@ class PythonRuntime {
         fs.writeFileSync(this.statePath, JSON.stringify(state, null, 2));
     }
 
+    /** What `pip install` is given to install the edge: this build's wheel, or the checkout. */
+    _edgeTarget() {
+        return this.edgeSource.kind === 'editable' ? ['-e', this.edgeSource.path] : [this.edgeSource.path];
+    }
+
+    // --- environments the person manages (e.g. a project's own .venv, used from their IDE) ----------
+
+    /**
+     * Describe an interpreter: its Python version and whether IvoryOS is importable from it, which
+     * is what decides whether a script can run there. Never throws: a path that is not a working
+     * Python is reported as such.
+     */
+    async inspect(python) {
+        const probe = 'import json, sys\ntry:\n    import importlib.metadata as m; v = m.version("ivoryos-edge")\nexcept Exception:\n    v = None\nprint(json.dumps({"python": sys.version.split()[0], "edge": v, "prefix": sys.prefix}))';
+        try {
+            const out = await run(python, ['-c', probe]);
+            const info = JSON.parse(out.trim().split(/\r?\n/).pop());
+            return { ok: true, python, version: info.python, edge: info.edge, prefix: info.prefix };
+        } catch (e) {
+            return { ok: false, python, error: fs.existsSync(python) ? (e.output || e.message).trim().split('\n').pop() : 'No file at this path.' };
+        }
+    }
+
+    /**
+     * A `.venv` in `folder` with this launcher's edge installed: the environment a project's IDE
+     * and the launcher then share. Reused if it already exists (only the edge is installed).
+     * @returns {Promise<string>} the new interpreter's path
+     */
+    async createProjectVenv(folder) {
+        const venvDir = path.join(folder, '.venv');
+        const python = venvPython(venvDir);
+        if (!fs.existsSync(python)) {
+            await run(this.uv, ['venv', '--python', PYTHON_VERSION, '--seed', venvDir], { onLine: this.onLine });
+        }
+        await this.installEdgeInto(python);
+        return python;
+    }
+
+    /** Install this launcher's edge into another environment (one the person chose). */
+    async installEdgeInto(python) {
+        return run(this.uv, ['pip', 'install', '--python', python, ...this._edgeTarget()], { onLine: this.onLine });
+    }
+
     /** A string that changes whenever a different edge build has to be installed. */
     _edgeFingerprint() {
         const src = this.edgeSource;
@@ -101,10 +144,7 @@ class PythonRuntime {
         const fingerprint = this._edgeFingerprint();
         if (state.edge !== fingerprint) {
             onProgress('Installing the IvoryOS edge…');
-            const target = this.edgeSource.kind === 'editable'
-                ? ['-e', this.edgeSource.path]
-                : [this.edgeSource.path];
-            await run(this.uv, ['pip', 'install', '--python', this.python, ...target], { onLine: this.onLine });
+            await run(this.uv, ['pip', 'install', '--python', this.python, ...this._edgeTarget()], { onLine: this.onLine });
             state.edge = fingerprint;
             state.installedAt = new Date().toISOString();
             this._writeState(state);

@@ -133,3 +133,20 @@ test('overlapping restarts and edits leave exactly one process, and Stop reaches
     assert.equal(mgr.statusOf(p.id).state, 'stopped');
     assert.ok(await portIsFree(port), 'nothing is left listening: no untracked edge survived');
 });
+
+test('a Cloud address without a scheme gets http on this computer or the lab network, https elsewhere', () => {
+    const mgr = new ProfileManager({ home: tmp(), getRuntime: async () => fakeRuntime() });
+    const cases = {
+        'localhost:3002': 'http://localhost:3002',
+        '192.168.1.20:3000/': 'http://192.168.1.20:3000',
+        'labcloud.local:3000': 'http://labcloud.local:3000',
+        'cloud.mylab.org': 'https://cloud.mylab.org',
+        'https://localhost:3002': 'https://localhost:3002', // an explicit scheme is kept
+    };
+    for (const [typed, saved] of Object.entries(cases)) {
+        mgr.setCloudUrl(typed);
+        assert.equal(mgr.cloudUrl, saved, typed);
+    }
+    mgr.setCloudUrl('');
+    assert.equal(mgr.cloudUrl, process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app');
+});

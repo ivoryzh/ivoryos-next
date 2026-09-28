@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { FolderOpen, Trash2 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { DesktopApi, Profile } from '@/desktop';
+import PythonEnvironment from './PythonEnvironment';
 import { Button, Field, KeyValueRows, cardClass, inputClass } from './ui';
 
 type Draft = Pick<Profile, 'name' | 'port' | 'listenOnNetwork' | 'autoStart' | 'env' | 'script' | 'cwd' | 'args' | 'python' | 'dataDir'>;
@@ -73,6 +74,12 @@ export default function ProfileSettings({ api, profile, onRemoved }: { api: Desk
               <Button onClick={() => pick('python', p => set('python', p))}>Browse…</Button>
             </div>
           </Field>
+          <PythonEnvironment
+            api={api}
+            python={draft.python || null}
+            folder={draft.cwd || (draft.script ? draft.script.replace(/[\\/][^\\/]*$/, '') : null)}
+            onChoose={p => set('python', p)}
+          />
           <Field label="Working folder">
             <div className="flex gap-2">
               <input value={draft.cwd || ''} onChange={e => set('cwd', e.target.value)} className={`${inputClass} font-mono`} />
@@ -111,6 +118,7 @@ export default function ProfileSettings({ api, profile, onRemoved }: { api: Desk
             <span className="block text-xs text-gray-500 dark:text-gray-400">Anyone who can reach this port can drive the instruments. Off, only this computer can.</span>
           </span>
         </label>
+        {!script && <PythonEnvironment api={api} python={null} />}
         {!script && (
           <div className="flex gap-2 flex-wrap">
             <Button small onClick={() => api.reveal(profile.id, 'deck').catch(e => notify(e.message))}><FolderOpen className="w-3.5 h-3.5" /> Show deck file</Button>

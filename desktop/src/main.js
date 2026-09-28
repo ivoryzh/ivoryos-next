@@ -105,10 +105,17 @@ const webPreferences = {
     nodeIntegration: false,
 };
 
-/** Links out of the app open in the real browser; a window only ever shows its own origin. */
+/**
+ * Links out of the app open in the real browser; a window only ever shows its own origin.
+ *
+ * The app never opens a second window of its own. A new window gets none of this window's
+ * setup: opened on the launcher's own page it has no bridge to the app (and says "Open the app
+ * to use it"), and on macOS, with the app full screen, it opens in a full-screen space of its
+ * own with no way back. So a request for a new window becomes the system browser for web
+ * addresses (an edge is an ordinary web server) and nothing for the app's own pages.
+ */
 function keepToOrigin(win, isOwn) {
     win.webContents.setWindowOpenHandler(({ url }) => {
-        if (isOwn(url)) return { action: 'allow' };
         if (/^https?:/.test(url)) shell.openExternal(url);
         return { action: 'deny' };
     });
@@ -171,17 +178,21 @@ function showTab(id) {
     broadcast('launcher:tabs', tabState());
 }
 
-function openEdgeTab(id) {
+/** Open (or switch to) a profile's tab; `page` such as '/cloud/' opens that page of the edge. */
+function openEdgeTab(id, page) {
     const status = manager.statusOf(id);
     if (status.state !== 'running') throw new Error('Start the profile first.');
     showLauncher();
+    const origin = status.url;
+    const target = page && /^\/[\w\-/]*$/.test(page) ? `${origin}${page}` : null;
     let view = edgeTabs.get(id);
     if (!view) {
         view = new WebContentsView({ webPreferences });
-        const origin = status.url;
         keepToOrigin(view, (url) => url.startsWith(origin));
-        view.webContents.loadURL(origin);
+        view.webContents.loadURL(target || origin);
         edgeTabs.set(id, view);
+    } else if (target) {
+        view.webContents.loadURL(target);
     }
     showTab(id);
 }
@@ -197,6 +208,27 @@ function closeEdgeTab(id) {
     if (activeTab === id) activeTab = null;
     layoutTabs();
     broadcast('launcher:tabs', tabState());
+}
+
+/** The Cloud tab: IvoryOS Cloud in this window, beside the decks, under this id. */
+const CLOUD_TAB = '@cloud';
+
+function openCloudTab() {
+    showLauncher();
+    const url = manager.cloudUrl;
+    let view = edgeTabs.get(CLOUD_TAB);
+    if (view && !view.webContents.getURL().startsWith(url)) {
+        closeEdgeTab(CLOUD_TAB); // the Cloud address changed since the tab was opened
+        view = null;
+    }
+    if (!view) {
+        view = new WebContentsView({ webPreferences });
+        const origin = new URL(url).origin;
+        keepToOrigin(view, (u) => u.startsWith(origin));
+        view.webContents.loadURL(url);
+        edgeTabs.set(CLOUD_TAB, view);
+    }
+    showTab(CLOUD_TAB);
 }
 
 /** After a restart from the launcher, the tab's page points at a process that no longer exists. */
@@ -317,6 +349,52 @@ async function hubFetch(pathAndQuery, init) {
     return body;
 }
 
+// --- IvoryOS Cloud ---------------------------------------------------------------------------------
+
+/** Cloud's own /api/health: whether it answers, and whether it is really an IvoryOS Cloud. */
+async function probeCloud(url) {
+    try {
+        const res = await net.fetch(`${url}/api/health`, { signal: AbortSignal.timeout(4000) });
+        const body = await res.json().catch(() => null);
+        return { ok: true, status: res.status, body, isCloud: !!(body && 'daemon' in body && 'store' in body) };
+    } catch (e) {
+        return { ok: false, error: e.name === 'TimeoutError' ? 'no answer within 4 seconds' : e.message };
+    }
+}
+
+// A computer on this machine or the lab's network, where a Cloud normally serves plain http.
+const LOCAL_HOST = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$|.+\.local$)/;
+
+/**
+ * Whether the Cloud address answers, so the launcher can say so rather than open a page that
+ * never loads (the hosted Cloud is not live yet). When it does not, look for the likely fix: the
+ * commonest slip is https for a local Cloud that serves http (the TLS handshake just fails), and
+ * a Cloud started on this computer is usually on port 3000 (`next start`) or 3002 (dev).
+ */
+async function checkCloud() {
+    const url = manager.cloudUrl;
+    const found = await probeCloud(url);
+    if (found.ok) {
+        return { url, reachable: true, isCloud: found.isCloud, problems: (found.body && found.body.problems) || [] };
+    }
+    const candidates = [];
+    try {
+        const u = new URL(url);
+        if (u.protocol === 'https:' && LOCAL_HOST.test(u.hostname)) {
+            candidates.push({ url: url.replace(/^https:/, 'http:'), reason: 'It answers over http, not https.' });
+        }
+    } catch { /* not a URL; the error below says so */ }
+    for (const port of [3000, 3002]) {
+        candidates.push({ url: `http://localhost:${port}`, reason: 'An IvoryOS Cloud is running on this computer.' });
+    }
+    for (const c of candidates) {
+        if (c.url === url) continue;
+        const probe = await probeCloud(c.url);
+        if (probe.ok && probe.isCloud) return { url, reachable: false, error: found.error, suggestion: c };
+    }
+    return { url, reachable: false, error: found.error };
+}
+
 // --- IPC: what the launcher page may ask for ----------------------------------------------------
 
 function fromLauncher(event) {
@@ -343,6 +421,7 @@ function snapshot() {
         tabs: tabState(),
         runtime: runtimeStatus,
         hubUrl: manager.hubUrl,
+        cloudUrl: manager.cloudUrl,
         dataRoot: home(),
         version: app.getVersion(),
     };
@@ -356,7 +435,7 @@ function registerIpc() {
     handle('launcher:start', (id) => manager.start(id));
     handle('launcher:stop', async (id) => { closeEdgeTab(id); await manager.stop(id); });
     handle('launcher:restart', async (id) => { const status = await manager.restart(id); reloadEdgeTab(id); return status; });
-    handle('launcher:open', (id) => openEdgeTab(id));
+    handle('launcher:open', (id, page) => openEdgeTab(id, page));
     handle('launcher:show-tab', (id) => showTab(id || null));
     handle('launcher:close-tab', (id) => closeEdgeTab(id));
     handle('launcher:tab-bar-height', (px) => { tabBarHeight = Math.max(0, Math.round(Number(px) || 0)); layoutTabs(); });
@@ -403,7 +482,29 @@ function registerIpc() {
         await getRuntime();
     });
     handle('hub:set-url', (url) => manager.setHubUrl(url));
+    handle('cloud:set-url', (url) => manager.setCloudUrl(url));
+    handle('cloud:open', () => openCloudTab());
+    handle('cloud:open-in-browser', () => shell.openExternal(manager.cloudUrl));
+    handle('cloud:check', () => checkCloud());
+    // Python environments the person also uses from their own editor.
+    handle('python:launcher', async () => (await getRuntime()).python);
+    handle('python:inspect', async (python) => (await getRuntime()).inspect(python || (await getRuntime()).python));
+    handle('python:create-venv', async (folder) => {
+        if (!folder || !fs.existsSync(folder)) throw new Error('Choose an existing folder first.');
+        return (await getRuntime()).createProjectVenv(folder);
+    });
+    handle('python:install-edge', async (python) => { await (await getRuntime()).installEdgeInto(python); });
     handle('hub:search', (q) => hubFetch(`/api/catalog/modules?limit=60&q=${encodeURIComponent(q || '')}`));
+    // The whole catalog as cards, for the category browser. A Hub from before /browse existed
+    // answers 404; its search endpoint gives the same cards, capped at 200.
+    handle('hub:browse', async () => {
+        try {
+            return await hubFetch('/api/catalog/browse');
+        } catch (e) {
+            if (!/404/.test(e.message)) throw e;
+            return hubFetch('/api/catalog/modules?limit=200');
+        }
+    });
     handle('hub:module', (moduleId) => hubFetch(`/api/catalog/modules/${encodeURIComponent(moduleId)}`));
     handle('hub:entry', (payload) => hubFetch('/api/catalog/deck-entry', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
@@ -533,6 +634,29 @@ async function smokeTest() {
             const base = process.env.IVORYOS_SMOKE_SCREENSHOT.replace(/\.png$/, '');
             fs.writeFileSync(`${base}-window.png`, (await launcherWindow.webContents.capturePage()).toPNG());
             fs.writeFileSync(`${base}-tab.png`, (await view.webContents.capturePage()).toPNG());
+            // Two launcher pages, reached by clicking as a person would: the Cloud page, then the
+            // Hub browser on the target deck.
+            showTab(null);
+            const click = (text, scope = 'body') => launcherWindow.webContents.executeJavaScript(`(async () => {
+                const b = [...document.querySelectorAll(${JSON.stringify(scope)} + ' button')].find(el => el.textContent.includes(${JSON.stringify(text)}));
+                if (b) b.click();
+                await new Promise(r => setTimeout(r, 2500));
+                return !!b;
+            })()`);
+            launcher.cloudPage = await click('IvoryOS Cloud');
+            fs.writeFileSync(`${base}-cloud.png`, (await launcherWindow.webContents.capturePage()).toPNG());
+            // Accept a suggested Cloud address if one is offered, then open Cloud as a tab.
+            launcher.cloudSuggestion = await click('Use ', 'main');
+            launcher.cloudTab = await click('Open IvoryOS Cloud', 'main');
+            const cloudView = edgeTabs.get(CLOUD_TAB);
+            if (cloudView) {
+                await new Promise((r) => setTimeout(r, 2500));
+                launcher.cloudTabUrl = cloudView.webContents.getURL();
+                fs.writeFileSync(`${base}-cloudtab.png`, (await cloudView.webContents.capturePage()).toPNG());
+            }
+            showTab(null);
+            launcher.hubBrowser = (await click(target.name, 'nav')) && (await click('Add from Hub', 'main'));
+            fs.writeFileSync(`${base}-hub.png`, (await launcherWindow.webContents.capturePage()).toPNG());
         }
         Object.assign(report, {
             ok: true,

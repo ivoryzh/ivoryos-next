@@ -1,11 +1,12 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, Copy, ExternalLink, FileCode2, FolderOpen, Globe, LayoutGrid, Layers, Loader2, Moon, Play, Plus,
+  AlertTriangle, ChevronRight, Cloud, Copy, ExternalLink, FileCode2, FolderOpen, Globe, LayoutGrid, Layers, Loader2, Moon, Play, Plus,
   RotateCw, Square, Sun, X,
 } from 'lucide-react';
 import { notify, promptDialog } from '@ivoryos/shared-ui';
-import { desktopApi, type DesktopApi, type Profile, type Snapshot, type Tabs } from '@/desktop';
+import { CLOUD_TAB, desktopApi, type DesktopApi, type Profile, type Snapshot, type Tabs } from '@/desktop';
+import CloudPanel, { useCloudLinks } from '@/components/launcher/CloudPanel';
 import DeckPanel from '@/components/launcher/DeckPanel';
 import ProfileSettings from '@/components/launcher/ProfileSettings';
 import { Button, STATE_LABEL, StatusDot, cardClass } from '@/components/launcher/ui';
@@ -21,6 +22,8 @@ export default function LauncherPage() {
   const [api, setApi] = useState<DesktopApi | null | undefined>(undefined);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // The main area shows the selected profile, or the Cloud page.
+  const [view, setView] = useState<'profile' | 'cloud'>('profile');
   const [tab, setTab] = useState<'main' | 'log' | 'settings'>('main');
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -64,13 +67,15 @@ export default function LauncherPage() {
       const lines = [...(prev[id] || []), line];
       return { ...prev, [id]: lines.length > 600 ? lines.slice(-600) : lines };
     }));
-    const offSelect = api.onSelect(id => { setSelected(id); setTab('main'); api.showTab(null); });
+    const offSelect = api.onSelect(id => { setSelected(id); setView('profile'); setTab('main'); api.showTab(null); });
     const offTabs = api.onTabs(setTabs);
     return () => { offChanged(); offLog(); offSelect(); offTabs(); };
   }, [api, reload]);
 
   const profiles = snap?.profiles || [];
   const profile = useMemo(() => profiles.find(p => p.id === selected) || profiles[0] || null, [profiles, selected]);
+  const cloudLinks = useCloudLinks(profiles);
+  const cloudConnected = profiles.filter(p => cloudLinks[p.id]?.paired && cloudLinks[p.id]?.connection_state === 'connected').length;
 
   // A profile's log: what this session has streamed, seeded from the supervisor's tail.
   useEffect(() => {
@@ -96,11 +101,11 @@ export default function LauncherPage() {
     if (kind === 'script') {
       const script = await api.pick('script');
       if (!script) return;
-      run(async () => { const p = await api.createProfile({ kind, script }); setSelected(p.id); setTab('settings'); });
+      run(async () => { const p = await api.createProfile({ kind, script }); setSelected(p.id); setView('profile'); setTab('settings'); });
     } else {
       const name = await promptDialog('Name the new deck.', { title: 'New deck profile', defaultValue: 'New deck' });
       if (!name) return;
-      run(async () => { const p = await api.createProfile({ kind, name }); setSelected(p.id); setTab('main'); });
+      run(async () => { const p = await api.createProfile({ kind, name }); setSelected(p.id); setView('profile'); setTab('main'); });
     }
   };
 
@@ -124,9 +129,19 @@ export default function LauncherPage() {
           <LayoutGrid className="w-4 h-4" /> Launcher
         </button>
         {tabs.open.map(id => {
+          const active = tabs.active === id;
+          if (id === CLOUD_TAB) {
+            return (
+              <div key={id} className={`group flex items-center gap-2 pl-3 pr-1 text-sm border-b-2 ${active ? 'border-indigo-500 text-gray-900 dark:text-white font-medium' : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}>
+                <button type="button" onClick={() => api.showTab(id)} className="flex items-center gap-2"><Cloud className="w-3.5 h-3.5 text-indigo-500" /> IvoryOS Cloud</button>
+                <button type="button" title="Close the tab" onClick={() => api.closeTab(id)} className="p-0.5 rounded text-gray-400 opacity-60 group-hover:opacity-100 hover:bg-gray-100 dark:hover:bg-white/10">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            );
+          }
           const p = profiles.find(x => x.id === id);
           if (!p) return null;
-          const active = tabs.active === id;
           return (
             <div key={id} className={`group flex items-center gap-2 pl-3 pr-1 text-sm border-b-2 ${active ? 'border-indigo-500 text-gray-900 dark:text-white font-medium' : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}>
               <button type="button" onClick={() => api.showTab(id)} className="flex items-center gap-2 max-w-[14rem]">
@@ -159,8 +174,8 @@ export default function LauncherPage() {
               <button
                 key={p.id}
                 type="button"
-                onClick={() => { setSelected(p.id); setTab('main'); }}
-                className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${profile?.id === p.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5'}`}
+                onClick={() => { setSelected(p.id); setView('profile'); setTab('main'); }}
+                className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${view === 'profile' && profile?.id === p.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5'}`}
               >
                 <div className="flex items-center gap-2">
                   <StatusDot status={p.status} />
@@ -176,14 +191,33 @@ export default function LauncherPage() {
               </button>
             ))}
           </div>
-          <div className="p-3 border-t border-gray-200 dark:border-white/10 grid grid-cols-2 gap-2">
+          {/* Cloud is an addition, never a gate: everything above works without it. */}
+          <div className="px-3 pt-3">
+            <button
+              type="button"
+              onClick={() => setView('cloud')}
+              className={`w-full text-left px-3 py-2.5 rounded-xl border flex items-center gap-3 transition-colors ${view === 'cloud' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-gray-200 dark:border-white/10 hover:bg-gray-100 dark:hover:bg-white/5'}`}
+            >
+              <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 text-white flex items-center justify-center"><Cloud className="w-4 h-4" /></span>
+              <span className="flex-1 min-w-0">
+                <span className="block text-sm font-medium">IvoryOS Cloud</span>
+                <span className="block text-xs text-gray-500 dark:text-gray-400 truncate">
+                  {cloudConnected ? `${cloudConnected} deck${cloudConnected === 1 ? '' : 's'} connected` : 'Manage decks from anywhere'}
+                </span>
+              </span>
+              <ChevronRight className="w-4 h-4 text-gray-400" />
+            </button>
+          </div>
+          <div className="p-3 border-t border-gray-200 dark:border-white/10 mt-3 grid grid-cols-2 gap-2">
             <Button small onClick={() => newProfile('deck')}><Plus className="w-3.5 h-3.5" /> New deck</Button>
             <Button small onClick={() => newProfile('script')}><Plus className="w-3.5 h-3.5" /> Python script</Button>
           </div>
         </nav>
 
         <main className="flex-1 min-w-0 overflow-y-auto">
-          {profile ? (
+          {view === 'cloud' ? (
+            <CloudPanel api={api} profiles={profiles} links={cloudLinks} cloudUrl={snap?.cloudUrl || ''} run={run} />
+          ) : profile ? (
             <ProfileView
               key={profile.id}
               api={api}

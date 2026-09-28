@@ -92,13 +92,19 @@ function loadProfiles(home) {
     let stored = null;
     try { stored = JSON.parse(fs.readFileSync(profilesFile(home), 'utf8')); } catch { /* first run */ }
     if (stored && Array.isArray(stored.profiles)) {
-        return { hubUrl: stored.hubUrl || null, profiles: stored.profiles.map((p) => withDefaults(home, p)) };
+        // Every launcher-wide setting is read back here: one left out is silently lost at the
+        // next launch (the Cloud address was, until it was listed).
+        return {
+            hubUrl: stored.hubUrl || null,
+            cloudUrl: stored.cloudUrl || null,
+            profiles: stored.profiles.map((p) => withDefaults(home, p)),
+        };
     }
     const legacyDeck = path.join(home, 'data', 'deck.json');
     const first = fs.existsSync(legacyDeck)
         ? withDefaults(home, { name: 'My deck', kind: 'deck', deck: legacyDeck, dataDir: path.join(home, 'data'), autoStart: true })
         : withDefaults(home, { name: 'My deck', kind: 'deck', autoStart: true });
-    const initial = { hubUrl: null, profiles: [first] };
+    const initial = { hubUrl: null, cloudUrl: null, profiles: [first] };
     saveProfiles(home, initial);
     return initial;
 }
@@ -118,6 +124,9 @@ function saveProfiles(home, store) {
 function commandFor(profile, ctx) {
     const host = profile.listenOnNetwork ? '0.0.0.0' : '127.0.0.1';
     const env = {
+        // The Cloud this launcher points at, when someone chose one (a lab running its own on the
+        // network); otherwise the edge keeps its built-in default. A profile's own env wins.
+        ...(ctx.cloudUrl ? { IVORYOS_CLOUD_URL: ctx.cloudUrl } : {}),
         ...profile.env,
         IVORYOS_PORT: String(profile.port),
         IVORYOS_HOST: host,

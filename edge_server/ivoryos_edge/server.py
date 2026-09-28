@@ -785,9 +785,9 @@ def get_status():
 
 
 # --- Process control ------------------------------------------------------------------------
-# Exit code that asks a supervisor (the desktop app) to start this process again. 75 is
-# EX_TEMPFAIL in sysexits.h: "try again", which is what a restart is.
-RESTART_EXIT_CODE = 75
+# RESTART_EXIT_CODE asks whoever started this process (the desktop app, or the Windows restart
+# loop in restart.py) to start it again.
+from .restart import RESTART_EXIT_CODE, restart_by_exit
 
 
 def _supervised() -> bool:
@@ -817,11 +817,18 @@ def _relaunch():
             global_broker.disconnect()
     except Exception:
         pass
-    if _supervised():
+    if restart_by_exit():
         os._exit(RESTART_EXIT_CODE)
-    # Unsupervised (`python demo.py`, `python -m ivoryos_edge`): exec the same command line.
-    # sys.orig_argv keeps `-m ivoryos_edge`, which sys.argv has already rewritten to a file path.
+    # Unsupervised (`python demo.py`, and `python -m ivoryos_edge` outside Windows): exec the
+    # same command line. sys.orig_argv keeps `-m ivoryos_edge`, which sys.argv has already
+    # rewritten to a file path.
     argv = getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv]
+    if sys.platform == "win32":
+        # Only a script gets here on Windows (the CLI runs under restart.py's loop), and Windows
+        # exec ends this process: the terminal gets its prompt back while the new edge runs on.
+        print("Restarting as a new process. On Windows it runs on detached from this terminal. "
+              "To keep restarts in the terminal, start the edge with `python -m ivoryos_edge --deck ...`, "
+              "or run the script from the IvoryOS desktop app.", flush=True)
     sys.stdout.flush()
     os.execv(sys.executable, argv)
 

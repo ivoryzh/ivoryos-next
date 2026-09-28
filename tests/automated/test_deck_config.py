@@ -126,6 +126,17 @@ def _wait_for_status(port, timeout=30):
     raise AssertionError("edge server did not come up")
 
 
+def _stop(proc):
+    """Kill the edge and everything it started. On Windows the process we hold may be a venv's
+    launcher (sys.executable there starts the real interpreter as a child) or the restart loop
+    (restart.py), and killing a Windows process does not kill its children."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        proc.kill()
+    proc.wait()
+
+
 def _start(tmp_path, port, supervised):
     _write_driver(tmp_path)
     deck = _deck(tmp_path, [
@@ -158,11 +169,17 @@ def test_cli_runs_a_deck_and_restarts_itself_in_place(tmp_path):
         assert restart["mode"] == "exec"
         time.sleep(1)
         assert list(_wait_for_status(port)["instruments"]) == ["pump"]
-        # exec keeps the pid on POSIX: the same process, running a fresh interpreter.
+        # The process the terminal started is still the one running: on POSIX because exec
+        # keeps the pid (a fresh interpreter in the same process); on Windows, which has no
+        # exec, because it is the restart loop and the edge is its child (restart.py).
         assert proc.poll() is None
+        edge_pid = httpx.get(f"http://127.0.0.1:{port}/api/system").json()["pid"]
+        if sys.platform == "win32":
+            assert edge_pid != info["pid"], "a fresh edge process, under the same loop"
+        else:
+            assert edge_pid == info["pid"]
     finally:
-        proc.kill()
-        proc.wait()
+        _stop(proc)
 
 
 def test_supervised_restart_exits_with_the_restart_code(tmp_path):
@@ -174,4 +191,4 @@ def test_supervised_restart_exits_with_the_restart_code(tmp_path):
         assert proc.wait(timeout=10) == 75
     finally:
         if proc.poll() is None:
-            proc.kill()
+            _stop(proc)

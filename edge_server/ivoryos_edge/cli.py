@@ -32,7 +32,15 @@ def _parse(argv):
 
 
 def main(argv=None):
-    args = _parse(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    args = _parse(argv)
+
+    # Windows, from a terminal: become the restart loop and run the edge as a child, before a
+    # single instrument is created (restart.py explains why). --help and bad arguments have
+    # already been answered by _parse, in this process.
+    from .restart import needs_loop, run_loop
+    if needs_loop():
+        sys.exit(run_loop([sys.executable, "-m", "ivoryos_edge", *argv]))
 
     if args.data_dir:
         os.environ["IVORYOS_DATA_DIR"] = os.path.abspath(os.path.expanduser(args.data_dir))

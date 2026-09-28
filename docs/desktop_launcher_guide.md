@@ -210,6 +210,15 @@ Exit code 75 is the whole agreement between the two. Any other exit is a crash, 
 shows it rather than restarting in a loop. Run from a terminal instead (`python demo.py`), there
 is no launcher to restart it, so the edge replaces itself in place with the same command line.
 
+**Windows** cannot replace a running program in place: "replacing" there starts a new process and
+ends the old one, so the terminal gets its prompt back while the edge carries on detached. So on
+Windows, `python -m ivoryos_edge --deck …` from a terminal runs a small restart loop that plays
+the launcher's part (it keeps the terminal, starts the edge, starts it again on exit code 75, and
+takes it down if the loop itself is closed). A script (`python demo.py`) cannot use it, because
+its instruments already exist, holding their ports, before it asks IvoryOS to run; restarting it
+from the page on Windows still detaches it from the terminal, and it says so. Run such a script
+from the launcher (a script profile) to restart it cleanly.
+
 One difference worth knowing: the launcher's Stop and Restart let the server shut down gracefully,
 while the page's Restart exits immediately. Either way the operating system releases serial ports
 and network connections, but a driver's own `close()` method is not called on the immediate path.

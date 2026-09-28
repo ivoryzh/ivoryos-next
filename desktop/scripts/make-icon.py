@@ -1,8 +1,12 @@
-"""Build desktop/build/icon.png (1024x1024) from desktop/build/logo.png.
+"""Build the app icons (1024x1024) from desktop/build/logo.png.
 
-electron-builder turns build/icon.png into the macOS .icns and Windows .ico, so this one PNG is
-the app icon everywhere. Replace logo.png (any size of at least ~700px wide; SVG not needed) and
-run:  uv run --with pillow python scripts/make-icon.py
+  build/icon.png      macOS: the logo on a rounded tile, the shape macOS icons are expected to have.
+  build/icon-win.png  Windows and Linux: the logo alone on a transparent square. There an icon is
+                      its own shape, and a tile reads as a pale box around it, most of all in the
+                      tray at 16px.
+
+electron-builder turns these into the .icns and .ico. Replace logo.png (any size of at least
+~700px wide; SVG not needed) and run:  uv run --with pillow python scripts/make-icon.py
 """
 import os
 from PIL import Image, ImageDraw
@@ -24,3 +28,12 @@ logo = logo.resize((width, height), Image.LANCZOS)
 icon.alpha_composite(logo, ((SIZE - width) // 2, (SIZE - height) // 2 + 8))
 icon.save(os.path.join(BUILD, "icon.png"))
 print("wrote build/icon.png", icon.size)
+
+# No tile: the logo as large as fits, with a little room so it does not touch the edges.
+bare = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+source = Image.open(os.path.join(BUILD, "logo.png")).convert("RGBA")
+width = SIZE - 2 * 24
+height = round(source.height * width / source.width)
+bare.alpha_composite(source.resize((width, height), Image.LANCZOS), ((SIZE - width) // 2, (SIZE - height) // 2))
+bare.save(os.path.join(BUILD, "icon-win.png"))
+print("wrote build/icon-win.png", bare.size)

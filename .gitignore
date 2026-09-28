@@ -95,3 +95,6 @@ desktop/dist/
 # ...but desktop/build/ is electron-builder's input folder (the app icon and its source logo),
 # which the Python `build/` rule above would otherwise swallow.
 !desktop/build/
+
+# One edge per data folder (edge_server/ivoryos_edge/instance_lock.py)
+.ivoryos_edge.lock

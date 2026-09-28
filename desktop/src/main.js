@@ -60,7 +60,8 @@ let launcherWindow = null;
 const edgeTabs = new Map(); // profile id -> WebContentsView
 let activeTab = null; // profile id, or null for the launcher itself
 let tabBarHeight = 44; // reported by the launcher page, which draws the tab bar
-const ICON = path.join(__dirname, '..', 'build', 'icon.png');
+// macOS icons are a tile; Windows and Linux icons are their own shape (scripts/make-icon.py).
+const ICON = path.join(__dirname, '..', 'build', process.platform === 'darwin' ? 'icon.png' : 'icon-win.png');
 let manager = null;
 let account = null;
 let git = null;
@@ -837,8 +838,16 @@ function addShortcuts(contents) {
 
 // ivoryos:// links. On macOS they arrive as 'open-url' (possibly before the app is ready); on
 // Windows and Linux as the argv of a second instance, which is why only one may run.
+// One IvoryOS per profile folder, always: a second would start the same decks again, on the same
+// instruments. The lock is per userData folder, so a test run with IVORYOS_DESKTOP_HOME set gets
+// its own and can run beside the real app.
+const singleInstance = app.requestSingleInstanceLock();
+if (!singleInstance && SMOKE_TEST) {
+    console.log(`SMOKE ${JSON.stringify({ ok: false, error: 'IvoryOS is already running with this profile folder' })}`);
+    app.exit(1);
+}
 if (!SMOKE_TEST) {
-    if (!app.requestSingleInstanceLock()) {
+    if (!singleInstance) {
         app.quit();
     } else {
         app.on('second-instance', (_event, argv) => {

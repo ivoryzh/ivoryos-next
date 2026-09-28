@@ -85,6 +85,9 @@ class EdgeSupervisor extends EventEmitter {
             // hardcodes run(port=9000), or an older run() that ignores IVORYOS_PORT, does not use
             // the port it was offered, so readiness is checked on the one it announced, and the
             // difference is reported ('port', actual, requested) so the launcher can say so.
+            // An edge that refuses to start says why on one line (instance_lock.py: another copy
+            // already has its data folder); that sentence is the error to show, not the exit code.
+            if (line.startsWith('Cannot start: ')) this.fatal = line.slice('Cannot start: '.length);
             const announced = /Starting IvoryOS Edge Server on (?:port |[^\s:]+:)(\d+)/.exec(line);
             if (announced) {
                 this.announced = true;
@@ -108,6 +111,7 @@ class EdgeSupervisor extends EventEmitter {
         if (this.requestedPort === undefined) this.requestedPort = this.opts.port;
         this.opts.port = this.requestedPort;
         this.announced = false;
+        this.fatal = null;
         this._setState('starting');
         if (this.opts.logFile) {
             fs.mkdirSync(path.dirname(this.opts.logFile), { recursive: true });
@@ -141,6 +145,7 @@ class EdgeSupervisor extends EventEmitter {
             if (exited || generation !== this._generation) {
                 // Exiting cleanly without ever announcing a server is a script that ran to the
                 // end and stopped: nothing in it started IvoryOS.
+                if (this.fatal) throw new Error(this.fatal);
                 if (exited && exited.code === 0 && !this.announced) {
                     throw new Error('The script finished without starting IvoryOS. A script profile has to end with ivoryos_edge.run(__name__).');
                 }

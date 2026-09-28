@@ -1646,6 +1646,11 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
     `plugins` takes ivoryos_edge.plugins.Plugin objects (a page plus an API, handed the
     instruments above) and the older static entries ({id, name, path} or {id, name, url}).
     """
+    # One edge per data folder (instance_lock.py). A script has already built its instruments by
+    # now, but refusing here still keeps a second copy off the port, the database and Cloud.
+    from .instance_lock import acquire_or_exit
+    acquire_or_exit(os.path.dirname(ENV_PATH))
+
     # A launcher running someone's script (a desktop "script profile") chooses the port and
     # interface through the environment, since the script itself just says run(__name__).
     # An explicit argument still wins.

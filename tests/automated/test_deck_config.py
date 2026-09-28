@@ -192,3 +192,24 @@ def test_supervised_restart_exits_with_the_restart_code(tmp_path):
     finally:
         if proc.poll() is None:
             _stop(proc)
+
+
+def test_a_second_edge_on_the_same_data_folder_refuses_to_start(tmp_path):
+    # The same deck started twice (a terminal and the desktop app, say) would open the same
+    # instruments and share one database and Cloud identity; the second says so and stops.
+    port = _free_port()
+    first = _start(tmp_path, port, supervised=True)
+    try:
+        _wait_for_status(port)
+        env = {**os.environ, "PYTHONPATH": EDGE_DIR, "IVORYOS_SUPERVISED": "1"}
+        env.pop("CLOUD_TOKEN", None)
+        second = subprocess.run(
+            [sys.executable, "-m", "ivoryos_edge", "--deck", str(tmp_path / "deck.json"),
+             "--data-dir", str(tmp_path / "data"), "--port", str(_free_port()), "--host", "127.0.0.1"],
+            cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert second.returncode == 1
+        assert "Cannot start: Another IvoryOS edge is already running" in second.stderr
+        assert list(_wait_for_status(port)["instruments"]) == ["pump"], "the first one is untouched"
+    finally:
+        _stop(first)

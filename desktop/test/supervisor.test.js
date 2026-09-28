@@ -128,3 +128,8 @@ test('a script that ends without starting IvoryOS says what is missing', async (
     const { sup } = await supervisorFor({ FAKE_NO_RUN: '1' });
     await assert.rejects(sup.start(), /ivoryos_edge\.run\(__name__\)/);
 });
+
+test('an edge that refuses to start is reported in its own words', async () => {
+    const { sup } = await supervisorFor({ FAKE_REFUSE: '1' });
+    await assert.rejects(sup.start(), /^Error: Another IvoryOS edge is already running with this data folder .*process 4242/);
+});

@@ -57,6 +57,10 @@ def main(argv=None):
         print(f"No deck file yet; created an empty one at {deck_path}")
 
     # Only now: importing these fixes the data paths (paths.py).
+    from .paths import ENV_PATH
+    from .instance_lock import acquire_or_exit
+    # Before any instrument is created: a second copy must not open the first one's hardware.
+    acquire_or_exit(os.path.dirname(ENV_PATH))
     from .deck_config import load_deck
     from .server import run
 

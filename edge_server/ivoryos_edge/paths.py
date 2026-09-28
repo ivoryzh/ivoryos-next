@@ -21,7 +21,9 @@ import os
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DATA_DIR = os.environ.get("IVORYOS_DATA_DIR") or None
+# IVORYOS_EDGE_HOME is the same setting under the name the flow_lab examples use (one folder per
+# edge process, so two edges on one machine keep separate databases and Cloud pairings).
+DATA_DIR = os.environ.get("IVORYOS_DATA_DIR") or os.environ.get("IVORYOS_EDGE_HOME") or None
 if DATA_DIR:
     DATA_DIR = os.path.abspath(os.path.expanduser(DATA_DIR))
     os.makedirs(DATA_DIR, exist_ok=True)

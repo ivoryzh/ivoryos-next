@@ -6,6 +6,7 @@ const http = require('node:http');
 
 // FAKE_OWN_PORT: a script that picks its own port, announced the way an ivoryos_edge older than
 // the launcher does ("on port N"). FAKE_NO_RUN: a script that never calls ivoryos_edge.run().
+if (process.env.FAKE_REFUSE) { console.error('Cannot start: Another IvoryOS edge is already running with this data folder (C:\lab): process 4242.'); process.exit(1); }
 if (process.env.FAKE_NO_RUN) { console.log('fake script: loaded the drivers, then ended'); process.exit(0); }
 const port = Number(process.env.FAKE_OWN_PORT || process.argv[2] || process.env.IVORYOS_PORT);
 if (process.env.FAKE_OWN_PORT) console.log(`Starting IvoryOS Edge Server on port ${port}...`);

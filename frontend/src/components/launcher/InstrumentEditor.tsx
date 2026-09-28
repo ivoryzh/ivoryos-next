@@ -13,19 +13,21 @@ const NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
  * arguments -- which is where a COM port or an IP address lives. An instrument added from the Hub
  * brings the Hub's argument form with it; anything else gets name/value rows.
  */
-export default function InstrumentEditor({ api, profileId, entry, running, onClose, onSaved }: {
+export default function InstrumentEditor({ api, profileId, entry, seed, running, onClose, onSaved }: {
   api: DesktopApi;
   profileId: string;
   entry: DeckInstrument | null; // null = a new, hand-written entry
+  /** For a new entry: values to start from, e.g. the class picked from an imported repository. */
+  seed?: { name?: string; import?: string; class?: string; from?: string } | null;
   running: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const defs = useMemo(() => entry?.hub?.init_args || [], [entry]);
   const defNames = new Set(defs.map(d => d.name));
-  const [name, setName] = useState(entry?.name || '');
-  const [importPath, setImportPath] = useState(entry?.import || '');
-  const [className, setClassName] = useState(entry?.class || '');
+  const [name, setName] = useState(entry?.name || seed?.name || '');
+  const [importPath, setImportPath] = useState(entry?.import || seed?.import || '');
+  const [className, setClassName] = useState(entry?.class || seed?.class || '');
   const [form, setForm] = useState<FormValues>(() => toForm(defs, entry?.args || {}));
   const [extra, setExtra] = useState<Record<string, string>>(() => Object.fromEntries(
     Object.entries(entry?.args || {}).filter(([k]) => !defNames.has(k)).map(([k, v]) => [k, showLiteral(v)]),
@@ -57,7 +59,7 @@ export default function InstrumentEditor({ api, profileId, entry, running, onClo
 
   return (
     <Modal
-      title={entry ? `Edit ${entry.name}` : 'Add an instrument by hand'}
+      title={entry ? `Edit ${entry.name}` : seed?.from ? `Add ${seed.class} from ${seed.from}` : 'Add an instrument by hand'}
       onClose={onClose}
       footer={<>
         <Button onClick={onClose}>Cancel</Button>

@@ -16,14 +16,22 @@
 //   <userData>/profiles/<id>/        a deck profile's deck.json and data (runs, workflows)
 //   <userData>/runtime/venv          the Python environment every profile runs in (uv-managed)
 //   <userData>/logs/<id>.log         each profile's edge output, kept across restarts
+//   <userData>/account.bin           the signed-in session (encrypted, secrets.js)
+//   <userData>/git.bin               GitHub/GitLab tokens for private drivers (encrypted)
+//   <userData>/private-packages/     private repositories downloaded at one commit each
 
-const { app, BrowserWindow, WebContentsView, Menu, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage } = require('electron');
+const { app, BrowserWindow, WebContentsView, Menu, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, safeStorage } = require('electron');
 const fs = require('node:fs');
+const http = require('node:http');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const { ProfileManager } = require('./manager');
-const { PythonRuntime } = require('./runtime');
+const { PythonRuntime, run: runProcess } = require('./runtime');
+const { Account, pkcePair } = require('./account');
+const { GitConnections } = require('./gitRepos');
+const { secretFile } = require('./secrets');
+const { Updates } = require('./updater');
 const { resolveResources } = require('./resources');
 const { validateManifest, mergeIntoDeck, describeInstall, ManifestError } = require('./manifest');
 const { freeName } = require('./deckEdit');
@@ -54,6 +62,9 @@ let activeTab = null; // profile id, or null for the launcher itself
 let tabBarHeight = 44; // reported by the launcher page, which draws the tab bar
 const ICON = path.join(__dirname, '..', 'build', 'icon.png');
 let manager = null;
+let account = null;
+let git = null;
+let updates = null;
 let runtimePromise = null;
 let runtimeStatus = { state: 'idle', message: '' };
 let quitting = false;
@@ -139,6 +150,7 @@ function showLauncher() {
         ...(fs.existsSync(ICON) ? { icon: ICON } : {}),
     });
     keepToOrigin(launcherWindow, (url) => url.startsWith(`${APP_SCHEME}://`));
+    addShortcuts(launcherWindow.webContents);
     if (resources().frontendDir) launcherWindow.loadURL(LAUNCHER_URL);
     else launcherWindow.loadFile(path.join(__dirname, 'status.html')); // a build without the UI
     launcherWindow.on('resize', layoutTabs);
@@ -189,6 +201,7 @@ function openEdgeTab(id, page) {
     if (!view) {
         view = new WebContentsView({ webPreferences });
         keepToOrigin(view, (url) => url.startsWith(origin));
+        addShortcuts(view.webContents);
         view.webContents.loadURL(target || origin);
         edgeTabs.set(id, view);
     } else if (target) {
@@ -225,6 +238,7 @@ function openCloudTab() {
         view = new WebContentsView({ webPreferences });
         const origin = new URL(url).origin;
         keepToOrigin(view, (u) => u.startsWith(origin));
+        addShortcuts(view.webContents);
         view.webContents.loadURL(url);
         edgeTabs.set(CLOUD_TAB, view);
     }
@@ -344,6 +358,15 @@ async function hubFetch(pathAndQuery, init) {
     } catch (e) {
         throw new Error(`Could not reach the Hub at ${manager.hubUrl} (${e.message}).`);
     }
+    // A Hub without the catalog does not 404: its login redirect answers every unknown path with
+    // the sign-in *page*. Read as JSON that became `{}`, so the launcher showed an empty catalog
+    // and no error at all. Say what happened instead.
+    const type = res.headers.get('content-type') || '';
+    if (res.ok && !type.includes('json')) {
+        throw new Error(/\/(auth\/)?login/.test(res.url)
+            ? `The Hub at ${manager.hubUrl} answered with its sign-in page, not the driver catalog: it does not serve /api/catalog yet.`
+            : `The Hub at ${manager.hubUrl} did not answer with a driver catalog.`);
+    }
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || `The Hub answered ${res.status}.`);
     return body;
@@ -395,6 +418,95 @@ async function checkCloud() {
     return { url, reachable: false, error: found.error };
 }
 
+// --- account ------------------------------------------------------------------------------------
+
+let pendingOAuth = null; // {cancel()} while a browser sign-in is waiting
+
+const signedInPage = (error) => `<!doctype html><meta charset="utf-8"><title>IvoryOS</title>
+<body style="font:15px system-ui;display:flex;align-items:center;justify-content:center;height:90vh;color:#222">
+<div style="text-align:center"><h2 style="margin:0 0 8px">${error ? 'Sign-in did not finish' : 'Signed in to IvoryOS'}</h2>
+<p style="color:#666">${error ? String(error).replace(/[<>&]/g, '') : 'You can close this tab and go back to the app.'}</p></div>`;
+
+/**
+ * "Continue with GitHub / Google": the sign-in happens in the system browser (where the person is
+ * already signed in to those, and where a password manager works), and comes back here through a
+ * one-off listener on 127.0.0.1. PKCE: the code that arrives is useless without the verifier this
+ * process holds, so another program that sees the redirect cannot use it.
+ *
+ * The Hub's Supabase project must allow the redirect ("http://127.0.0.1:*" followed by "/**" in
+ * Authentication -> URL Configuration -> Redirect URLs). Without it Supabase sends the browser to
+ * the Hub's home page instead, and this waits until cancelled.
+ */
+async function signInWithProvider(provider) {
+    if (pendingOAuth) pendingOAuth.cancel();
+    const { verifier, challenge } = pkcePair();
+    const server = http.createServer();
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const redirect = `http://127.0.0.1:${server.address().port}/callback`;
+    try {
+        const code = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('The sign-in was not finished in the browser within 5 minutes.')), 5 * 60 * 1000);
+            pendingOAuth = { cancel: () => { clearTimeout(timer); reject(new Error('Sign-in cancelled.')); } };
+            server.on('request', (req, res) => {
+                const url = new URL(req.url, redirect);
+                if (url.pathname !== '/callback') { res.writeHead(404).end(); return; }
+                const got = url.searchParams.get('code');
+                const error = url.searchParams.get('error_description') || url.searchParams.get('error');
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(signedInPage(got ? null : error || 'No sign-in code came back.'));
+                clearTimeout(timer);
+                if (got) resolve(got); else reject(new Error(error || 'The sign-in did not return a code.'));
+            });
+            shell.openExternal(account.oauthUrl(provider, redirect, challenge));
+        });
+        await account.exchangeCode(code, verifier);
+        await account.profile().catch(() => {});
+        showLauncher();
+        return account.describe();
+    } finally {
+        pendingOAuth = null;
+        server.close();
+    }
+}
+
+/** Account calls that change who is signed in or what they see: tell the launcher afterwards. */
+function accountCall(fn) {
+    return async (...args) => {
+        try { return await fn(...args); } finally { broadcast('launcher:changed'); }
+    };
+}
+
+// --- private drivers from GitHub / GitLab -----------------------------------------------------------
+
+/** The preview plan gate (account.js): importing private repositories is a Pro feature. */
+function requirePro() {
+    const me = account.describe();
+    if (!me.signedIn) throw new Error('Sign in to use private repositories.');
+    if (me.plan !== 'pro') throw new Error('Private repositories are part of IvoryOS Pro. Upgrade from the account menu.');
+}
+
+/**
+ * Download a repository at its current commit, install it into a deck's Python like any driver
+ * (the deck lists the downloaded archive, not the token), and list the classes it provides so
+ * the person can pick the instrument.
+ */
+async function importFromGit(profileId, provider, repoId, ref) {
+    requirePro();
+    const got = await git.download(provider, repoId, ref);
+    await manager.install(profileId, { packages: [got.file], instruments: [] });
+    const runtime = await getRuntime();
+    // Passed with -c rather than as a file: in a packaged build this folder is inside app.asar,
+    // which Electron can read and Python cannot.
+    const code = fs.readFileSync(path.join(__dirname, 'scan_driver.py'), 'utf8');
+    let scan;
+    try {
+        const out = await runProcess(runtime.python, ['-c', code, path.basename(got.file)]);
+        scan = JSON.parse(out.trim().split(/\r?\n/).pop());
+    } catch (e) {
+        scan = { error: `Installed, but its classes could not be listed: ${String(e.output || e.message).trim().split('\n').pop()}` };
+    }
+    return { ...got, scan };
+}
+
 // --- IPC: what the launcher page may ask for ----------------------------------------------------
 
 function fromLauncher(event) {
@@ -424,6 +536,12 @@ function snapshot() {
         cloudUrl: manager.cloudUrl,
         dataRoot: home(),
         version: app.getVersion(),
+        platform: process.platform,
+        account: account.describe(),
+        update: updates.status(),
+        autoUpdate: manager.autoUpdate,
+        // False where the OS has no keychain: sign-ins then last until the app quits.
+        secretsPersist: safeStorage.isEncryptionAvailable(),
     };
 }
 
@@ -509,12 +627,71 @@ function registerIpc() {
     handle('hub:entry', (payload) => hubFetch('/api/catalog/deck-entry', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     }));
+
+    // Account: the Hub's accounts. The page gets `describe()` (who, which plan), never a token.
+    handle('account:get', accountCall(async () => {
+        if (account.describe().signedIn) {
+            await account.refreshUser().catch(() => {});
+            await account.profile().catch(() => {});
+        }
+        return account.describe();
+    }));
+    handle('account:sign-in', accountCall(async (email, password) => {
+        await account.signIn(email, password);
+        await account.profile().catch(() => {});
+        return account.describe();
+    }));
+    handle('account:sign-up', accountCall((email, password, name) => account.signUp(email, password, name)));
+    handle('account:reset-password', (email) => account.resetPassword(email));
+    handle('account:oauth', accountCall((provider) => signInWithProvider(provider)));
+    handle('account:oauth-cancel', () => { if (pendingOAuth) pendingOAuth.cancel(); });
+    handle('account:sign-out', accountCall(() => account.signOut()));
+    handle('account:update-profile', accountCall(async (fields) => { await account.updateProfile(fields || {}); return account.describe(); }));
+    handle('account:change-password', (password) => account.changePassword(password));
+    handle('account:set-plan', accountCall((plan) => account.setPlan(plan)));
+    handle('account:open-hub', (page) => {
+        const pages = { profile: '/hub/profile', signup: '/auth/sign-up', home: '' };
+        return shell.openExternal(`${manager.hubUrl}${pages[page] ?? ''}`);
+    });
+
+    // Private repositories (Pro): tokens stay in this process, encrypted on disk.
+    handle('git:list', () => git.list());
+    handle('git:connect', (provider, token, host) => { requirePro(); return git.connect(provider, token, host); });
+    handle('git:disconnect', (provider) => git.disconnect(provider));
+    handle('git:repos', (provider, query) => { requirePro(); return git.repos(provider, query); });
+    handle('git:import', (profileId, provider, repoId, ref) => importFromGit(profileId, provider, repoId, ref));
+    handle('git:token-page', (provider) => {
+        const c = git.list().find((x) => x.provider === provider);
+        if (!c) throw new Error(`Unknown provider: ${provider}`);
+        return shell.openExternal(c.tokenHelp);
+    });
+
+    // The app itself.
+    handle('update:check', () => updates.check());
+    handle('update:download', () => updates.download());
+    handle('update:install', () => updates.install(async () => { quitting = true; await manager.stopAll(); }));
+    handle('update:open-page', () => {
+        const u = updates.status();
+        return shell.openExternal(u.downloadUrl || u.releaseUrl || 'https://github.com/ivoryzh/ivoryos-next/releases');
+    });
+    handle('app:set-auto-update', (on) => { manager.setAutoUpdate(on); broadcast('launcher:changed'); });
+    handle('app:reveal-data', () => shell.openPath(home()));
 }
 
 // --- menus ---------------------------------------------------------------------------------------
 
+/**
+ * On Windows and Linux the menu bar sits inside the window, above the launcher's own tab bar, and
+ * everything in it is also in the launcher (Settings, the account corner, each deck's buttons).
+ * So there is none; the useful keys are kept by `addShortcuts`. macOS keeps its menu: it lives at
+ * the top of the screen, not in the window, and text fields need its Edit roles for copy/paste.
+ */
 function buildMenu() {
     const isMac = process.platform === 'darwin';
+    if (!isMac) {
+        Menu.setApplicationMenu(null);
+        return;
+    }
     Menu.setApplicationMenu(Menu.buildFromTemplate([
         ...(isMac ? [{ role: 'appMenu' }] : []),
         {
@@ -531,6 +708,30 @@ function buildMenu() {
         { role: 'viewMenu' },
         { role: 'windowMenu' },
     ]));
+}
+
+/** Keyboard shortcuts the menu used to provide, for any page shown in the window (not macOS). */
+function addShortcuts(contents) {
+    if (process.platform === 'darwin') return;
+    contents.on('before-input-event', (event, input) => {
+        if (input.type !== 'keyDown') return;
+        const key = String(input.key || '').toLowerCase();
+        const ctrl = input.control || input.meta;
+        const act = (fn) => { event.preventDefault(); fn(); };
+        if (ctrl && !input.shift && key === 'l') act(() => { showLauncher(); showTab(null); });
+        else if ((ctrl && !input.shift && key === 'r') || key === 'f5') act(() => contents.reload());
+        else if ((ctrl && input.shift && key === 'i') || key === 'f12') act(() => contents.toggleDevTools());
+        else if (ctrl && (key === '=' || key === '+')) act(() => contents.setZoomLevel(contents.getZoomLevel() + 0.5));
+        else if (ctrl && key === '-') act(() => contents.setZoomLevel(contents.getZoomLevel() - 0.5));
+        else if (ctrl && key === '0') act(() => contents.setZoomLevel(0));
+        else if (ctrl && key === 'tab') {
+            act(() => {
+                const order = [null, ...edgeTabs.keys()];
+                const at = order.indexOf(activeTab);
+                showTab(order[(at + (input.shift ? order.length - 1 : 1)) % order.length]);
+            });
+        }
+    });
 }
 
 // --- app lifecycle -------------------------------------------------------------------------------
@@ -583,6 +784,21 @@ app.whenReady().then(async () => {
     manager.on('changed', () => broadcast('launcher:changed'));
     manager.on('log', (id, line) => broadcast('launcher:log', id, line));
     manager.on('crashed', (id) => closeEdgeTab(id));
+    account = new Account({ fetch: (...a) => net.fetch(...a), store: secretFile(path.join(home(), 'account.bin'), safeStorage) });
+    git = new GitConnections({
+        fetch: (...a) => net.fetch(...a),
+        store: secretFile(path.join(home(), 'git.bin'), safeStorage),
+        downloadDir: path.join(home(), 'private-packages'),
+    });
+    updates = new Updates({
+        currentVersion: app.getVersion(),
+        packaged: app.isPackaged,
+        platform: process.platform,
+        fetch: (...a) => net.fetch(...a),
+        loadAutoUpdater: () => require('electron-updater').autoUpdater,
+        autoDownload: () => manager.autoUpdate,
+    });
+    updates.on('changed', () => broadcast('launcher:changed'));
 
     registerIpc();
     buildMenu();
@@ -590,6 +806,7 @@ app.whenReady().then(async () => {
     getRuntime().catch(() => {}); // warm Python up while the launcher draws
 
     if (SMOKE_TEST) return smokeTest();
+    updates.schedule();
 
     for (const p of manager.list().filter((x) => x.autoStart)) manager.start(p.id).catch(() => {});
     while (pendingLinks.length) await handleLink(pendingLinks.shift());
@@ -657,7 +874,27 @@ async function smokeTest() {
             showTab(null);
             launcher.hubBrowser = (await click(target.name, 'nav')) && (await click('Add from Hub', 'main'));
             fs.writeFileSync(`${base}-hub.png`, (await launcherWindow.webContents.capturePage()).toPNG());
+            launcher.privateRepos = await click('Private repositories');
+            fs.writeFileSync(`${base}-private.png`, (await launcherWindow.webContents.capturePage()).toPNG());
+            // The app-wide pages: Settings (the gear), the account form, and the plan dialog.
+            const shoot = async (name, js) => {
+                const found = await launcherWindow.webContents.executeJavaScript(`(async () => {
+                    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+                    await new Promise(r => setTimeout(r, 300));
+                    const el = ${js};
+                    if (el) el.click();
+                    await new Promise(r => setTimeout(r, 1500));
+                    return !!el;
+                })()`);
+                fs.writeFileSync(`${base}-${name}.png`, (await launcherWindow.webContents.capturePage()).toPNG());
+                return found;
+            };
+            launcher.settings = await shoot('settings', `document.querySelector('nav button[title^="Settings"]')`);
+            launcher.signIn = await shoot('account', `[...document.querySelectorAll('nav button')].find(b => b.textContent.trim() === 'Sign in')`);
+            launcher.upgrade = await shoot('upgrade', `[...document.querySelectorAll('nav button')].find(b => b.textContent.includes('IvoryOS Cloud'))`);
         }
+        launcher.menuBar = Menu.getApplicationMenu() ? 'present' : 'none';
+        if (process.env.IVORYOS_SMOKE_UPDATE) launcher.update = await updates.check();
         Object.assign(report, {
             ok: true,
             profile: target.name,

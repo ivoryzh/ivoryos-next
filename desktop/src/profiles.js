@@ -105,6 +105,8 @@ function loadProfiles(home) {
         return {
             hubUrl: stored.hubUrl || null,
             cloudUrl: stored.cloudUrl || null,
+            // Missing means on: only an explicit "no" turns automatic update downloads off.
+            autoUpdate: stored.autoUpdate !== false,
             profiles: stored.profiles.map((p) => withDefaults(home, p)),
         };
     }
@@ -112,7 +114,7 @@ function loadProfiles(home) {
     const first = fs.existsSync(legacyDeck)
         ? withDefaults(home, { name: 'My deck', kind: 'deck', deck: legacyDeck, dataDir: path.join(home, 'data'), autoStart: true })
         : withDefaults(home, { name: 'My deck', kind: 'deck', autoStart: true });
-    const initial = { hubUrl: null, cloudUrl: null, profiles: [first] };
+    const initial = { hubUrl: null, cloudUrl: null, autoUpdate: true, profiles: [first] };
     saveProfiles(home, initial);
     return initial;
 }

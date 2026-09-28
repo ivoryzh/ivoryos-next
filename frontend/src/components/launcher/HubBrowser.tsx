@@ -2,12 +2,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowLeft, Bot, Camera, CheckCircle2, Cpu, Droplets, ExternalLink, FlaskConical, FlaskRound, Gauge,
-  GraduationCap, LayoutGrid, Loader2, Microscope, Package, Scale, Search, Syringe, Thermometer, Wind, type LucideIcon,
+  GraduationCap, LayoutGrid, Loader2, Lock, Microscope, Package, Scale, Search, Syringe, Thermometer, Wind, type LucideIcon,
 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { ArgDef, DesktopApi, HubModule } from '@/desktop';
 import { toForm, type FormValues } from '@/launcherArgs';
 import ArgsForm from './ArgsForm';
+import PrivateRepos, { type InstrumentSeed } from './PrivateRepos';
 import { Button, Field, Modal, inputClass, labelClass } from './ui';
 
 /**
@@ -21,11 +22,16 @@ import { Button, Field, Modal, inputClass, labelClass } from './ui';
  * every other card shows its category's picture instead, so the grid never reads as a list of
  * blank boxes.
  */
-export default function HubBrowser({ api, profileId, profileName, hubUrl, onClose, onAdded }: {
+export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded }: {
   api: DesktopApi;
   profileId: string;
   profileName: string;
   hubUrl: string;
+  /** Private repositories are a Pro feature (preview plans, desktop/src/account.js). */
+  pro: boolean;
+  onUpgrade: () => void;
+  /** A class picked from an imported private repository: open the instrument form with it. */
+  onPrivatePicked: (seed: InstrumentSeed) => void;
   onClose: () => void;
   onAdded: () => void;
 }) {
@@ -76,11 +82,18 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, onClos
             {categories.map(([name, count]) => (
               <CategoryButton key={name} label={name} icon={look(name).icon} tint={look(name).tile} count={count} active={category === name} onClick={() => setCategory(name)} />
             ))}
-            {category && !categories.some(([n]) => n === category) && (
+            <div className="pt-3 pb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Private</div>
+            <CategoryButton label="Private repositories" icon={Lock} count={pro ? null : <span className="text-[9px] font-bold uppercase tracking-wider text-violet-500">Pro</span>} active={category === PRIVATE} onClick={() => setCategory(PRIVATE)} />
+            {category && category !== PRIVATE && !categories.some(([n]) => n === category) && (
               <CategoryButton label={category} icon={look(category).icon} tint={look(category).tile} count={0} active onClick={() => {}} />
             )}
           </aside>
 
+          {category === PRIVATE ? (
+            <div className="flex-1 min-w-0 overflow-y-auto p-4">
+              <PrivateRepos api={api} profileId={profileId} pro={pro} onUpgrade={onUpgrade} onPicked={seed => { onClose(); onPrivatePicked(seed); }} />
+            </div>
+          ) : (
           <div className="flex-1 min-w-0 flex flex-col">
             <div className="px-4 py-3 flex items-center gap-3 border-b border-gray-100 dark:border-white/10">
               <div className="relative flex-1">
@@ -118,6 +131,7 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, onClos
               )}
             </div>
           </div>
+          )}
         </>
       )}
     </Modal>
@@ -127,6 +141,8 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, onClos
 // --- categories and their pictures ------------------------------------------------------------------
 
 const OTHER = 'Other';
+/** The sidebar entry for private repositories, kept apart from the Hub's own categories. */
+const PRIVATE = '@private';
 
 function categoryOf(m: HubModule): string {
   return m.devices?.category?.trim() || OTHER;
@@ -164,7 +180,7 @@ function look(category: string) {
 }
 
 function CategoryButton({ label, icon: Icon, tint, count, active, onClick }: {
-  label: string; icon: LucideIcon; tint?: string; count: number; active: boolean; onClick: () => void;
+  label: string; icon: LucideIcon; tint?: string; count: React.ReactNode; active: boolean; onClick: () => void;
 }) {
   return (
     <button

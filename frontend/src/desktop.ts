@@ -40,7 +40,46 @@ export type RuntimeStatus = { state: 'idle' | 'preparing' | 'ready' | 'error'; m
 
 export type Tabs = { open: string[]; active: string | null };
 
-export type Snapshot = { profiles: Profile[]; runtime: RuntimeStatus; hubUrl: string; cloudUrl: string; dataRoot: string; version: string; tabs: Tabs };
+export type Plan = 'free' | 'pro';
+
+/** Who is signed in (the Hub's accounts). The app never hands the page a token. */
+export type AccountInfo = {
+  signedIn: boolean;
+  plan: Plan;
+  user?: { id: string; email: string | null; name: string | null; avatarUrl: string | null; lab: string | null; providers: string[] };
+  /** Sign-up with email confirmation on: no session until the emailed link is opened. */
+  confirmEmail?: boolean;
+  email?: string;
+};
+
+export type UpdateStatus = {
+  state: 'unsupported' | 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error';
+  current: string;
+  version?: string;
+  percent?: number;
+  message?: string | null;
+  /** macOS: unsigned builds cannot install themselves, so an update is a download link. */
+  manual?: boolean;
+  releaseUrl?: string;
+  downloadUrl?: string;
+  checkedAt?: number;
+};
+
+export type GitProvider = 'github' | 'gitlab';
+export type GitConnection = { provider: GitProvider; label: string; tokenHelp: string; scopes: string; connected: boolean; login: string | null; host: string };
+export type GitRepo = { id: string; name: string; description: string | null; private: boolean; defaultBranch: string; updatedAt: string; url: string };
+export type DriverScan = {
+  distribution?: string; version?: string; modules?: string[];
+  classes?: { module: string; class: string; doc: string }[];
+  errors?: { module: string; error: string }[];
+  error?: string;
+};
+export type GitImport = { file: string; sha: string; ref: string; scan: DriverScan };
+
+export type Snapshot = {
+  profiles: Profile[]; runtime: RuntimeStatus; hubUrl: string; cloudUrl: string; dataRoot: string; version: string; tabs: Tabs;
+  platform: string; account: AccountInfo; update: UpdateStatus; autoUpdate: boolean; secretsPersist: boolean;
+};
 
 /** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
 export type CloudLink = {
@@ -131,6 +170,34 @@ export interface DesktopApi {
     name: string;
     connection: { type?: string; port?: string; ip?: string; networkPort?: string; args?: Record<string, unknown> };
   }): Promise<{ instrument: DeckInstrument; packages: string[]; warnings: string[] }>;
+
+  account(): Promise<AccountInfo>;
+  signIn(email: string, password: string): Promise<AccountInfo>;
+  signUp(email: string, password: string, name: string): Promise<AccountInfo>;
+  resetPassword(email: string): Promise<void>;
+  /** Opens the system browser; resolves once the sign-in comes back (or rejects when cancelled). */
+  signInWith(provider: 'github' | 'google'): Promise<AccountInfo>;
+  cancelSignIn(): Promise<void>;
+  signOut(): Promise<void>;
+  updateProfile(fields: { full_name?: string; lab_info?: string }): Promise<AccountInfo>;
+  changePassword(password: string): Promise<void>;
+  /** Preview only: no payment is taken (desktop/src/account.js). */
+  setPlan(plan: Plan): Promise<AccountInfo>;
+  openHub(page: 'profile' | 'signup' | 'home'): Promise<void>;
+
+  gitList(): Promise<GitConnection[]>;
+  gitConnect(provider: GitProvider, token: string, host?: string): Promise<GitConnection[]>;
+  gitDisconnect(provider: GitProvider): Promise<GitConnection[]>;
+  gitRepos(provider: GitProvider, query?: string): Promise<GitRepo[]>;
+  gitImport(profileId: string, provider: GitProvider, repoId: string, ref?: string): Promise<GitImport>;
+  gitTokenPage(provider: GitProvider): Promise<void>;
+
+  checkForUpdate(): Promise<UpdateStatus>;
+  downloadUpdate(): Promise<void>;
+  installUpdate(): Promise<void>;
+  openUpdatePage(): Promise<void>;
+  setAutoUpdate(on: boolean): Promise<void>;
+  revealData(): Promise<void>;
 }
 
 export type PythonInfo = { ok: boolean; python: string; version?: string; edge?: string | null; prefix?: string; error?: string };

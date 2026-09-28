@@ -1,15 +1,20 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ChevronRight, Cloud, Copy, ExternalLink, FileCode2, FolderOpen, Globe, LayoutGrid, Layers, Loader2, Moon, Play, Plus,
-  RotateCw, Square, Sun, X,
+  AlertTriangle, ChevronRight, Cloud, Copy, Download, ExternalLink, FileCode2, FolderOpen, LayoutGrid, Layers, Loader2, Lock, Play, Plus,
+  RotateCw, Settings, Sparkles, Square, X,
 } from 'lucide-react';
 import { notify, promptDialog } from '@ivoryos/shared-ui';
-import { CLOUD_TAB, desktopApi, type DesktopApi, type Profile, type Snapshot, type Tabs } from '@/desktop';
+import { CLOUD_TAB, desktopApi, type AccountInfo, type DesktopApi, type Profile, type Snapshot, type Tabs, type UpdateStatus } from '@/desktop';
+import AccountPanel, { Avatar, type AuthMode } from '@/components/launcher/AccountPanel';
 import CloudPanel, { useCloudLinks } from '@/components/launcher/CloudPanel';
 import DeckPanel from '@/components/launcher/DeckPanel';
 import ProfileSettings from '@/components/launcher/ProfileSettings';
+import SettingsPanel from '@/components/launcher/SettingsPanel';
+import UpgradeDialog, { type UpgradeReason } from '@/components/launcher/UpgradeDialog';
 import { Button, STATE_LABEL, StatusDot, cardClass } from '@/components/launcher/ui';
+
+type View = 'profile' | 'cloud' | 'settings' | 'account';
 
 /**
  * The IvoryOS desktop launcher: every saved way of starting an edge (a deck, or a Python script
@@ -22,8 +27,11 @@ export default function LauncherPage() {
   const [api, setApi] = useState<DesktopApi | null | undefined>(undefined);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  // The main area shows the selected profile, or the Cloud page.
-  const [view, setView] = useState<'profile' | 'cloud'>('profile');
+  // The main area shows the selected profile, the Cloud page, Settings, or the account.
+  const [view, setView] = useState<View>('profile');
+  const [authMode, setAuthMode] = useState<AuthMode>('sign-in');
+  // undefined: the plan dialog is closed; otherwise what it was opened for.
+  const [upgrade, setUpgrade] = useState<UpgradeReason | undefined>(undefined);
   const [tab, setTab] = useState<'main' | 'log' | 'settings'>('main');
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -36,8 +44,7 @@ export default function LauncherPage() {
     document.documentElement.classList.toggle('dark', saved === 'dark');
     setApi(desktopApi());
   }, []);
-  const toggleTheme = () => {
-    const next = theme === 'light' ? 'dark' : 'light';
+  const chooseTheme = (next: 'light' | 'dark') => {
     setTheme(next);
     localStorage.setItem('theme', next);
     document.documentElement.classList.toggle('dark', next === 'dark');
@@ -69,6 +76,8 @@ export default function LauncherPage() {
     }));
     const offSelect = api.onSelect(id => { setSelected(id); setView('profile'); setTab('main'); api.showTab(null); });
     const offTabs = api.onTabs(setTabs);
+    // Re-read the account once per launch: the plan or the Hub profile may have changed elsewhere.
+    api.account().catch(() => {});
     return () => { offChanged(); offLog(); offSelect(); offTabs(); };
   }, [api, reload]);
 
@@ -109,10 +118,11 @@ export default function LauncherPage() {
     }
   };
 
-  const setHub = async () => {
-    const url = await promptDialog('Where the launcher finds drivers. Use http://localhost:3000 while developing the Hub.', { title: 'Hub address', defaultValue: snap?.hubUrl || '' });
-    if (url !== null && url !== undefined) run(() => api.setHubUrl(url.trim()));
-  };
+  const account: AccountInfo = snap?.account || { signedIn: false, plan: 'free' };
+  const pro = account.plan === 'pro';
+  const openAuth = (mode: AuthMode) => { setAuthMode(mode); setView('account'); api.showTab(null); };
+  // Cloud is a Pro feature in the preview plans; without it the button offers the upgrade.
+  const openCloud = () => (pro ? setView('cloud') : setUpgrade('cloud'));
 
   const rt = snap?.runtime;
   return (
@@ -162,8 +172,7 @@ export default function LauncherPage() {
               {rt.message}
             </span>
           )}
-          <Button small tone="ghost" onClick={setHub} title="The Hub the launcher installs drivers from"><Globe className="w-3.5 h-3.5" /> {snap?.hubUrl?.replace(/^https?:\/\//, '')}</Button>
-          <Button small tone="ghost" onClick={toggleTheme} title="Light or dark">{theme === 'light' ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}</Button>
+          {snap?.update && <UpdateChip update={snap.update} onClick={() => { setView('settings'); api.showTab(null); }} />}
         </div>
       </header>
 
@@ -195,27 +204,40 @@ export default function LauncherPage() {
           <div className="px-3 pt-3">
             <button
               type="button"
-              onClick={() => setView('cloud')}
+              onClick={openCloud}
               className={`w-full text-left px-3 py-2.5 rounded-xl border flex items-center gap-3 transition-colors ${view === 'cloud' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-gray-200 dark:border-white/10 hover:bg-gray-100 dark:hover:bg-white/5'}`}
             >
               <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 text-white flex items-center justify-center"><Cloud className="w-4 h-4" /></span>
               <span className="flex-1 min-w-0">
-                <span className="block text-sm font-medium">IvoryOS Cloud</span>
+                <span className="flex items-center gap-1.5 text-sm font-medium">IvoryOS Cloud{!pro && <span className="text-[9px] font-bold uppercase tracking-wider px-1 rounded bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">Pro</span>}</span>
                 <span className="block text-xs text-gray-500 dark:text-gray-400 truncate">
                   {cloudConnected ? `${cloudConnected} deck${cloudConnected === 1 ? '' : 's'} connected` : 'Manage decks from anywhere'}
                 </span>
               </span>
-              <ChevronRight className="w-4 h-4 text-gray-400" />
+              {pro ? <ChevronRight className="w-4 h-4 text-gray-400" /> : <Lock className="w-3.5 h-3.5 text-gray-400" />}
             </button>
           </div>
           <div className="p-3 border-t border-gray-200 dark:border-white/10 mt-3 grid grid-cols-2 gap-2">
             <Button small onClick={() => newProfile('deck')}><Plus className="w-3.5 h-3.5" /> New deck</Button>
             <Button small onClick={() => newProfile('script')}><Plus className="w-3.5 h-3.5" /> Python script</Button>
           </div>
+          <AccountCorner
+            account={account}
+            update={snap?.update}
+            view={view}
+            onAccount={() => { setView('account'); api.showTab(null); }}
+            onSettings={() => { setView('settings'); api.showTab(null); }}
+            onAuth={openAuth}
+            onUpgrade={() => setUpgrade(null)}
+          />
         </nav>
 
         <main className="flex-1 min-w-0 overflow-y-auto">
-          {view === 'cloud' ? (
+          {view === 'settings' && snap ? (
+            <SettingsPanel api={api} snap={snap} theme={theme} setTheme={chooseTheme} />
+          ) : view === 'account' ? (
+            <AccountPanel api={api} account={account} secretsPersist={snap?.secretsPersist ?? true} mode={authMode} setMode={setAuthMode} onUpgrade={() => setUpgrade(null)} />
+          ) : view === 'cloud' && pro ? (
             <CloudPanel api={api} profiles={profiles} links={cloudLinks} cloudUrl={snap?.cloudUrl || ''} run={run} />
           ) : profile ? (
             <ProfileView
@@ -223,6 +245,8 @@ export default function LauncherPage() {
               api={api}
               profile={profile}
               hubUrl={snap?.hubUrl || ''}
+              pro={pro}
+              onUpgrade={() => setUpgrade('private')}
               tab={tab}
               setTab={setTab}
               log={logs[profile.id] || []}
@@ -234,14 +258,89 @@ export default function LauncherPage() {
           )}
         </main>
       </div>
+      {upgrade !== undefined && (
+        <UpgradeDialog
+          api={api}
+          account={account}
+          reason={upgrade}
+          onClose={() => setUpgrade(undefined)}
+          onSignIn={() => openAuth('sign-in')}
+        />
+      )}
     </div>
   );
 }
 
-function ProfileView({ api, profile, hubUrl, tab, setTab, log, run, onRemoved }: {
+/**
+ * The bottom-left corner: who is signed in and on which plan, or the way to sign in; and the
+ * app's settings. What the old menu bar and header buttons did now lives behind these two.
+ */
+function AccountCorner({ account, update, view, onAccount, onSettings, onAuth, onUpgrade }: {
+  account: AccountInfo;
+  update?: UpdateStatus;
+  view: View;
+  onAccount: () => void;
+  onSettings: () => void;
+  onAuth: (mode: AuthMode) => void;
+  onUpgrade: () => void;
+}) {
+  const updateWaiting = update && (update.state === 'ready' || update.state === 'available');
+  return (
+    <div className="px-3 py-2.5 border-t border-gray-200 dark:border-white/10 flex items-center gap-2">
+      {account.signedIn ? (
+        <button
+          type="button"
+          onClick={onAccount}
+          title="Your account"
+          className={`flex-1 min-w-0 flex items-center gap-2.5 px-1.5 py-1 -mx-1.5 rounded-lg text-left ${view === 'account' ? 'bg-indigo-50 dark:bg-indigo-500/10' : 'hover:bg-gray-100 dark:hover:bg-white/5'}`}
+        >
+          <Avatar account={account} size={30} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium truncate">{account.user?.name || account.user?.email}</span>
+            <span className="block text-[11px] text-gray-500 dark:text-gray-400">
+              {account.plan === 'pro' ? <span className="text-violet-600 dark:text-violet-300 font-medium">Pro</span> : 'Free'}
+            </span>
+          </span>
+        </button>
+      ) : (
+        <div className="flex-1 flex gap-1.5">
+          <Button small tone="primary" onClick={() => onAuth('sign-in')}>Sign in</Button>
+          <Button small onClick={() => onAuth('sign-up')}>Sign up</Button>
+        </div>
+      )}
+      {account.signedIn && account.plan !== 'pro' && (
+        <Button small tone="ghost" title="See the Pro plan" onClick={onUpgrade} className="!text-violet-600 dark:!text-violet-300"><Sparkles className="w-3.5 h-3.5" /> Upgrade</Button>
+      )}
+      <button
+        type="button"
+        onClick={onSettings}
+        title={updateWaiting ? 'Settings (an update is available)' : 'Settings'}
+        className={`relative p-1.5 rounded-lg ${view === 'settings' ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-white/5'}`}
+      >
+        <Settings className="w-4 h-4" />
+        {updateWaiting && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-indigo-500 ring-2 ring-white dark:ring-[#111]" />}
+      </button>
+    </div>
+  );
+}
+
+/** In the tab bar only when there is something to do about an update. */
+function UpdateChip({ update, onClick }: { update: UpdateStatus; onClick: () => void }) {
+  if (update.state !== 'ready' && update.state !== 'available') return null;
+  return (
+    <button type="button" onClick={onClick} className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300">
+      <Download className="w-3 h-3" />
+      {update.state === 'ready' ? `Restart to update to ${update.version}` : `Update ${update.version} available`}
+    </button>
+  );
+}
+
+function ProfileView({ api, profile, hubUrl, pro, onUpgrade, tab, setTab, log, run, onRemoved }: {
   api: DesktopApi;
   profile: Profile;
   hubUrl: string;
+  pro: boolean;
+  onUpgrade: () => void;
   tab: 'main' | 'log' | 'settings';
   setTab: (t: 'main' | 'log' | 'settings') => void;
   log: string[];
@@ -306,7 +405,7 @@ function ProfileView({ api, profile, hubUrl, tab, setTab, log, run, onRemoved }:
       </div>
 
       {tab === 'main' && (profile.kind === 'deck'
-        ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} />
+        ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade} />
         : <ScriptOverview api={api} profile={profile} openSettings={() => setTab('settings')} />)}
       {tab === 'log' && <LogPanel api={api} profile={profile} lines={log} />}
       {tab === 'settings' && <ProfileSettings api={api} profile={profile} onRemoved={onRemoved} />}

@@ -126,6 +126,16 @@ class ProfileManager extends EventEmitter {
         this._save();
     }
 
+    /** Whether a new version of the app downloads by itself (it still installs only on restart). */
+    get autoUpdate() {
+        return this.store.autoUpdate !== false;
+    }
+
+    setAutoUpdate(on) {
+        this.store.autoUpdate = !!on;
+        this._save();
+    }
+
     /** Where decks pair with IvoryOS Cloud: the hosted service unless a lab runs its own. */
     get cloudUrl() {
         return this.store.cloudUrl || process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app';

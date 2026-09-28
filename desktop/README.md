@@ -100,6 +100,41 @@ the launcher and under **Not loaded** on the edge's Instruments page, with the r
 downloaded one may not add import folders, but the packages themselves run unsandboxed: that is
 what lets them talk to hardware. Only install from sources you trust.
 
+## Accounts, plans and private drivers
+
+The **bottom-left corner** of the launcher is the account (or Sign in / Sign up) and the
+**Settings** gear. Settings holds what the old menu bar and header buttons did: theme, updates,
+the Hub address, the launcher's Python, the data folder, keyboard shortcuts. On Windows and Linux
+there is **no menu bar** (it sat inside the window, above the launcher's own tabs); the shortcuts
+it carried are kept (`Ctrl+L` launcher, `Ctrl+Tab`, `Ctrl+R`, zoom, `F12`). macOS keeps its menu,
+which is at the top of the screen and is what makes copy/paste work in text fields there.
+
+- **Accounts are the Hub's** (its Supabase project, `src/account.js`): email/password, or GitHub
+  / Google in the system browser, returning to a one-off `127.0.0.1` listener with PKCE. That
+  return address must be allowed in the Hub's Supabase project (Authentication -> URL
+  Configuration -> Redirect URLs: `http://127.0.0.1:*` followed by `/**`); without it the browser
+  lands on the Hub's home page and the launcher waits until cancelled. Name and lab are the Hub's
+  `profiles` row, so they match the Hub's profile page.
+- **Tokens never reach the page.** The launcher is told who is signed in and on which plan; the
+  session and GitHub/GitLab tokens stay in the main process, encrypted with the OS keychain
+  (`src/secrets.js`). Where there is no keychain nothing is written and sign-in lasts one run.
+- **Plans are a preview.** "Upgrade" sets `user_metadata.ivoryos_plan = "pro"` with no payment.
+  That field is writable by the user, which is fine for trying the features and never for billing.
+  Pro unlocks the Cloud page and **Private repositories** in Add from Hub.
+- **Private repositories** (`src/gitRepos.js`): connect GitHub or GitLab (also self-hosted) with a
+  personal access token; pick a repository; the app downloads it **at its current commit** and
+  installs that archive into the deck like any driver, then lists the classes it provides
+  (`src/scan_driver.py`) so one can be picked as the instrument. No git needed on the machine, and
+  the deck lists `private-packages/<provider>-<repo>-<commit>.tar.gz`, never the token. Importing
+  again moves the deck to the newer commit (`packageKey` treats it as the same package).
+
+## Updates
+
+`src/updater.js`, from the GitHub releases CI publishes. Windows and Linux: electron-updater
+checks shortly after launch and every 4 hours, downloads in the background (Settings can turn that
+off), and installs on **Restart to update**, which stops every deck first. macOS: unsigned apps
+cannot install their own updates, so it only checks and offers the download.
+
 ## The contract with the edge
 
 - The app starts `python -m ivoryos_edge --deck … --data-dir … --port … --host …` with
@@ -131,7 +166,9 @@ git tag desktop-v0.1.0-test.1 && git push origin desktop-v0.1.0-test.1
 ```
 
 That creates a GitHub **pre-release** with the Windows `.exe`, macOS (Apple silicon) `.dmg` and
-Linux `.AppImage`, and first-open instructions for unsigned builds.
+Linux `.AppImage`, and first-open instructions for unsigned builds. A tag without a suffix
+(`desktop-v0.2.0`) is a full release, which is what installed apps update to; the version comes
+from the tag, so `package.json`'s `version` does not need editing.
 
 **App icon:** `build/icon.png` (1024×1024) is generated from `build/logo.png` by
 `uv run --with pillow python scripts/make-icon.py`. electron-builder makes the macOS and Windows
@@ -143,7 +180,8 @@ packaged builds are named IvoryOS throughout.
 
 - **Code signing and notarization.** Builds are unsigned, so macOS Gatekeeper and Windows
   SmartScreen will warn. This needs an Apple Developer ID and a Windows signing certificate in CI.
-- **Auto-update** (electron-updater plus a release feed).
+- **Auto-install on macOS** needs code signing (see above); until then macOS only checks.
+- **Real plans.** The Pro switch is a preview on a user-writable field (see Accounts).
 - **Offline first launch.** uv downloads Python on first run; bundling a standalone Python would
   remove that.
 - **Tray icon.** Closing the launcher on macOS leaves running decks running (Dock icon), but there

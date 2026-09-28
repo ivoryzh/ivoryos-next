@@ -5,8 +5,11 @@ name: Desktop installers
 #
 # - Any push touching desktop/ (or this file): build and test; installers are attached to the
 #   workflow run as artifacts (Actions tab -> the run -> Artifacts; needs a GitHub login).
-# - A tag `desktop-v*` (e.g. desktop-v0.1.0-test.1): the same, then a GitHub pre-release with
-#   the installers as public download links.
+# - A tag `desktop-v<version>`: the same, built as that version, then a GitHub release with the
+#   installers as public download links.
+#     desktop-v0.2.0         a release. Installed apps offer it as an update (desktop/src/updater.js
+#                            reads latest.yml / latest-linux.yml from the newest release).
+#     desktop-v0.2.0-test.1  a pre-release: downloadable for testing, never offered as an update.
 #
 # Each OS builds on its own runner because the bundled uv is a native binary. Builds are unsigned
 # (no Apple Developer ID or Windows certificate yet), so Gatekeeper and SmartScreen will warn.
@@ -17,6 +20,9 @@ on:
     tags: ['desktop-v*']
     paths:
       - 'desktop/**'
+      - 'frontend/src/app/launcher/**'
+      - 'frontend/src/components/launcher/**'
+      - 'frontend/src/desktop.ts'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -31,15 +37,24 @@ jobs:
         include:
           - os: windows-latest
             native: win32-x64-msvc
-            installer: 'desktop/dist/*.exe'
+            installer: |
+              desktop/dist/*.exe
+              desktop/dist/latest*.yml
+              desktop/dist/*.blockmap
             app: 'desktop/dist/win-unpacked/IvoryOS.exe'
           - os: macos-latest # Apple silicon; the bundled uv is arm64, so no Intel build yet
             native: darwin-arm64
-            installer: 'desktop/dist/*.dmg'
+            installer: |
+              desktop/dist/*.dmg
+              desktop/dist/latest*.yml
+              desktop/dist/*.blockmap
             app: 'desktop/dist/mac-arm64/IvoryOS.app/Contents/MacOS/IvoryOS'
           - os: ubuntu-latest
             native: linux-x64-gnu
-            installer: 'desktop/dist/*.AppImage'
+            installer: |
+              desktop/dist/*.AppImage
+              desktop/dist/latest*.yml
+              desktop/dist/*.blockmap
             app: 'desktop/dist/linux-unpacked/ivoryos' # executableName in desktop/package.json
     runs-on: ${{ matrix.os }}
     defaults:
@@ -77,6 +92,11 @@ jobs:
         run: npm test
         working-directory: desktop
 
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        run: npm version "${GITHUB_REF_NAME#desktop-v}" --no-git-tag-version --allow-same-version
+        working-directory: desktop
+
       - name: Package
         run: npm run dist -- --publish never
         working-directory: desktop
@@ -104,6 +124,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Release or pre-release
+        id: kind
+        run: |
+          v="${GITHUB_REF_NAME#desktop-v}"
+          if [[ "$v" == *-* ]]; then echo "pre=true" >> "$GITHUB_OUTPUT"; else echo "pre=false" >> "$GITHUB_OUTPUT"; fi
+
       - uses: actions/download-artifact@v4
         with:
           path: installers
@@ -111,7 +137,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          prerelease: true
+          prerelease: ${{ steps.kind.outputs.pre }}
+          make_latest: ${{ steps.kind.outputs.pre == 'false' }}
           files: installers/*
           body: |
             Test build of the IvoryOS desktop launcher. Unsigned, so the OS will warn on first open:
@@ -122,3 +149,5 @@ jobs:
             - **Linux**: `chmod +x IvoryOS-*.AppImage` and run it.
 
             First launch downloads Python (via the bundled uv), so it needs internet and takes a minute.
+            Installed on Windows or Linux, later versions arrive by themselves (Settings -> Updates);
+            on macOS the app says when one is out and links here.

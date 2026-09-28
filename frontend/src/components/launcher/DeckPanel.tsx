@@ -5,16 +5,20 @@ import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { Deck, DeckInstrument, DesktopApi, Profile } from '@/desktop';
 import HubBrowser from './HubBrowser';
 import InstrumentEditor from './InstrumentEditor';
+import type { InstrumentSeed } from './PrivateRepos';
 import { Button, cardClass } from './ui';
 
 type LoadState = { loaded: Set<string>; errors: Record<string, string> } | null;
 
 /** One deck profile's instruments: what is on it, whether each loaded, and how to change it. */
-export default function DeckPanel({ api, profile, hubUrl }: { api: DesktopApi; profile: Profile; hubUrl: string }) {
+export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade }: {
+  api: DesktopApi; profile: Profile; hubUrl: string; pro: boolean; onUpgrade: () => void;
+}) {
   const [deck, setDeck] = useState<Deck | null>(null);
   const [load, setLoad] = useState<LoadState>(null);
   const [editing, setEditing] = useState<DeckInstrument | null | 'new'>(null);
   const [browsing, setBrowsing] = useState(false);
+  const [seed, setSeed] = useState<InstrumentSeed | null>(null);
   const running = profile.status.state === 'running';
 
   const refresh = useCallback(() => {
@@ -45,7 +49,7 @@ export default function DeckPanel({ api, profile, hubUrl }: { api: DesktopApi; p
     <div className="space-y-5">
       <div className="flex items-center gap-2 flex-wrap">
         <Button tone="primary" onClick={() => setBrowsing(true)}><Store className="w-4 h-4" /> Add from Hub</Button>
-        <Button onClick={() => setEditing('new')}><Plus className="w-4 h-4" /> Add by hand</Button>
+        <Button onClick={() => { setSeed(null); setEditing('new'); }}><Plus className="w-4 h-4" /> Add by hand</Button>
         <Button onClick={() => act(() => api.installFromFile())}><FileJson className="w-4 h-4" /> Install from deck file…</Button>
         {running && <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">Changes restart this deck.</span>}
       </div>
@@ -106,10 +110,14 @@ export default function DeckPanel({ api, profile, hubUrl }: { api: DesktopApi; p
       )}
 
       {editing && (
-        <InstrumentEditor api={api} profileId={profile.id} entry={editing === 'new' ? null : editing} running={running} onClose={() => setEditing(null)} onSaved={refresh} />
+        <InstrumentEditor api={api} profileId={profile.id} entry={editing === 'new' ? null : editing} seed={editing === 'new' ? seed : null} running={running} onClose={() => { setEditing(null); setSeed(null); }} onSaved={refresh} />
       )}
       {browsing && (
-        <HubBrowser api={api} profileId={profile.id} profileName={profile.name} hubUrl={hubUrl} onClose={() => setBrowsing(false)} onAdded={refresh} />
+        <HubBrowser
+          api={api} profileId={profile.id} profileName={profile.name} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade}
+          onPrivatePicked={s => { refresh(); setSeed(s); setEditing('new'); }}
+          onClose={() => setBrowsing(false)} onAdded={refresh}
+        />
       )}
     </div>
   );

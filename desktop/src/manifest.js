@@ -27,6 +27,13 @@ function packageKey(requirement) {
     const req = String(requirement).trim();
     const named = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*@\s*/.exec(req);
     if (named) return named[1].toLowerCase().replace(/[-_.]+/g, '-');
+    // A local archive (a private repository downloaded by gitRepos.js, named
+    // <provider>-<repo>-<commit>.tar.gz) is keyed by path without the commit, so importing a newer
+    // commit replaces the older one. Checked before the bare-name rule, which would read
+    // `C:\Users\...` as a package called "c" and make every private package on Windows collide.
+    if (/^([A-Za-z]:[\\/]|[\\/]|\.{1,2}[\\/]|~)/.test(req)) {
+        return `path:${req.replace(/\\/g, '/').replace(/-[0-9a-f]{12}\.tar\.gz$/i, '').toLowerCase()}`;
+    }
     if (/^[a-z]+\+|^[a-z]+:\/\//i.test(req)) return req.replace(/@[^@/]*$/, '').replace(/#.*$/, '');
     const bare = /^([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(req);
     return bare ? bare[1].toLowerCase().replace(/[-_.]+/g, '-') : req;

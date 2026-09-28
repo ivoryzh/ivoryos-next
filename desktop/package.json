@@ -49,6 +49,7 @@
       ]
     },
     "linux": {
+      "executableName": "ivoryos",
       "target": [
         "AppImage"
       ],

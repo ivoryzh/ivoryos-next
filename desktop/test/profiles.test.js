@@ -117,3 +117,13 @@ test('launcher-wide settings survive a restart', () => {
     assert.equal(again.hubUrl, 'http://localhost:3111');
     assert.equal(again.cloudUrl, 'http://localhost:3002');
 });
+
+test('a profiles.json saved with a byte-order mark is read, not replaced by defaults', () => {
+    const home = tmp();
+    const { profiles: [first] } = loadProfiles(home);
+    const file = path.join(home, 'profiles.json');
+    fs.writeFileSync(file, '﻿' + fs.readFileSync(file, 'utf8').replace(/"port": \d+/, '"port": 8095'));
+    const [again] = loadProfiles(home).profiles;
+    assert.equal(again.id, first.id);
+    assert.equal(again.port, 8095);
+});

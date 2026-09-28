@@ -85,12 +85,20 @@ function validateProfile(profile) {
 }
 
 /**
+ * JSON.parse, tolerating a leading byte-order mark. Windows PowerShell 5.1 and some editors write
+ * one; without this a hand-edited file reads as unparseable and is silently replaced by defaults.
+ */
+function readJson(file) {
+    return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+}
+
+/**
  * Read profiles.json, creating it on first use. A launcher that predates profiles kept a single
  * deck in <home>/data; that becomes the first profile, so nothing the person had is lost.
  */
 function loadProfiles(home) {
     let stored = null;
-    try { stored = JSON.parse(fs.readFileSync(profilesFile(home), 'utf8')); } catch { /* first run */ }
+    try { stored = readJson(profilesFile(home)); } catch { /* first run */ }
     if (stored && Array.isArray(stored.profiles)) {
         // Every launcher-wide setting is read back here: one left out is silently lost at the
         // next launch (the Cloud address was, until it was listed).
@@ -155,7 +163,7 @@ function commandFor(profile, ctx) {
 
 function readDeckFile(file) {
     try {
-        return JSON.parse(fs.readFileSync(file, 'utf8'));
+        return readJson(file);
     } catch {
         return { format: DECK_FORMAT, name: 'My deck', packages: [], instruments: [] };
     }

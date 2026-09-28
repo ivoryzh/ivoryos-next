@@ -8,6 +8,7 @@
 // isolation between decks that, on one bench, are usually the same instruments anyway.
 
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 
@@ -187,6 +188,10 @@ class ProfileManager extends EventEmitter {
             const runtime = await this.getRuntime();
             if (profile.kind === 'deck') {
                 const deck = readDeckFile(profile.deck);
+                // The first profile loadProfiles makes on a fresh install has no folder yet (only
+                // create() writes one), and the edge runs with dataDir as its cwd: spawning into a
+                // missing cwd fails as "spawn python.exe ENOENT", naming the wrong file.
+                fs.mkdirSync(profile.dataDir, { recursive: true });
                 await runtime.ensurePackages(deck.packages || [], {
                     key: id,
                     onProgress: (message) => this._setStatus(id, { message }),

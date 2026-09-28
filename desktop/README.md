@@ -121,6 +121,18 @@ UI into `resources/`, which is bundled into the app. Build on each target OS, si
 native binary. `npm run dist:dir` builds an unpacked app for testing, and
 `<app> --smoke-test` checks a build on a clean machine.
 
+**Download links (CI).** `.github/workflows/desktop.yml` builds all three OSes on their own
+runners, runs `npm test`, and smoke-tests each packaged app against an empty profile folder. Any
+push touching `desktop/` attaches the installers to the workflow run as artifacts. To publish
+download links, push a tag:
+
+```bash
+git tag desktop-v0.1.0-test.1 && git push origin desktop-v0.1.0-test.1
+```
+
+That creates a GitHub **pre-release** with the Windows `.exe`, macOS (Apple silicon) `.dmg` and
+Linux `.AppImage`, and first-open instructions for unsigned builds.
+
 **App icon:** `build/icon.png` (1024×1024) is generated from `build/logo.png` by
 `uv run --with pillow python scripts/make-icon.py`. electron-builder makes the macOS and Windows
 icon formats from that one PNG, so a PNG logo is enough and no SVG is needed. In development the
@@ -138,4 +150,5 @@ packaged builds are named IvoryOS throughout.
   is no menu-bar status yet.
 - **The Hub's download bundle still targets the legacy `ivoryos` package** (`import ivoryos` in
   the generated `main.py`); "Open in IvoryOS" targets this edge.
-- **Tested on macOS (arm64) only.** Windows and Linux builds should work but have not been run.
+- **Tested by hand on macOS (arm64) and Windows (x64).** Linux is covered only by CI's smoke
+  test. No Intel macOS build: the bundled uv is the build machine's, and CI's macOS runner is arm64.

@@ -150,3 +150,17 @@ test('a Cloud address without a scheme gets http on this computer or the lab net
     mgr.setCloudUrl('');
     assert.equal(mgr.cloudUrl, process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app');
 });
+
+test('the first profile of a fresh install gets its data folder when started', async (t) => {
+    // loadProfiles makes that profile without writing its folder, and the edge runs with the
+    // data folder as its cwd; a missing cwd failed every first launch as "spawn python ENOENT".
+    const home = tmp();
+    const mgr = new ProfileManager({ home, getRuntime: async () => fakeRuntime() });
+    t.after(() => mgr.stopAll());
+    const [first] = mgr.list();
+    assert.equal(fs.existsSync(first.dataDir), false);
+    mgr.update(first.id, { port: await freePort() });
+    await mgr.start(first.id).catch(() => {}); // node is not an edge; only the folder matters here
+    assert.ok(fs.existsSync(first.dataDir));
+    assert.doesNotMatch(mgr.logTail(first.id), /ENOENT/);
+});

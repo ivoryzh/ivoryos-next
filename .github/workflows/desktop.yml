@@ -73,12 +73,22 @@ jobs:
 
       - name: Install workspace packages
         run: |
+          set -euo pipefail
           npm ci --no-audit --no-fund
           # A lockfile written on another OS can omit this platform's native binaries
-          # (npm/cli#4828); the frontend build then fails with "Cannot find native binding".
+          # (npm/cli#4828). Without Tailwind's and lightningcss's the build fails with "Cannot find
+          # native binding"; without Next's compiler, `next build` downloads it mid-build, and a
+          # dropped connection there fails the build (seen on Linux). So install all three here,
+          # at exactly the installed versions. The versions are read from the files: the packages
+          # sit in frontend/node_modules, not the root, and lightningcss does not let require()
+          # read its package.json (it used to fail, silently installing the newest instead).
+          version() {
+            node -p "const fs=require('fs');const d=['frontend/node_modules/$1','node_modules/$1'].find(x=>fs.existsSync(x+'/package.json'));if(!d)throw new Error('$1 is not installed');JSON.parse(fs.readFileSync(d+'/package.json','utf8')).version"
+          }
           npm install --no-save --no-audit --no-fund \
-            "@tailwindcss/oxide-${{ matrix.native }}@$(node -p "require('@tailwindcss/oxide/package.json').version")" \
-            "lightningcss-${{ matrix.native }}@$(node -p "require('lightningcss/package.json').version")"
+            "@tailwindcss/oxide-${{ matrix.native }}@$(version @tailwindcss/oxide)" \
+            "lightningcss-${{ matrix.native }}@$(version lightningcss)" \
+            "@next/swc-${{ matrix.native }}@$(version next)"
 
       - name: Build the web UI
         run: npm run build

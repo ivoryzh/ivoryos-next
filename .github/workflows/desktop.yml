@@ -1,0 +1,163 @@
+name: Desktop installers
+
+# Builds the IvoryOS desktop app for Windows, macOS and Linux, and checks each packaged build
+# boots (--smoke-test: installs Python with the bundled uv, starts a deck, loads the launcher).
+#
+# - Any push touching desktop/ (or this file): build and test; installers are attached to the
+#   workflow run as artifacts (Actions tab -> the run -> Artifacts; needs a GitHub login).
+# - A tag `desktop-v<version>`: the same, built as that version, then a GitHub release with the
+#   installers as public download links.
+#     desktop-v0.2.0         a release. Installed apps offer it as an update (desktop/src/updater.js
+#                            reads latest.yml / latest-linux.yml from the newest release).
+#     desktop-v0.2.0-test.1  a pre-release: downloadable for testing, never offered as an update.
+#
+# Each OS builds on its own runner because the bundled uv is a native binary. Builds are unsigned
+# (no Apple Developer ID or Windows certificate yet), so Gatekeeper and SmartScreen will warn.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['desktop-v*']
+    paths:
+      - 'desktop/**'
+      - 'frontend/src/app/launcher/**'
+      - 'frontend/src/components/launcher/**'
+      - 'frontend/src/desktop.ts'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            native: win32-x64-msvc
+            installer: |
+              desktop/dist/*.exe
+              desktop/dist/latest*.yml
+              desktop/dist/*.blockmap
+            app: 'desktop/dist/win-unpacked/IvoryOS.exe'
+          - os: macos-latest # Apple silicon; the bundled uv is arm64, so no Intel build yet
+            native: darwin-arm64
+            installer: |
+              desktop/dist/*.dmg
+              desktop/dist/latest*.yml
+              desktop/dist/*.blockmap
+            app: 'desktop/dist/mac-arm64/IvoryOS.app/Contents/MacOS/IvoryOS'
+          - os: ubuntu-latest
+            native: linux-x64-gnu
+            installer: |
+              desktop/dist/*.AppImage
+              desktop/dist/latest*.yml
+              desktop/dist/*.blockmap
+            app: 'desktop/dist/linux-unpacked/ivoryos' # executableName in desktop/package.json
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false' # unsigned: don't go looking for a certificate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install workspace packages
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          # A lockfile written on another OS can omit this platform's native binaries
+          # (npm/cli#4828). Without Tailwind's and lightningcss's the build fails with "Cannot find
+          # native binding"; without Next's compiler, `next build` downloads it mid-build, and a
+          # dropped connection there fails the build (seen on Linux). So install all three here,
+          # at exactly the installed versions. The versions are read from the files: the packages
+          # sit in frontend/node_modules, not the root, and lightningcss does not let require()
+          # read its package.json (it used to fail, silently installing the newest instead).
+          version() {
+            node -p "const fs=require('fs');const d=['frontend/node_modules/$1','node_modules/$1'].find(x=>fs.existsSync(x+'/package.json'));if(!d)throw new Error('$1 is not installed');JSON.parse(fs.readFileSync(d+'/package.json','utf8')).version"
+          }
+          npm install --no-save --no-audit --no-fund \
+            "@tailwindcss/oxide-${{ matrix.native }}@$(version @tailwindcss/oxide)" \
+            "lightningcss-${{ matrix.native }}@$(version lightningcss)" \
+            "@next/swc-${{ matrix.native }}@$(version next)"
+
+      - name: Build the web UI
+        run: npm run build
+        working-directory: frontend
+
+      - name: Install desktop packages
+        run: npm ci --no-audit --no-fund
+        working-directory: desktop
+
+      - name: Desktop tests
+        run: npm test
+        working-directory: desktop
+
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        run: npm version "${GITHUB_REF_NAME#desktop-v}" --no-git-tag-version --allow-same-version
+        working-directory: desktop
+
+      - name: Package
+        run: npm run dist -- --publish never
+        working-directory: desktop
+
+      - name: Smoke-test the packaged app on a clean profile folder
+        run: |
+          export IVORYOS_DESKTOP_HOME="$RUNNER_TEMP/ivoryos-home"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -q && sudo apt-get install -yq xvfb
+            xvfb-run -a "${{ matrix.app }}" --no-sandbox --smoke-test
+          else
+            "${{ matrix.app }}" --smoke-test
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IvoryOS-${{ runner.os }}
+          path: ${{ matrix.installer }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Release or pre-release
+        id: kind
+        run: |
+          v="${GITHUB_REF_NAME#desktop-v}"
+          if [[ "$v" == *-* ]]; then echo "pre=true" >> "$GITHUB_OUTPUT"; else echo "pre=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ steps.kind.outputs.pre }}
+          make_latest: ${{ steps.kind.outputs.pre == 'false' }}
+          files: installers/*
+          body: |
+            Test build of the IvoryOS desktop launcher. Unsigned, so the OS will warn on first open:
+
+            - **Windows**: SmartScreen says "Windows protected your PC" -> More info -> Run anyway.
+            - **macOS (Apple silicon)**: open the .dmg and drag IvoryOS to Applications. If macOS says
+              the app "is damaged" or "can't be opened", run `xattr -cr /Applications/IvoryOS.app` once.
+            - **Linux**: `chmod +x IvoryOS-*.AppImage` and run it.
+
+            First launch downloads Python (via the bundled uv), so it needs internet and takes a minute.
+            Installed on Windows or Linux, later versions arrive by themselves (Settings -> Updates);
+            on macOS the app says when one is out and links here.

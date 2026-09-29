@@ -3,7 +3,8 @@ import { API_BASE } from '@/config';
 
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Sun, Moon, Loader2 } from 'lucide-react';
+import { Sun, Moon, Loader2, PanelRight } from 'lucide-react';
+import { openInPanel } from '@/pluginPanel';
 import Sidebar from '@/components/Sidebar';
 
 function PluginContent() {
@@ -64,6 +65,16 @@ function PluginContent() {
           <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">
              {plugin ? plugin.name : 'Loading Plugin...'}
           </h2>
+          {plugin && (
+            <button
+              type="button"
+              onClick={() => openInPanel(plugin.id, plugin.placement)}
+              title="Keep this plugin beside every page, e.g. to watch it while a workflow runs"
+              className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
+            >
+              <PanelRight className="w-3.5 h-3.5" /> Show beside pages
+            </button>
+          )}
         </header>
 
         <div className="flex-1 overflow-hidden relative bg-white dark:bg-[#0a0a0a]">

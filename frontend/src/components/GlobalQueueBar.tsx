@@ -1,6 +1,8 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
+import { usePathname } from 'next/navigation';
+import Link from 'next/link';
 import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo, HandHelping } from 'lucide-react';
 import { setPromptMinimized } from '@/inputPrompt';
 
@@ -11,8 +13,12 @@ export default function GlobalQueueBar() {
   const [queue, setQueue] = useState<any[]>([]);
   // Counted from the whole run list, not the 3-item preview, so the idle chip reports the real depth.
   const [pendingCount, setPendingCount] = useState(0);
+  // The desktop launcher page is served by the app itself, not by an edge, so there is no queue
+  // to watch there (and nothing at /api to ask).
+  const onLauncher = (usePathname() || '').startsWith('/launcher');
 
   useEffect(() => {
+    if (onLauncher) return;
     const fetchInitial = async () => {
         try {
             const [statusRes, queueRes] = await Promise.all([
@@ -61,7 +67,7 @@ export default function GlobalQueueBar() {
     return () => {
         ws.close();
     };
-  }, []);
+  }, [onLauncher]);
 
   const handleRunControl = async (action: 'pause' | 'resume' | 'cancel') => {
     if (!activeRun) return;
@@ -95,12 +101,14 @@ export default function GlobalQueueBar() {
   // page and know whether the platform was idle, running, paused or stuck. Hiding the bar when
   // nothing is running loses that: "no bar" and "page still loading" look identical. So when
   // there's no active run, fall back to a compact idle chip that still reports the queue depth.
+  if (onLauncher) return null;
+
   if (!activeRun) {
     return (
-      <a
+      <Link
         href="/queue"
         title={pendingCount > 0 ? `Platform is idle — ${pendingCount} run${pendingCount === 1 ? '' : 's'} waiting in the queue` : 'Platform is idle'}
-        className="fixed bottom-4 right-4 z-[9999] flex items-center gap-2 px-3 py-2 rounded-full border border-gray-200 dark:border-white/10 bg-white/90 dark:bg-gray-900/90 backdrop-blur shadow-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+        className="fixed bottom-4 right-[calc(var(--ivoryos-dock-right,0px)+1rem)] z-[9999] flex items-center gap-2 px-3 py-2 rounded-full border border-gray-200 dark:border-white/10 bg-white/90 dark:bg-gray-900/90 backdrop-blur shadow-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
       >
         {pendingCount > 0 ? (
           <>
@@ -113,7 +121,7 @@ export default function GlobalQueueBar() {
             <span>Idle</span>
           </>
         )}
-      </a>
+      </Link>
     );
   }
 
@@ -134,7 +142,7 @@ export default function GlobalQueueBar() {
   const currentStep = activeRun.steps?.find((s: any) => s.status === 'running' || s.status === 'pending');
 
   return (
-    <div className={`fixed bottom-4 right-4 z-[9999] transition-all duration-300 ease-in-out ${expanded ? 'w-[400px]' : 'w-[320px]'}`}>
+    <div className={`fixed bottom-4 right-[calc(var(--ivoryos-dock-right,0px)+1rem)] z-[9999] transition-all duration-300 ease-in-out ${expanded ? 'w-[400px]' : 'w-[320px]'}`}>
       <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-white/10 shadow-2xl overflow-hidden flex flex-col">
         {/* Progress Bar (Top edge) */}
         <div className="h-1.5 w-full bg-gray-100 dark:bg-white/5">

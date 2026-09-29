@@ -175,7 +175,8 @@ class AgentProposal(Base):
 
 
 # Database setup
-DB_FILENAME = "ivoryos_edge.db"
+# See paths.py: the data directory when IVORYOS_DATA_DIR is set, the working directory otherwise.
+from .paths import DB_PATH as DB_FILENAME
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILENAME}"
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

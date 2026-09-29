@@ -1,0 +1,83 @@
+{
+  "name": "ivoryos-desktop",
+  "productName": "IvoryOS",
+  "version": "0.1.0",
+  "description": "Desktop launcher for the IvoryOS edge server",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke-test",
+    "test": "node --test test/*.test.js",
+    "prepare-resources": "node scripts/prepare-resources.js",
+    "dist": "npm run prepare-resources && electron-builder",
+    "dist:dir": "npm run prepare-resources && electron-builder --dir"
+  },
+  "build": {
+    "appId": "app.ivoryos.desktop",
+    "productName": "IvoryOS",
+    "files": [
+      "src/**/*",
+      "package.json",
+      "build/icon.png",
+      "build/icon-win.png"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": ".",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "name": "IvoryOS",
+        "schemes": [
+          "ivoryos"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon-win.png"
+    },
+    "linux": {
+      "executableName": "ivoryos",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Science",
+      "artifactName": "${productName}-${version}.${ext}",
+      "icon": "build/icon-win.png"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ivoryzh",
+        "repo": "ivoryos-next",
+        "releaseType": "release"
+      }
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

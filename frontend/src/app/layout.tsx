@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Inter } from 'next/font/google';
 import GlobalQueueBar from '@/components/GlobalQueueBar';
+import PluginPanelHost from '@/components/PluginPanel';
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,7 +29,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className={inter.className}>
-        {children}
+        {/* Around the pages, not inside one: a plugin panel stays mounted while you navigate. */}
+        <PluginPanelHost>{children}</PluginPanelHost>
         <GlobalQueueBar />
       </body>
     </html>

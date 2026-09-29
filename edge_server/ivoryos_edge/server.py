@@ -17,6 +17,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from .introspection import inspect_device_module
+from .plugins import Plugin, PluginFiles, start_plugin
 from .models import init_db, async_session, WorkflowRun
 from sqlalchemy import func, select
 from .queue import WorkflowQueueManager
@@ -25,7 +26,7 @@ from . import runtime
 from . import workflows as wf
 from .workflows import WorkflowError, expand_workflow_blocks
 
-ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+from .paths import ENV_PATH, CERTS_DIR, WORKFLOWS_DIR, SCHEMA_DUMP_PATH
 load_dotenv(ENV_PATH)
 
 app = FastAPI(title="IvoryOS Edge Server")
@@ -75,12 +76,34 @@ def get_cloud_settings():
     below, or the CLOUD_TOKEN env var for headless provisioning) — it is just no longer readable
     back out over HTTP.
     """
+    state, error = cloud_connection_state, cloud_connection_error
+    # "connected" is set once, when the first connection succeeds; the link can be lost, or
+    # be taken over by another client with this id, long after. Ask the broker how it is now.
+    health = global_broker.link_health() if global_broker and hasattr(global_broker, "link_health") else None
+    if health and state == "connected":
+        if health.get("other_session"):
+            state = "conflict"
+            error = (f"Another edge is connecting as this Cloud device ({global_client_id}). "
+                     f"It is usually a second copy of this script or deck, "
+                     f"started from the same folder, which shares its pairing. The two keep taking the "
+                     f"connection from each other. Stop the other copy, or pair this one as its own device.")
+        elif health["flapping"]:
+            state = "conflict"
+            error = (f"The Cloud connection dropped {health['recent_drops']} times in the last 30 seconds, each "
+                     f"time right after connecting. Another edge is probably using this Cloud identity "
+                     f"({global_client_id}): a second copy of this script or deck, started from the same "
+                     f"folder, shares its pairing. Stop the other copy, or pair this one as its own device.")
+        elif not health["connected"]:
+            state = "reconnecting"
     return {
         "paired": bool(CLOUD_TOKEN),
         "client_id": global_client_id,
         "broker": cloud_broker_url,
-        "connection_state": cloud_connection_state,
-        "connection_error": cloud_connection_error,
+        "connection_state": state,
+        "connection_error": error,
+        # Where the pairing is kept. Every copy of an edge started with this folder shares it,
+        # which is what makes two copies one identity. The path, never the token.
+        "pairing_file": ENV_PATH,
     }
 
 @app.post("/api/cloud-settings/pair")
@@ -604,7 +627,7 @@ async def setup_broker():
             global_broker = LocalMQTTBroker(client_id, endpoint, port)
         elif protocol == "aws_iot":
             certs = token_data.get("certs", {})
-            cert_dir = os.path.join(os.path.dirname(__file__), ".certs")
+            cert_dir = CERTS_DIR
             os.makedirs(cert_dir, exist_ok=True)
             
             ca_cert_path = os.path.join(cert_dir, "root-CA.crt")
@@ -656,6 +679,8 @@ async def setup_broker():
             global_broker.subscribe(f"{topic_prefix}/{client_id}/sequences-push")
             # What Cloud is holding for this device, for the Queue page (awareness only).
             global_broker.subscribe(f"{topic_prefix}/{client_id}/cloud-queue")
+            # Another process connecting under this identity: a second copy of this edge.
+            global_broker.watch_identity(f"{topic_prefix}/{client_id}/presence", global_session)
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the
@@ -730,7 +755,7 @@ async def startup_event():
         
     try:
         import json
-        with open("ivoryos_schema.json", "w") as f:
+        with open(SCHEMA_DUMP_PATH, "w") as f:
             json.dump({
                 "instruments": app.state.instrument_schemas,
                 "instrument_meta": app.state.instrument_meta
@@ -753,7 +778,76 @@ def get_status():
         "active_workflow_id": queue_manager.active_run_id,
         "queue_paused": queue_manager.paused,
         "cloud_queue": queue_manager.cloud_queue,
+        # Instruments the deck file lists that did not load (deck_config.py), so the Instruments
+        # page can say "pump_2: could not open COM4" instead of the pump silently not existing.
+        "instrument_errors": getattr(app.state, "instrument_errors", []),
     }
+
+
+# --- Process control ------------------------------------------------------------------------
+# RESTART_EXIT_CODE asks whoever started this process (the desktop app, or the Windows restart
+# loop in restart.py) to start it again.
+from .restart import RESTART_EXIT_CODE, restart_by_exit
+
+
+def _supervised() -> bool:
+    return os.environ.get("IVORYOS_SUPERVISED") == "1"
+
+
+@app.get("/api/system")
+def system_info():
+    """What this process is and where it keeps things -- for the desktop app and for support."""
+    from . import paths
+    import platform
+    return {
+        "pid": os.getpid(),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "supervised": _supervised(),
+        "deck_path": getattr(app.state, "deck_path", None),
+        "data_dir": paths.DATA_DIR,
+        "workflows_dir": WORKFLOWS_DIR,
+    }
+
+
+def _relaunch():
+    """Replace this process with a fresh one, or exit so the supervisor starts one."""
+    try:
+        if global_broker:
+            global_broker.disconnect()
+    except Exception:
+        pass
+    if restart_by_exit():
+        os._exit(RESTART_EXIT_CODE)
+    # Unsupervised (`python demo.py`, and `python -m ivoryos_edge` outside Windows): exec the
+    # same command line. sys.orig_argv keeps `-m ivoryos_edge`, which sys.argv has already
+    # rewritten to a file path.
+    argv = getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv]
+    if sys.platform == "win32":
+        # Only a script gets here on Windows (the CLI runs under restart.py's loop), and Windows
+        # exec ends this process: the terminal gets its prompt back while the new edge runs on.
+        print("Restarting as a new process. On Windows it runs on detached from this terminal. "
+              "To keep restarts in the terminal, start the edge with `python -m ivoryos_edge --deck ...`, "
+              "or run the script from the IvoryOS desktop app.", flush=True)
+    sys.stdout.flush()
+    os.execv(sys.executable, argv)
+
+
+@app.post("/api/system/restart")
+async def restart_server(force: bool = False):
+    """Restart the edge process: reload the deck file, retry instruments that failed to load.
+
+    Refused while a run is in progress unless forced, because restarting stops it mid-step on
+    real hardware. The response is sent first; the process goes away a moment later, and the
+    page reconnects by polling /api/status.
+    """
+    if queue_manager.active_run_id and not force:
+        return JSONResponse(status_code=409, content={
+            "error": "A run is in progress. Restarting now would stop it mid-step.",
+            "active_run_id": queue_manager.active_run_id,
+        })
+    asyncio.get_running_loop().call_later(0.3, _relaunch)
+    return {"status": "restarting", "mode": "supervisor" if _supervised() else "exec"}
 
 @app.get("/api/optimizers")
 def get_optimizers():
@@ -1139,7 +1233,6 @@ async def kill_execution(task_id: str):
     task.cancel()
     return {"status": "cancelled", "task_id": task_id}
 
-WORKFLOWS_DIR = os.path.join(os.path.dirname(__file__), "workflows")
 os.makedirs(WORKFLOWS_DIR, exist_ok=True)
 
 def _workflow_error(e, status=400, forceable=None):
@@ -1266,7 +1359,7 @@ app.include_router(agent_router)
 
 @app.get("/api/plugins")
 def list_plugins():
-    return {"plugins": getattr(app.state, "plugins", [])}
+    return {"plugins": getattr(app.state, "plugins", []), "errors": getattr(app.state, "plugin_errors", [])}
 
 
 @app.post("/api/workflows/expand")
@@ -1499,73 +1592,143 @@ def remove_workflow(name: str, force: bool = False):
 
 
 
-def run(module_name: str, port: int = 8080, plugins: list = None):
-    """
-    Entry point to start the Edge Server. 
-    It inspects the caller module for initialized instruments.
-    """
-    app.state.plugins = []
-    
-    # Auto-discover static plugins from a 'plugins' directory next to the caller script
-    if module_name in sys.modules:
-        caller_mod = sys.modules[module_name]
-        if hasattr(caller_mod, '__file__') and caller_mod.__file__:
-            caller_dir = os.path.dirname(os.path.abspath(caller_mod.__file__))
-            plugins_dir = os.path.join(caller_dir, "plugins")
-            if os.path.exists(plugins_dir) and os.path.isdir(plugins_dir):
-                for folder in os.listdir(plugins_dir):
-                    folder_path = os.path.join(plugins_dir, folder)
-                    if os.path.isdir(folder_path):
-                        if plugins is None:
-                            plugins = []
-                        # Avoid duplicates if user explicitly passed it
-                        if not any(p.get("id") == folder for p in plugins):
-                            plugins.append({
-                                "id": folder,
-                                "name": folder.replace("_", " ").title(),
-                                "path": folder_path
-                            })
+def _discover_plugins(plugins_dir, plugins):
+    """Every subfolder of `plugins_dir` as a static plugin, unless one with that id was passed."""
+    plugins = list(plugins or [])
+    if plugins_dir and os.path.isdir(plugins_dir):
+        for folder in sorted(os.listdir(plugins_dir)):
+            folder_path = os.path.join(plugins_dir, folder)
+            if os.path.isdir(folder_path) and not any(p.get("id") == folder for p in plugins):
+                plugins.append({"id": folder, "name": folder.replace("_", " ").title(), "path": folder_path})
+    return plugins
 
-    if plugins:
-        for p in plugins:
-            if "path" in p:
-                if not os.path.exists(p["path"]):
-                    print(f"Warning: Plugin path '{p['path']}' does not exist.")
+
+def _default_frontend_dir():
+    """The built UI: IVORYOS_FRONTEND_DIR, else frontend/out beside a source checkout."""
+    configured = os.environ.get("IVORYOS_FRONTEND_DIR")
+    if configured:
+        return configured
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend", "out")
+
+
+def _alias_main_script(module_name):
+    """Make `import demo` from inside a plugin return the running script, not a second copy.
+
+    A script started as `python demo.py` is the module `__main__`, not `demo`, so Python treats
+    `import demo` as a different module and executes the file again -- constructing every
+    instrument a second time, which reopens (or fails to open) each serial port. Registering the
+    running module under its file name as well makes that import a lookup. It only helps imports
+    that happen after run() is called, i.e. inside a route or hook; see docs/plugins.md.
+    """
+    main = sys.modules.get(module_name)
+    path = getattr(main, "__file__", None)
+    if module_name != "__main__" or not path:
+        return
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.isidentifier():
+        sys.modules.setdefault(stem, main)
+
+
+def run(module_name: str = None, port: int = None, plugins: list = None, *,
+        instruments: dict = None, instrument_errors: list = None, deck_path: str = None,
+        host: str = None, frontend_dir: str = None, plugins_dir: str = None, plugin_errors: list = None):
+    """
+    Entry point to start the Edge Server.
+
+    Two ways to say what is on the deck:
+      run(__name__)                 every instrument object defined in the calling script
+                                    (the original, script-based deck -- example/demo.py)
+      run(instruments={...})        an explicit mapping, which is what `python -m ivoryos_edge
+                                    --deck deck.json` passes after loading the file
+                                    (deck_config.py), together with `instrument_errors` for
+                                    the ones that did not load
+
+    `plugins` takes ivoryos_edge.plugins.Plugin objects (a page plus an API, handed the
+    instruments above) and the older static entries ({id, name, path} or {id, name, url}).
+    """
+    # One edge per data folder (instance_lock.py). A script has already built its instruments by
+    # now, but refusing here still keeps a second copy off the port, the database and Cloud.
+    from .instance_lock import acquire_or_exit
+    acquire_or_exit(os.path.dirname(ENV_PATH))
+
+    # A launcher running someone's script (a desktop "script profile") chooses the port and
+    # interface through the environment, since the script itself just says run(__name__).
+    # An explicit argument still wins.
+    if port is None:
+        port = int(os.environ.get("IVORYOS_PORT", 8080))
+    if host is None:
+        host = os.environ.get("IVORYOS_HOST", "0.0.0.0")
+
+    if instruments is None:
+        instruments = {}
+        if module_name in sys.modules:
+            caller_mod = sys.modules[module_name]
+            # Inspect for objects that look like custom classes/instruments
+            for var_name, var_value in vars(caller_mod).items():
+                if var_name.startswith("_"):
                     continue
-                app.mount(f"/plugins/{p['id']}", StaticFiles(directory=p["path"], html=True), name=f"plugin_{p['id']}")
-                app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html"})
-            elif "url" in p:
-                app.state.plugins.append(p)
-                
-    instruments = {}
-    
-    if module_name in sys.modules:
+                # Basic filter: must be an object instance (not a primitive, function, or class itself)
+                if not inspect.isclass(var_value) and not inspect.isfunction(var_value) and not inspect.ismodule(var_value):
+                    # Ignore basic types
+                    if type(var_value).__module__ != "builtins" and not isinstance(var_value, Plugin):
+                        instruments[var_name] = var_value
+        print(f"Found instruments in {module_name}: {list(instruments.keys())}")
+        _alias_main_script(module_name)
+    else:
+        print(f"Instruments from deck: {list(instruments.keys())}")
+    for err in instrument_errors or []:
+        print(f"Instrument '{err.get('name')}' did not load ({err.get('stage')}): {err.get('error')}")
+
+    app.state.plugins = []
+    app.state.plugin_errors = list(plugin_errors or [])
+
+    # Static plugins: a 'plugins' folder beside the calling script, or the one given explicitly.
+    if plugins_dir is None and module_name in sys.modules:
         caller_mod = sys.modules[module_name]
-        # Inspect for objects that look like custom classes/instruments
-        for var_name, var_value in vars(caller_mod).items():
-            if var_name.startswith("_"):
+        if getattr(caller_mod, "__file__", None):
+            plugins_dir = os.path.join(os.path.dirname(os.path.abspath(caller_mod.__file__)), "plugins")
+    python_plugins = [p for p in (plugins or []) if isinstance(p, Plugin)]
+    plugins = _discover_plugins(plugins_dir, [p for p in (plugins or []) if not isinstance(p, Plugin)])
+
+    # Python plugins first: they receive the deck's own instrument mapping (never a copy, never
+    # reconstructed), and their on_start hooks run before startup introspection reads the schema.
+    for p in python_plugins:
+        if any(existing["id"] == p.id for existing in app.state.plugins):
+            app.state.plugin_errors.append({"plugin": p.id, "stage": "load", "error": "another plugin already uses this id"})
+            continue
+        error = start_plugin(app, p, instruments)
+        if error:
+            app.state.plugin_errors.append(error)
+        app.state.plugins.append(p.describe())
+
+    for p in plugins:
+        if any(existing["id"] == p.get("id") for existing in app.state.plugins):
+            continue
+        if "path" in p:
+            if not os.path.exists(p["path"]):
+                print(f"Warning: Plugin path '{p['path']}' does not exist.")
                 continue
-            # Basic filter: must be an object instance (not a primitive, function, or class itself)
-            if not inspect.isclass(var_value) and not inspect.isfunction(var_value) and not inspect.ismodule(var_value):
-                # Ignore basic types
-                if type(var_value).__module__ != "builtins":
-                    instruments[var_name] = var_value
-                    
-    print(f"Found instruments in {module_name}: {list(instruments.keys())}")
-    
+            app.mount(f"/plugins/{p['id']}", PluginFiles(p["path"]), name=f"plugin_{p['id']}")
+            app.state.plugins.append({"id": p["id"], "name": p["name"], "url": f"/plugins/{p['id']}/index.html",
+                                      "placement": p.get("placement", "tab"), "kind": "static"})
+        elif "url" in p:
+            app.state.plugins.append({"placement": "tab", "kind": "link", **p})
+
     # Bind to app state
     app.state.instruments = instruments
-    
+    app.state.instrument_errors = list(instrument_errors or [])
+    app.state.deck_path = deck_path
+
     # Serve the static Next.js export last so it doesn't intercept plugin routes
-    frontend_out = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend/out")
+    frontend_out = frontend_dir or _default_frontend_dir()
     if os.path.exists(frontend_out):
         app.mount("/", StaticFiles(directory=frontend_out, html=True), name="static")
     else:
         print(f"Warning: Frontend build directory not found at {frontend_out}")
-    
+
     # Start uvicorn
-    print(f"Starting IvoryOS Edge Server on port {port}...")
+    print(f"Starting IvoryOS Edge Server on {host}:{port}...")
     # NOTE: In an actual production package we would point uvicorn to the module path string
-    # For this dynamic state passing, we must pass the app instance directly. 
+    # For this dynamic state passing, we must pass the app instance directly.
     # (reload=True is not allowed when passing the app instance directly).
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host=host, port=port, reload=False)

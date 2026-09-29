@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+  <title>IvoryOS</title>
+  <style>
+    :root { --bg: #f9fafb; --card: #fff; --text: #111827; --muted: #6b7280; --border: #e5e7eb; --accent: #4f46e5; --danger: #dc2626; --log: #f3f4f6; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0a0a0a; --card: #141414; --text: #f3f4f6; --muted: #9ca3af; --border: #262626; --accent: #818cf8; --danger: #f87171; --log: #1c1c1c; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(720px, calc(100vw - 32px)); background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 28px; }
+    h1 { font-size: 18px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
+    .error .dot { background: var(--danger); animation: none; }
+    @keyframes pulse { 50% { opacity: .3; } }
+    #message { margin: 0; }
+    #detail, #hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; }
+    #detail { font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    pre { background: var(--log); border-radius: 8px; padding: 12px; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 16px 0 0; }
+    .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main id="root" class="error">
+    <h1><span class="dot"></span><span>IvoryOS</span></h1>
+    <p id="message">This build does not include the IvoryOS interface, so the launcher cannot be shown.</p>
+    <p id="hint">In development, run <code>npm run build</code> in <code>frontend/</code>. A packaged build includes it through <code>npm run prepare-resources</code>.</p>
+  </main>
+</body>
+</html>

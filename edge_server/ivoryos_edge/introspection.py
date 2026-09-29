@@ -774,7 +774,16 @@ def inspect_device_module(device_instance):
 def cast_value(annotation, val):
     if annotation == inspect.Parameter.empty or val is None:
         return val
-        
+
+    # Optional[X] / Union[X, None]: cast as X, the same unwrapping extract_type_info does for the
+    # schema. Without it the form offered a float field for `note: Optional[float]` and the
+    # driver received the text "1.5".
+    if get_origin(annotation) is typing.Union or type(annotation).__name__ == "UnionType":  # X | None too
+        arms = [a for a in get_args(annotation) if a is not type(None)]
+        if len(arms) == 1:
+            return cast_value(arms[0], val)
+        return val
+
     import dataclasses
     if dataclasses.is_dataclass(annotation) and isinstance(val, dict):
         kwargs = {}
@@ -816,18 +825,27 @@ def cast_arguments(method, args):
         # run the method at all.
         return {k: v for k, v in args.items() if not k.startswith('_')}
 
+    # Under PEP 563 (`from __future__ import annotations`) every annotation is a string, and
+    # cast_value("float", "14") casts nothing: the driver received the text "14". The schema
+    # side already resolved these (inspect_device_module), so the form promised a float the call
+    # never applied. Resolve them the same way here.
+    hints = _resolve_hints(method)
+
     casted_args = {}
     var_keyword = None
+    var_keyword_annotation = inspect.Parameter.empty
     for param_name, param in sig.parameters.items():
+        annotation = hints.get(param_name, param.annotation)
         if param.kind is inspect.Parameter.VAR_KEYWORD:
             var_keyword = param
+            var_keyword_annotation = annotation
             continue
         if param.kind is inspect.Parameter.VAR_POSITIONAL:
             # Not an argument a caller can name (see inspect_device_module) — a key matching its
             # name is an ordinary keyword argument headed for **kwargs, not this.
             continue
         if param_name in args:
-            casted_args[param_name] = cast_value(param.annotation, args[param_name])
+            casted_args[param_name] = cast_value(annotation, args[param_name])
 
     # Anything the signature doesn't list is destined for **kwargs. It arrives as JSON — a form
     # sends "2.5", not 2.5 — so a method that says what its **kwargs are gets the same casting a
@@ -837,7 +855,7 @@ def cast_arguments(method, args):
     # and a blanket `**offsets: float` casts every one of them. An unannotated `**kwargs` has an
     # empty annotation and cast_value passes the value through untouched.
     # Internal metadata arguments, which start with '_', are never forwarded to a driver.
-    declared = _declared_kwargs_fields(var_keyword.annotation) if var_keyword is not None else None
+    declared = _declared_kwargs_fields(var_keyword_annotation) if var_keyword is not None else None
     for k, v in args.items():
         if k in casted_args or k.startswith('_'):
             continue
@@ -846,7 +864,7 @@ def cast_arguments(method, args):
             # the one entitled to reject it, and silently losing an argument is worse.
             casted_args[k] = cast_value(declared[k][0], v) if k in declared else v
         elif var_keyword is not None:
-            casted_args[k] = cast_value(var_keyword.annotation, v)
+            casted_args[k] = cast_value(var_keyword_annotation, v)
         else:
             casted_args[k] = v
     return casted_args

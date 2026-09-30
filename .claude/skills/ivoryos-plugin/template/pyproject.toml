@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-plugin"
+version = "0.1.0"
+description = "A live side panel for an IvoryOS deck."
+requires-python = ">=3.10"
+# ivoryos_edge is NOT a dependency: the edge that loads the plugin already has it.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["my_plugin*"]
+
+# The page is not Python: without this the wheel ships no index.html and the plugin 404s.
+[tool.setuptools.package-data]
+my_plugin = ["page/*", "page/**/*"]

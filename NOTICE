@@ -1,0 +1,9 @@
+IvoryOS
+Copyright 2026 Ivory Zhang
+
+This repository is licensed under the Apache License, Version 2.0 (LICENSE), except for
+cloud_frontend/, which is licensed under the Functional Source License, Version 1.1,
+ALv2 Future License (cloud_frontend/LICENSE.md).
+
+"IvoryOS" and the IvoryOS logo are trademarks of Ivory Zhang; see TRADEMARKS.md. The
+licenses above do not grant permission to use them.

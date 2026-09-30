@@ -1,14 +1,17 @@
 "use client";
 import React from 'react';
-import { AlertTriangle, Cloud, Copy, ExternalLink } from 'lucide-react';
+import { AlertTriangle, Cloud, Copy, ExternalLink, Link2, Loader2, Pause, Play } from 'lucide-react';
+import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { CloudLink, DesktopApi, Profile } from '@/desktop';
 import { Button, cardClass } from './ui';
+import { connectDeck } from './CloudPanel';
 
 const STATE: Record<string, { label: string; dot: string }> = {
   connected: { label: 'Connected', dot: 'bg-green-500' },
   connecting: { label: 'Connecting', dot: 'bg-amber-400 animate-pulse' },
   reconnecting: { label: 'Reconnecting', dot: 'bg-amber-400 animate-pulse' },
   conflict: { label: 'Identity in use elsewhere', dot: 'bg-red-500' },
+  paused: { label: 'Paused', dot: 'bg-indigo-400' },
   error: { label: 'Could not connect', dot: 'bg-red-500' },
   disconnected: { label: 'Not connected', dot: 'bg-gray-300 dark:bg-gray-600' },
 };
@@ -24,6 +27,35 @@ export function sharedIdentity(profile: Profile, profiles: Profile[], links: Rec
   return profiles.filter(p => p.id !== profile.id && links[p.id]?.paired && links[p.id]?.client_id === mine);
 }
 
+/**
+ * Pause, resume or remove a running deck's Cloud link, on the deck itself (its /api/cloud-settings
+ * routes; the launcher page is an origin the edge accepts). The link list refreshes on its own.
+ */
+async function deckCloud(profile: Profile, action: 'pause' | 'resume' | 'remove') {
+  try {
+    const res = await fetch(`${profile.status.url}/api/cloud-settings/${action}`, { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `The deck could not ${action}.`);
+    return body;
+  } catch (e: any) {
+    await notify(e.message, { title: 'Cloud connection', tone: 'error' });
+    return null;
+  }
+}
+
+async function removeFromCloud(profile: Profile) {
+  const ok = await confirmDialog(
+    `Remove ${profile.name} from Cloud? Cloud forgets it and it stops syncing; its past runs stay on Cloud. `
+    + 'The deck forgets its credentials, so it can pair with any Cloud. To step away for a while instead, use Pause.',
+    { title: 'Remove from Cloud?', confirmLabel: 'Remove', tone: 'danger' },
+  );
+  if (!ok) return;
+  const result = await deckCloud(profile, 'remove');
+  if (result && !result.told_cloud) {
+    await notify('Cloud could not be reached, so it was not told. The deck has forgotten its pairing; remove it on Cloud’s Devices page too.', { title: 'Removed here only' });
+  }
+}
+
 /** The profile's Cloud link, on its Configuration / Settings tab: state, identity, and where the pairing lives. */
 export default function CloudConnection({ api, profile, link, sharedWith }: {
   api: DesktopApi;
@@ -32,7 +64,7 @@ export default function CloudConnection({ api, profile, link, sharedWith }: {
   sharedWith: Profile[];
 }) {
   const running = profile.status.state === 'running';
-  const state = !link ? null : !link.paired ? 'disconnected' : sharedWith.length ? 'conflict' : (link.connection_state || 'disconnected');
+  const state = !link ? null : !link.paired ? 'disconnected' : link.paused ? 'paused' : sharedWith.length ? 'conflict' : (link.connection_state || 'disconnected');
   const look = state ? STATE[state] || STATE.disconnected : null;
 
   return (
@@ -40,9 +72,26 @@ export default function CloudConnection({ api, profile, link, sharedWith }: {
       <div className="flex items-center gap-2">
         <Cloud className="w-4 h-4 text-indigo-500" />
         <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex-1">Cloud connection</h3>
+        {running && !link?.paired && (
+          <Button small tone="primary" onClick={() => connectDeck(api, profile).catch((e: any) => notify(e.message, { title: 'Could not connect', tone: 'error' }))}
+            title="Pair this deck with Cloud using the app's sign-in">
+            <Link2 className="w-3 h-3" /> Connect
+          </Button>
+        )}
+        {running && link?.paired && (
+          <>
+            <Button small tone={link.paused ? 'primary' : 'default'} onClick={() => deckCloud(profile, link.paused ? 'resume' : 'pause')}
+              title={link.paused ? 'Reconnect with the pairing it kept' : 'Stay paired but stop talking to Cloud, until resumed'}>
+              {link.paused ? <><Play className="w-3 h-3" /> Resume</> : <><Pause className="w-3 h-3" /> Pause</>}
+            </Button>
+            <Button small tone="ghost" onClick={() => removeFromCloud(profile)} title="Leave Cloud for good">
+              Remove
+            </Button>
+          </>
+        )}
         {running && (
-          <Button small onClick={() => api.open(profile.id, '/cloud/')} title="This edge's Cloud Connect page: pair with a code, or unpair">
-            {link?.paired ? 'Manage' : 'Pair with Cloud'} <ExternalLink className="w-3 h-3" />
+          <Button small tone="ghost" onClick={() => api.open(profile.id, '/cloud/')} title="This edge's Cloud Connect page">
+            <ExternalLink className="w-3 h-3" />
           </Button>
         )}
       </div>
@@ -67,6 +116,13 @@ export default function CloudConnection({ api, profile, link, sharedWith }: {
             </Problem>
           )}
           {!sharedWith.length && link.connection_error && <Problem>{link.connection_error}</Problem>}
+          {link.pairing?.state === 'waiting' && (
+            <div className="flex items-center gap-2 text-sm text-indigo-700 dark:text-indigo-300">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Waiting for approval on Cloud · code <span className="font-mono font-semibold">{link.pairing.code}</span>
+            </div>
+          )}
+          {link.pairing && ['denied', 'expired', 'error'].includes(link.pairing.state) && link.pairing.error && <Problem>{link.pairing.error}</Problem>}
 
           {link.pairing_file && (
             <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">

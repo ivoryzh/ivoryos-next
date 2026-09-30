@@ -11,9 +11,11 @@ import type { NextRequest } from 'next/server';
  * Open without a session:
  *   /login, /api/auth/*          signing in
  *   /api/health                  the desktop app checks a Cloud address answers before offering it
- *   /api/pair/redeem             called by an edge server, which proves itself with the pairing code
+ *   /api/pair/start, /api/pair/poll
+ *                                called by an edge server: it starts a pairing request, then
+ *                                proves itself with the secret it kept (src/lib/pairing.js)
  */
-const OPEN = [/^\/login(\/|$)/, /^\/api\/auth\//, /^\/api\/health(\/|$)/, /^\/api\/pair\/redeem(\/|$)/];
+const OPEN = [/^\/login(\/|$)/, /^\/api\/auth\//, /^\/api\/health(\/|$)/, /^\/api\/pair\/(start|poll)(\/|$)/];
 
 export function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;

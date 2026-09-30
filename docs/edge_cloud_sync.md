@@ -337,12 +337,13 @@ moment as A.
 
 ## Connecting a device (for context)
 
-A device is paired with an 8-character code from Cloud's Settings page, redeemed by the *edge
-server* (`POST /api/cloud-settings/pair`), not the browser. The device's broker credentials are
-minted at redemption and sent once over TLS. A device's name is its MQTT client id, so names must
-be unique: two clients with the same id keep evicting each other, which looks like a flaky
-connection. A headless deployment can set `CLOUD_TOKEN` in `.env` instead. Details are in
-AGENTS.md, section 0.
+The edge shows an 8-character code (`POST /api/cloud-settings/pair` on the edge, which asks Cloud's
+`/api/pair/start`), a signed-in person approves it on Cloud's **Pair a device** page, and the edge
+collects its broker credentials with a secret only it kept (`/api/pair/poll`). The credentials are
+minted at that moment and sent once over TLS, never through a browser. On a LAN a device's name is
+its MQTT client id, so names must be unique: two clients with the same id keep evicting each other,
+which looks like a flaky connection. A headless deployment can run `ivoryos-edge pair`, or set
+`CLOUD_TOKEN` in `.env`. Details are in AGENTS.md, section 0.
 
 ## Where the code is
 

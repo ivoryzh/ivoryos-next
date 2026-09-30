@@ -214,7 +214,7 @@ class ProfileManager extends EventEmitter {
     }
 
     get cloudUrl() {
-        return this.store.cloudUrl || process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app';
+        return this.store.cloudUrl || process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.ai';
     }
 
     /** Takes effect for each edge the next time it starts, since the edge reads it at startup. */

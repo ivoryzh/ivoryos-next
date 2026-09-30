@@ -1,7 +1,20 @@
 // Run with: node --experimental-strip-types --test frontend/src/hubCatalog.test.ts
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inScope, ownerLabel, templateFit, uniqueName, uniqueNames, unionPackages } from './hubCatalog.ts';
+import { inScope, ownerLabel, preferV2, templateFit, uniqueName, uniqueNames, unionPackages } from './hubCatalog.ts';
+
+test('a plugin published as v1 and v2 shows once, as v2; a v1-only plugin stays', () => {
+  const rows = [
+    { id: 2, name: 'Color Matcher Visualization Plugin', pip_name: 'colour-match-sdl', plugin_api: 'v1' as const },
+    { id: 5, name: 'Color Matcher Visualization Plugin', pip_name: 'colour-match-sdl>=0.1.7', plugin_api: 'v2' as const },
+    { id: 4, name: 'Education Plugin Barista', pip_name: 'https://github.com/ivoryos-ai/ivoryos-barista.git', plugin_api: 'v1' as const },
+    { id: 7, name: 'Same name, other package', pip_name: 'another-package', plugin_api: 'v1' as const },
+    { id: 8, name: 'SAME NAME, OTHER PACKAGE', pip_name: 'yet_another', plugin_api: 'v2' as const },
+  ];
+  assert.deepEqual(preferV2(rows).map(r => r.id), [5, 4, 7, 8]);
+  // Private v2, public v1: filtered to the public hub first, the v1 row must still show there.
+  assert.deepEqual(preferV2(rows.filter(r => r.id !== 5)).map(r => r.id), [2, 4, 7, 8]);
+});
 
 test('public and private hub split rows by visibility; old Hubs send none and are public', () => {
   assert.equal(inScope({}, 'public'), true);

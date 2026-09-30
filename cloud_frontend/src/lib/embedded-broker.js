@@ -5,7 +5,7 @@
 // Files, a listener that defaults to loopback only, an `allow_anonymous` that silently flips to
 // false the moment you add that listener to fix the first problem, and an inbound firewall rule.
 // Every one of those fails quietly. Worse, they fail on a *different port* (1883) from the one
-// pairing uses (3002), so the symptom is a device that redeems its code fine and then never
+// pairing uses (3002), so the symptom is a device that pairs fine and then never
 // appears — which reads as a broken device rather than an unreachable broker.
 //
 // Running the broker in-process removes all of it. It also inherits this process's existing

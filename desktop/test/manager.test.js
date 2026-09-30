@@ -148,7 +148,7 @@ test('a Cloud address without a scheme gets http on this computer or the lab net
         assert.equal(mgr.cloudUrl, saved, typed);
     }
     mgr.setCloudUrl('');
-    assert.equal(mgr.cloudUrl, process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app');
+    assert.equal(mgr.cloudUrl, process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.ai');
 });
 
 test('the first profile of a fresh install gets its data folder when started', async (t) => {

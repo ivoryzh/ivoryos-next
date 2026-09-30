@@ -1,13 +1,4 @@
-import {
-    IoTClient,
-    CreateThingCommand,
-    CreateKeysAndCertificateCommand,
-    AttachPolicyCommand,
-    AttachThingPrincipalCommand,
-    DeleteThingCommand,
-    UpdateCertificateCommand,
-    DeleteCertificateCommand,
-} from "@aws-sdk/client-iot";
+import { aws, issueCertificate, removeThing } from "@/lib/awsThings";
 
 // Downloaded and verified directly from https://www.amazontrust.com/repository/AmazonRootCA1.pem
 // (SHA256 fingerprint 8E:CD:E6:88:4F:3D:87:B1:12:5B:A3:1A:C3:FC:B1:3D:70:16:DE:7F:57:CC:90:4F:E1:CB:97:C6:AE:98:19:6E)
@@ -35,91 +26,46 @@ o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU
 rqXRfboQnoZsG4q5WTP468SQvvG5
 -----END CERTIFICATE-----`;
 
-let _iot: IoTClient | null = null;
-function getIotClient(): IoTClient {
-    if (!_iot) {
-        _iot = new IoTClient({ region: process.env.AWS_REGION || "us-east-1" });
-    }
-    return _iot;
-}
-
-// AWS Thing names allow letters, numbers, and - _ : only, up to 128 chars. A device-chosen label
-// can contain anything, so derive a safe name from it rather than rejecting most real-world input.
-export function sanitizeThingName(label: string): string {
-    const cleaned = (label || "").replace(/[^a-zA-Z0-9_:-]/g, "-").slice(0, 100);
-    const suffix = Math.random().toString(36).slice(2, 8);
-    return `${cleaned || "edge-device"}-${suffix}`;
-}
-
 export interface ProvisionResult {
     thingName: string;
-    token: string; // base64 CLOUD_TOKEN, ready to paste into the edge server's Cloud Connect page
+    token: string; // base64 CLOUD_TOKEN: what the edge's setup_broker reads
+    reattached: boolean; // the Thing existed (the same device paired again): its old certificates were revoked
 }
 
 /**
- * Creates a brand-new AWS IoT Thing + certificate for one device, attaches the shared
- * ThingName-scoped policy (see supabase/migrations or AGENTS.md for the policy JSON — created
- * once, by hand, in the AWS console; this function only ever attaches it, never creates it), and
- * packages the result into the CLOUD_TOKEN format edge_server's setup_broker() expects.
+ * Credentials for the device whose lasting id is `thingName` (the edge's CLOUD_DEVICE_ID): its
+ * Thing, made if new, a fresh certificate with the shared ThingName-scoped policy attached (see
+ * AGENTS.md's Cloud section for the policy JSON; created once, by hand, in the AWS console), and
+ * every earlier certificate revoked (awsThings.js). Packaged as the CLOUD_TOKEN edge_server's
+ * setup_broker() expects.
  *
- * This is the one function that should ever mint device credentials — every device gets its own
- * Thing/cert so a compromised or revoked device can't affect any other tenant, and the attached
- * policy's ${iot:Connection.Thing.ThingName} variable is what actually enforces that isolation at
- * the broker level (see AGENTS.md's Cloud section for the full explanation).
+ * The only place device credentials are minted. Every device has its own Thing/cert, so a
+ * compromised or removed device can't affect any other tenant, and the policy's
+ * ${iot:Connection.Thing.ThingName} variable is what enforces that isolation at the broker.
  */
-export async function provisionDevice(label: string): Promise<ProvisionResult> {
+export async function provisionDevice(thingName: string): Promise<ProvisionResult> {
     const endpoint = process.env.AWS_IOT_ENDPOINT;
     const policyName = process.env.AWS_IOT_POLICY_NAME;
     if (!endpoint || !policyName) {
         throw new Error("AWS_IOT_ENDPOINT and AWS_IOT_POLICY_NAME must be set — see .env.local.example.");
     }
+    const { certificatePem, privateKey, reattached } = await issueCertificate(aws(), thingName, policyName);
+    const tokenPayload = {
+        protocol: "aws_iot",
+        endpoint,
+        client_id: thingName,
+        topic_prefix: "ivoryos/edge",
+        certs: {
+            root_ca: AMAZON_ROOT_CA1,
+            cert_pem: certificatePem,
+            private_key: privateKey,
+        },
+    };
+    const token = Buffer.from(JSON.stringify(tokenPayload)).toString("base64");
+    return { thingName, token, reattached };
+}
 
-    const iot = getIotClient();
-    const thingName = sanitizeThingName(label);
-    let certificateArn: string | undefined;
-
-    try {
-        await iot.send(new CreateThingCommand({ thingName }));
-
-        const cert = await iot.send(new CreateKeysAndCertificateCommand({ setAsActive: true }));
-        certificateArn = cert.certificateArn;
-        const certificatePem = cert.certificatePem;
-        const privateKey = cert.keyPair?.PrivateKey;
-        if (!certificateArn || !certificatePem || !privateKey) {
-            throw new Error("AWS IoT did not return a complete certificate/key pair.");
-        }
-
-        await iot.send(new AttachPolicyCommand({ policyName, target: certificateArn }));
-        await iot.send(new AttachThingPrincipalCommand({ thingName, principal: certificateArn }));
-
-        const tokenPayload = {
-            protocol: "aws_iot",
-            endpoint,
-            client_id: thingName,
-            topic_prefix: "ivoryos/edge",
-            certs: {
-                root_ca: AMAZON_ROOT_CA1,
-                cert_pem: certificatePem,
-                private_key: privateKey,
-            },
-        };
-        const token = Buffer.from(JSON.stringify(tokenPayload)).toString("base64");
-        return { thingName, token };
-    } catch (err) {
-        // Best-effort cleanup so a failed provision doesn't leave an orphaned Thing/cert behind in
-        // the AWS account — not a full compensating transaction (AttachPolicy/AttachThingPrincipal
-        // failures after the cert was created are the case this actually guards), but better than
-        // silently accumulating debris on every retry.
-        if (certificateArn) {
-            try {
-                const certificateId = certificateArn.split("/").pop()!;
-                await iot.send(new UpdateCertificateCommand({ certificateId, newStatus: "INACTIVE" }));
-                await iot.send(new DeleteCertificateCommand({ certificateId }));
-            } catch { /* best-effort; the original error below is what matters */ }
-        }
-        try {
-            await iot.send(new DeleteThingCommand({ thingName }));
-        } catch { /* best-effort */ }
-        throw err;
-    }
+/** Revoke a device's certificates and delete its Thing (the Devices page's Remove). */
+export async function removeDeviceThing(thingName: string) {
+    return removeThing(aws(), thingName);
 }

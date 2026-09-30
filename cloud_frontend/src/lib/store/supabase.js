@@ -596,45 +596,93 @@ function createSupabaseStore(url, serviceRoleKey) {
       return (data || []).length > 0;
     },
 
-    // --- device pairing ------------------------------------------------------------------
-    async createPairingCode({ code, deviceName, expiresAt }) {
-      const { error } = await supabase.from('pairing_codes').insert({
-        code, device_name: deviceName || '', status: 'pending',
-        created_at: nowIso(), expires_at: expiresAt,
+    // --- device pairing (src/lib/pairing.js) ----------------------------------------------
+    async createPairingRequest({ code, secretHash, requestedId, deviceName, instruments, expiresAt }) {
+      const { error } = await supabase.from('pairing_requests').insert({
+        code, secret_hash: secretHash, requested_id: requestedId || null, device_name: deviceName || '',
+        instruments: instruments || [], status: 'waiting', created_at: nowIso(), expires_at: expiresAt,
       });
-      if (error) fail('Failed to create pairing code', error);
+      if (error) fail('Failed to create pairing request', error);
     },
 
-    async getPairingCode(code) {
-      const { data, error } = await supabase.from('pairing_codes')
-        .select('code, device_name, status, device_id, created_at, expires_at, redeemed_at')
-        .eq('code', code).single();
-      if (error) return null;
-      return data;
+    // --- removed devices (never re-registered from a heartbeat until paired again) --------
+    async markDeviceRemoved(deviceId) {
+      const { error } = await supabase.from('removed_devices')
+        .upsert({ id: deviceId, removed_at: nowIso() }, { onConflict: 'id' });
+      if (error) fail(`Failed to record removal of ${deviceId}`, error);
     },
 
-    /** Claim atomically: only the first redeemer of an unexpired, unredeemed code wins. Doing
-     *  this as one conditional UPDATE rather than read-then-write is what stops two devices
-     *  racing the same code into two provisioned identities. */
-    async claimPairingCode(code, nowIsoStr) {
-      const { data, error } = await supabase.from('pairing_codes')
-        .update({ status: 'redeeming', redeemed_at: nowIso() })
-        .eq('code', code).eq('status', 'pending').gt('expires_at', nowIsoStr)
+    async clearDeviceRemoved(deviceId) {
+      const { error } = await supabase.from('removed_devices').delete().eq('id', deviceId);
+      if (error) fail(`Failed to clear removal of ${deviceId}`, error);
+    },
+
+    async listRemovedDeviceIds() {
+      const { data, error } = await supabase.from('removed_devices').select('id');
+      if (error) fail('Failed to list removed devices', error);
+      return (data || []).map((r) => r.id);
+    },
+
+    async isDeviceRemoved(deviceId) {
+      const { data, error } = await supabase.from('removed_devices').select('id').eq('id', deviceId).maybeSingle();
+      if (error) fail(`Failed to read removal of ${deviceId}`, error);
+      return !!data;
+    },
+
+    async getPairingRequest(code) {
+      const { data, error } = await supabase.from('pairing_requests')
+        .select('*').eq('code', code).maybeSingle();
+      if (error) fail('Failed to read pairing request', error);
+      return data || null;
+    },
+
+    async getPairingRequestBySecret(secretHash) {
+      const { data, error } = await supabase.from('pairing_requests')
+        .select('*').eq('secret_hash', secretHash).maybeSingle();
+      if (error) fail('Failed to read pairing request', error);
+      return data || null;
+    },
+
+    /** waiting -> approved, only while unexpired; approval restarts the clock (see sqlite.js). */
+    async approvePairingRequest(code, deviceName, nowIsoStr, expiresAt) {
+      const { data, error } = await supabase.from('pairing_requests')
+        .update({ status: 'approved', device_name: deviceName, approved_at: nowIso(), expires_at: expiresAt })
+        .eq('code', code).eq('status', 'waiting').gt('expires_at', nowIsoStr)
         .select('code');
-      if (error) fail('Failed to claim pairing code', error);
+      if (error) fail('Failed to approve pairing request', error);
       return (data || []).length > 0;
     },
 
-    async finishPairingCode(code, deviceId, status) {
-      const { error } = await supabase.from('pairing_codes')
-        .update({ status, device_id: deviceId || null }).eq('code', code);
-      if (error) fail('Failed to finalise pairing code', error);
+    async denyPairingRequest(code, nowIsoStr) {
+      const { data, error } = await supabase.from('pairing_requests')
+        .update({ status: 'denied' })
+        .eq('code', code).eq('status', 'waiting').gt('expires_at', nowIsoStr)
+        .select('code');
+      if (error) fail('Failed to deny pairing request', error);
+      return (data || []).length > 0;
     },
 
-    async purgeExpiredPairingCodes(nowIsoStr) {
-      const { data, error } = await supabase.from('pairing_codes')
-        .delete().eq('status', 'pending').lte('expires_at', nowIsoStr).select('code');
-      if (error) fail('Failed to purge expired pairing codes', error);
+    /** approved -> provisioning in one conditional UPDATE: one approval mints one identity. */
+    async claimPairingRequest(secretHash, nowIsoStr) {
+      const { data, error } = await supabase.from('pairing_requests')
+        .update({ status: 'provisioning' })
+        .eq('secret_hash', secretHash).eq('status', 'approved').gt('expires_at', nowIsoStr)
+        .select('code');
+      if (error) fail('Failed to claim pairing request', error);
+      return (data || []).length > 0;
+    },
+
+    async finishPairingRequest(code, deviceId, status) {
+      const { error } = await supabase.from('pairing_requests')
+        .update({ status, device_id: deviceId || null, redeemed_at: status === 'redeemed' ? nowIso() : null })
+        .eq('code', code);
+      if (error) fail('Failed to finish pairing request', error);
+    },
+
+    async purgeExpiredPairingRequests(nowIsoStr) {
+      const { data, error } = await supabase.from('pairing_requests')
+        .delete().in('status', ['waiting', 'approved', 'denied']).lte('expires_at', nowIsoStr).select('code');
+      if (error) fail('Failed to purge pairing requests', error);
       return (data || []).length;
     },
 

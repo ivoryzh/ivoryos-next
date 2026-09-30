@@ -179,8 +179,21 @@ export default function DevicesPage() {
     if (res.ok) { setClaim([]); load(); } else { await notify((await res.json().catch(() => ({}))).error || 'Could not add the devices.', { tone: 'error' }); }
   };
 
+  const removeDevice = async (d: Overview) => {
+    const ok = await confirmDialog(
+      `Remove "${d.name}" from Cloud? It stops syncing and can no longer run Cloud tasks; if it is running, it forgets this Cloud. `
+      + 'Its past runs and results stay. Pairing it again brings it back.',
+      { title: 'Remove this device?', confirmLabel: 'Remove', tone: 'danger' },
+    );
+    if (!ok) return;
+    const res = await fetch(`/api/devices/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
+    if (!res.ok) await notify((await res.json().catch(() => ({}))).error || 'Could not remove the device.', { tone: 'error' });
+    load();
+  };
+
   const renderDevice = (d: Overview) => {
             const online = d.status === 'online';
+            const paused = d.status === 'paused';
             const pr = d.current?.progress;
             const pct = pr?.total ? Math.round((pr.done / pr.total) * 100) : 0;
             return (
@@ -189,11 +202,14 @@ export default function DevicesPage() {
                   <DevicePicture device={d} onChanged={load} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${!online ? 'bg-gray-400' : d.busy ? 'bg-amber-400' : 'bg-green-500'}`} />
-                      <h2 className="text-base font-bold truncate">{d.name}</h2>
+                      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${paused ? 'bg-indigo-400' : !online ? 'bg-gray-400' : d.busy ? 'bg-amber-400' : 'bg-green-500'}`} />
+                      <h2 className="text-base font-bold truncate" title={d.id !== d.name ? `Device id: ${d.id}` : undefined}>{d.name}</h2>
+                      <button onClick={() => removeDevice(d)} title="Remove from Cloud" className="ml-auto rounded p-1 hover-bg" style={{ color: 'var(--text-secondary)' }}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                     <p className="mt-0.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
-                      {!online ? `offline · last seen ${ago(d.lastSeen)}` : d.busy ? 'busy' : 'idle'}
+                      {paused ? 'paused on the device' : !online ? `offline · last seen ${ago(d.lastSeen)}` : d.busy ? 'busy' : 'idle'}
                       {d.deckVersion ? ` · deck v${d.deckVersion}` : ''}
                       {d.computer && <span title={d.os || undefined}> · on {d.computer}</span>}
                     </p>
@@ -280,6 +296,9 @@ export default function DevicesPage() {
           </span>
         </div>
         <div className="flex items-center gap-1">
+          <a href="/pair" title="Approve a device showing a pairing code" className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium hover-bg" style={{ color: 'var(--text-secondary)' }}>
+            <Plus className="h-3.5 w-3.5" /> Pair a device
+          </a>
           <button onClick={newPlatform} title="Group edges that work together" className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium hover-bg" style={{ color: 'var(--text-secondary)' }}>
             <Plus className="h-3.5 w-3.5" /> New platform
           </button>
@@ -301,7 +320,7 @@ export default function DevicesPage() {
         )}
         {loaded && devices.length === 0 && claim.length === 0 && (
           <div className="rounded-xl border border-dashed p-8 text-center text-sm" style={{ borderColor: 'var(--panel-border)', color: 'var(--text-secondary)' }}>
-            No devices yet. Pair one from Cloud Settings.
+            No devices yet. <a href="/pair" className="text-blue-400 hover:underline">Pair a device</a> with the code it shows.
           </div>
         )}
         {groups.map((g) => (

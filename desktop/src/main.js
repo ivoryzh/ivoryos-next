@@ -314,7 +314,17 @@ async function signInCloudTab(view, url) {
         const u = new URL(url);
         if (u.protocol !== 'https:' && !LOCAL_HOST.test(u.hostname)) return;
         const jar = view.webContents.session.cookies;
-        if ((await jar.get({ url, name: 'ivoryos_session' })).length) return;
+        const [kept] = await jar.get({ url, name: 'ivoryos_session' });
+        if (kept) {
+            // A cookie is not a session: Cloud may have ended it (expired, signed out there, its
+            // database replaced). Keeping a dead one left the tab signed out for good, every page
+            // loading and every call answering 401, since a new one was only made when none existed.
+            const check = await net.fetch(`${u.origin}/api/auth/session`, {
+                headers: { Cookie: `ivoryos_session=${kept.value}` }, signal: AbortSignal.timeout(5_000),
+            }).catch(() => null);
+            if (!check || check.status !== 401) return; // valid, or Cloud unreachable: leave it be
+            await jar.remove(u.origin, 'ivoryos_session');
+        }
         const token = await account.token();
         if (!token) return;
         const res = await net.fetch(`${u.origin}/api/auth/exchange`, {
@@ -333,8 +343,12 @@ async function signInCloudTab(view, url) {
     } catch { /* the tab shows Cloud's own sign-in */ }
 }
 
-/** Signing out of the app signs the Cloud tab out too. */
+/** Signing out of the app signs the Cloud tab out too, and ends the sessions kept for pairing. */
 async function signOutCloudTab() {
+    for (const [origin, s] of cloudSessions) {
+        net.fetch(`${origin}/api/auth/sign-out`, { method: 'POST', headers: { Cookie: `ivoryos_session=${s.id}` } }).catch(() => {});
+    }
+    cloudSessions.clear();
     const view = edgeTabs.get(CLOUD_TAB);
     if (!view) return;
     const url = manager.cloudUrl;
@@ -514,6 +528,92 @@ async function checkCloud() {
         if (probe.ok && probe.isCloud) return { url, reachable: false, error: found.error, suggestion: c };
     }
     return { url, reachable: false, error: found.error };
+}
+
+/**
+ * A Cloud session for this process, made from the app's IvoryOS sign-in (`/api/auth/exchange`,
+ * the same door the Cloud tab uses) and kept per Cloud address. The same rules as signInCloudTab:
+ * the tokens are the person's login, so they only go to an https Cloud or one on the lab network.
+ */
+const cloudSessions = new Map(); // origin -> { id, workspaces }
+async function mainCloudSession(origin, { fresh = false } = {}) {
+    if (!fresh && cloudSessions.has(origin)) return cloudSessions.get(origin);
+    const u = new URL(origin);
+    if (u.protocol !== 'https:' && !LOCAL_HOST.test(u.hostname)) return null;
+    if (!account.describe().signedIn) return null;
+    const token = await account.token();
+    if (!token) return null;
+    const res = await net.fetch(`${origin}/api/auth/exchange`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: account.session && account.session.refresh_token }),
+        signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.session) throw new Error(body.error || `Cloud refused the sign-in (${res.status}).`);
+    const session = { id: body.session, workspaces: body.workspaces || (body.workspace ? [body.workspace] : []) };
+    cloudSessions.set(origin, session);
+    return session;
+}
+
+/**
+ * Connect a running deck to Cloud in one step. The deck starts pairing (it shows a code and keeps
+ * the secret that collects its credentials; the app never sees the token), and the app approves
+ * that code on Cloud with its own sign-in, through the same route a person uses on Cloud's page.
+ *
+ * Answers `choose-workspace` when the account has several and none was given, and `sign-in-needed`
+ * (with the code) when the app is not signed in, so the person approves it on Cloud themselves.
+ * The deck pairs under its own lasting id, so a deck paired before simply reconnects.
+ */
+async function pairWithCloud(profileId, { workspace, name } = {}) {
+    const profile = manager.get(profileId);
+    const status = manager.statusOf(profileId);
+    if (!profile || status.state !== 'running' || !status.url) throw new Error('Start the deck first.');
+    const origin = new URL(manager.cloudUrl).origin;
+
+    let session = await mainCloudSession(origin);
+    if (session && !workspace && session.workspaces.length > 1) {
+        return { status: 'choose-workspace', workspaces: session.workspaces };
+    }
+
+    const deckName = (name || profile.name || '').trim();
+    const started = await net.fetch(`${status.url}/api/cloud-settings/pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cloud_url: manager.cloudUrl, name: deckName }),
+        signal: AbortSignal.timeout(30_000),
+    });
+    const pairing = await started.json().catch(() => ({}));
+    if (!started.ok || !pairing.code) throw new Error(pairing.error || 'The deck could not start pairing.');
+    const pairingCode = pairing.code;
+    const approveUrl = pairing.approve_url;
+    if (!session) return { status: 'sign-in-needed', code: pairingCode, approveUrl };
+
+    const approve = (s) => net.fetch(`${origin}/api/pair/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `ivoryos_session=${s.id}` },
+        body: JSON.stringify({ code: pairingCode, decision: 'approve', name: deckName, workspace }),
+        signal: AbortSignal.timeout(15_000),
+    });
+    let res = await approve(session);
+    if (res.status === 401) { // the kept session ended (signed out on Cloud, expired): make a new one
+        session = await mainCloudSession(origin, { fresh: true });
+        if (!session) return { status: 'sign-in-needed', code: pairingCode, approveUrl };
+        res = await approve(session);
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        await cancelCloudPairing(profileId); // leave nothing waiting on the deck for a refused request
+        throw new Error(body.error || `Cloud did not approve the deck (${res.status}).`);
+    }
+    return { status: 'approved', code: pairingCode, name: body.name, workspace: body.workspace && body.workspace.name };
+}
+
+/** Stop a deck's pairing in progress (it stops showing its code and stops asking Cloud). */
+async function cancelCloudPairing(profileId) {
+    const status = manager.statusOf(profileId);
+    if (status.state !== 'running' || !status.url) return;
+    await net.fetch(`${status.url}/api/cloud-settings/pair`, { method: 'DELETE' }).catch(() => {});
 }
 
 // --- account ------------------------------------------------------------------------------------
@@ -705,6 +805,8 @@ function registerIpc() {
     handle('cloud:open', () => openCloudTab());
     handle('cloud:open-in-browser', () => shell.openExternal(manager.cloudUrl));
     handle('cloud:check', () => checkCloud());
+    handle('cloud:pair', (profileId, opts) => pairWithCloud(profileId, opts || {}));
+    handle('cloud:pair-cancel', (profileId) => cancelCloudPairing(profileId));
     // Python environments the person also uses from their own editor.
     handle('python:launcher', async () => (await getRuntime()).python);
     handle('python:inspect', async (python) => (await getRuntime()).inspect(python || (await getRuntime()).python));

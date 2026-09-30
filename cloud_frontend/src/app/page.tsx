@@ -279,6 +279,9 @@ export default function CloudDesignerPage() {
       try {
         const res = await fetch('/api/cloud-workflows/status');
         const tasks = await res.json();
+        // Signed out (401 {error}) answers an object. Checked here, not left to the catch: the
+        // lookup below runs later, inside React's updater, where a throw takes the page down.
+        if (!res.ok || !Array.isArray(tasks)) return;
         setNodes(nds => nds.map(n => {
           const fresh = tasks.find((t: any) => t.nodeId === n.id);
           if (fresh && JSON.stringify(fresh) !== JSON.stringify((n.data as any).taskStatus)) {
@@ -300,6 +303,7 @@ export default function CloudDesignerPage() {
       try {
         const res = await fetch('/api/cloud-workflows/status');
         const tasks: any[] = await res.json();
+        if (!res.ok || !Array.isArray(tasks)) return;
         const relevant = activeRunId ? tasks.filter((t: any) => t.runId === activeRunId) : tasks;
         setNodes(nds => nds.map(n => {
           if (n.type !== 'customCloudNode') return n;

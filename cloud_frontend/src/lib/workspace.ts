@@ -1,7 +1,8 @@
 /**
  * What belongs to which workspace (store `ownership`), and the checks API routes make with it.
  *
- * Owned kinds: a device, a run, a library workflow, a schedule, a pairing code. Everything else
+ * Owned kinds: a device, a run, a library workflow, a schedule, a pairing request (the workspace
+ * it was approved into, handed to the device it becomes). Everything else
  * hangs off one of those -- a run's tasks off its run, a device's workflows and pushes off the
  * device -- so checking the root is enough. Ownership lives in its own table rather than a column
  * on each, so the dispatch daemon (which works on every workspace's tasks alike) is unchanged.

@@ -1,6 +1,7 @@
 """`ivoryos-edge` / `python -m ivoryos_edge`: start an edge server from a deck file.
 
     ivoryos-edge --deck deck.json --data-dir ~/ivoryos-data --port 8080
+    ivoryos-edge pair [--cloud-url URL] [--name NAME] [--data-dir DIR]
 
 This is how the desktop app starts the edge, and how a headless lab PC can run one without a
 Python script of its own. The script-based way (`ivoryos_edge.run(__name__)`, example/demo.py)
@@ -31,8 +32,61 @@ def _parse(argv):
     return parser.parse_args(argv)
 
 
+def _pair(argv):
+    """`ivoryos-edge pair`: pair this data folder's edge with Cloud from a terminal.
+
+    For a machine without a browser at hand: prints the code, waits for it to be approved on
+    Cloud, saves the token where the edge reads it, and exits. The edge connects on its next start.
+    """
+    parser = argparse.ArgumentParser(prog="ivoryos-edge pair", description="Pair this edge with IvoryOS Cloud.")
+    parser.add_argument("--cloud-url", default="", help="a lab's own Cloud (default: the hosted one, or $IVORYOS_CLOUD_URL)")
+    parser.add_argument("--name", default="", help="how the device is listed on Cloud (default: this computer's name)")
+    parser.add_argument("--data-dir", help="the edge's data folder (default: $IVORYOS_DATA_DIR, else the legacy location)")
+    args = parser.parse_args(argv)
+    if args.data_dir:
+        os.environ["IVORYOS_DATA_DIR"] = os.path.abspath(os.path.expanduser(args.data_dir))
+
+    import asyncio
+    import socket
+    from . import cloud_pairing
+    from .paths import ENV_PATH  # after the data dir is set: importing it fixes the paths
+
+    # The deck's instrument names, for the approval screen, read from its file without loading it.
+    deck_path = os.path.join(os.environ.get("IVORYOS_DATA_DIR") or os.getcwd(), "deck.json")
+    try:
+        with open(deck_path, encoding="utf-8") as handle:
+            instruments = [str(i.get("name")) for i in json.load(handle).get("instruments", []) if i.get("name")]
+    except (OSError, ValueError, AttributeError):
+        instruments = []
+
+    async def pair():
+        name = args.name.strip() or socket.gethostname()
+        # Pairing again reattaches this same device on Cloud (cloud_pairing.ensure_device_id).
+        device_id = cloud_pairing.ensure_device_id(ENV_PATH, name)
+        pairing = await cloud_pairing.start(args.cloud_url, name, instruments, device_id=device_id)
+        print(f"\n  Pairing code:  {pairing.code}\n")
+        print(f"  Approve it on Cloud: {pairing.approve_url}")
+        print("  Waiting for approval (Ctrl+C to stop)...\n")
+        token = await cloud_pairing.wait_for_token(pairing)
+        if not token:
+            raise cloud_pairing.PairingError(pairing.error or f"Pairing ended: {pairing.state}.")
+        cloud_pairing.save_token(ENV_PATH, token)
+        print(f"Paired. Saved to {ENV_PATH}. Start (or restart) the edge to connect.")
+
+    try:
+        asyncio.run(pair())
+    except cloud_pairing.PairingError as e:
+        print(f"Not paired: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("Stopped; not paired.", file=sys.stderr)
+        sys.exit(130)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["pair"]:
+        return _pair(argv[1:])
     args = _parse(argv)
 
     # Windows, from a terminal: become the restart loop and run the edge as a child, before a

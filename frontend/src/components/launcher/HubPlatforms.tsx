@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, Cpu, ExternalLink, FileText, Layers, Loader2
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { Deck, DeckInstrument, DesktopApi, HubModule, HubPlatform, HubPlugin } from '@/desktop';
 import { emptyFields, toForm, type FormValues } from '@/launcherArgs';
-import { templateFit, uniqueNames, unionPackages } from '@/hubCatalog';
+import { preferV2, templateFit, uniqueNames, unionPackages } from '@/hubCatalog';
 import ArgsForm from './ArgsForm';
 import { isV2, PluginApiBadge } from './HubPlugins';
 import { templateTitle } from './HubTemplates';
@@ -80,7 +80,7 @@ function PlatformForm({ api, profileId, profileName, deck, platform, onDone }: {
     const names = namesFor(target);
     return platform.modules.map((module, i) => ({ module, include: true, name: names[i], form: toForm(module.init_args || [], {}), open: false }));
   });
-  const plugins = platform.plugins || [];
+  const plugins = preferV2(platform.plugins || []);
   const templates = platform.templates || [];
   const [pluginIds, setPluginIds] = useState<Set<number>>(() => new Set(plugins.filter(isV2).map(p => p.id)));
   const [templateIds, setTemplateIds] = useState<Set<number>>(() => new Set(templates.map(t => t.id)));

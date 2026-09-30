@@ -1,3 +1,10 @@
+import os
+
+# The names the in-process test clients call the app by (httpx's base_url "http://test",
+# Starlette's TestClient "testserver"). The edge refuses Host names that are not this machine's
+# (origin_guard.py, DNS rebinding); these are the tests' own, declared the way a deployment would.
+os.environ.setdefault("IVORYOS_ALLOWED_HOSTS", "test,testserver")
+
 import pytest
 import asyncio
 import dataclasses

@@ -37,6 +37,14 @@ run to find. Simulated time is compressed, so a two-hour hold takes a couple of 
 A ready-made `Suzuki coupling screen` workflow ships in the workflow library with
 `temperature_c`, `catalyst_ml` and `reaction_time_min` exposed as parameters.
 
+**Reaching it from other computers**: open it by this machine's IP address, its computer name, or a
+`.local` name. The edge answers only to names that are its own, so another website cannot trick a
+browser into driving it. If you reach it through any other DNS name (a lab hostname, a reverse
+proxy), list that name first:
+```bash
+IVORYOS_ALLOWED_HOSTS=edge.mylab.example python example/demo.py
+```
+
 ### 2. Frontend (Next.js)
 
 The frontend is a web application that connects to the edge server.
@@ -82,23 +90,37 @@ Cloud mode (Supabase + AWS IoT Core) is inferred from `SUPABASE_URL` being set. 
 
 #### Connecting an edge server
 
-Pairing is a short-lived code, not a copied token — nothing sensitive goes on a clipboard.
+The edge shows a short code and you approve it on Cloud, the way you sign in a TV. Nothing
+sensitive goes on a clipboard, and nothing typed on Cloud is ever sent to a device.
 
-1. In the Hub, open **Cloud Settings**, name the device, and **Generate Code**.
-2. On the machine running the edge server, open its **Cloud Connect** page and enter the code.
-3. On a LAN, also give it the Hub's address. **Use your machine's LAN IP, not `localhost`** —
-   `http://10.0.0.42:3002`, say. `localhost` on the edge machine means the edge machine. (A hosted
-   deployment needs no URL: the edge ships with `IVORYOS_CLOUD_URL`, so the code is the only
-   input.)
+1. Start pairing on the edge: its **Cloud Connect** page (**Get a pairing code**), **Connect** in
+   the desktop app, or `ivoryos-edge pair` in a terminal. It shows a code and a link.
+2. On Cloud, open **Pair a device** (or follow the link), enter the code, check the device's
+   instruments, choose its name and workspace, and **Approve**. The edge connects on its own.
+3. On a LAN, give the edge Cloud's address when you start. **Use your machine's LAN IP, not
+   `localhost`**: `http://10.0.0.42:3002`, say. `localhost` on the edge machine means the edge
+   machine. A hosted Cloud needs no address: the edge ships with `IVORYOS_CLOUD_URL`.
 
-The edge redeems the code over HTTP, receives its credentials and the broker address, and
-everything afterwards runs over MQTT. You never type the broker address: it is derived from the
-address the device used to reach the Hub, which is by construction one that resolves from where
-the device is.
+Signed in, the desktop app does steps 1 and 2 in one click, approving with the app's own sign-in.
 
-A device name **is** its MQTT client id, so names must be unique — two clients sharing one id
-disconnect each other in a loop. Re-pairing an already-registered name returns a 409; remove it
-first with `DELETE /api/devices/{name}`.
+The edge collects its credentials and the broker address over HTTP with a secret only it holds,
+and everything afterwards runs over MQTT. You never type the broker address: on a LAN it is derived
+from the address the device used to reach Cloud, which is by construction one that resolves from
+where the device is.
+
+Each edge has a lasting device id (like `my-deck-7k4m2q`), made at its first pairing and kept in
+its data folder. The name is only a label, so two decks can both be called "My deck", and pairing
+the same deck again reconnects it with its history instead of creating a second device.
+
+To step away from Cloud, the edge (and the desktop app) offers two things:
+
+- **Pause**: stay paired but stop connecting; Cloud shows the device as paused. **Resume**
+  reconnects at once, no pairing needed.
+- **Remove from Cloud**: leave for good. Cloud forgets the device (on AWS its certificate is
+  revoked), and the edge forgets its credentials, free to pair with any Cloud. Past runs stay.
+
+Cloud's Devices page can remove a device too; if it is still running, it is told to forget its
+pairing.
 
 #### When something is wrong
 
@@ -133,3 +155,12 @@ It contains:
 - Pure asynchronous methods (`AsyncPumpDriver.async_start_pump`)
 - Synchronous methods that spin up a thread to run an async event loop (`AsyncPumpDriver.sync_to_async_thread_test`)
 - Enum, `Literal` and nested-dataclass parameters, deliberately long names, and a method that raises
+
+## License
+
+| Part | License |
+|---|---|
+| Everything except `cloud_frontend/` (edge server, desktop app, frontends, `packages/`, plugin template) | [Apache-2.0](LICENSE) |
+| `cloud_frontend/` (IvoryOS Cloud) | [FSL-1.1-ALv2](cloud_frontend/LICENSE.md): use, modify and self-host it; don't offer it as a competing service. Each release becomes Apache-2.0 two years after it is published. |
+
+The IvoryOS name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md), not by the code licenses.

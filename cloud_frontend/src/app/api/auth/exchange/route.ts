@@ -20,7 +20,8 @@ export async function POST(req: Request) {
     const { refresh_token } = await req.json().catch(() => ({}));
     const user = await fetchUser(access);
     const session = await startSession({ access_token: access, refresh_token: String(refresh_token || ''), user }, { secure: isSecure(req) });
-    return NextResponse.json({ session: session.id, user: session.user, workspace: session.workspace });
+    // `workspaces` lets the app ask which one a deck should join before approving its pairing.
+    return NextResponse.json({ session: session.id, user: session.user, workspace: session.workspace, workspaces: session.workspaces });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: e instanceof AuthError ? e.status : 500 });
   }

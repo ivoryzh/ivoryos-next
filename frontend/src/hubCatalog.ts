@@ -19,6 +19,25 @@ export function inScope(row: Owned, scope: Scope): boolean {
   return (visibilityOf(row) === 'public') === (scope === 'public');
 }
 
+/** A requirement's package, for telling whether two rows ship the same code: `pkg[extra]>=1` -> `pkg`. */
+function packageOf(requirement: string): string {
+  const r = (requirement || '').trim().toLowerCase();
+  if (/^(git|hg|bzr|svn)\+|:\/\//.test(r)) return r.split(/[@#]/)[0];
+  return r.split(/[\s\[<>=!~;]/)[0].replace(/_/g, '-');
+}
+
+/**
+ * One card per plugin: a plugin published in both forms (a v1 Flask blueprint for the original
+ * IvoryOS and a v2 ivoryos_edge Plugin, same name, same package) shows only its v2 row here, the
+ * one this app can install. A v1 row with no v2 counterpart stays, with its explanation. Apply
+ * after filtering by scope, or a private v2 row would hide a public v1 one from the public hub.
+ */
+export function preferV2<T extends { name: string; pip_name: string; plugin_api?: 'v1' | 'v2' | null }>(rows: T[]): T[] {
+  const key = (p: T) => `${p.name.trim().toLowerCase()}|${packageOf(p.pip_name)}`;
+  const withV2 = new Set(rows.filter(p => p.plugin_api === 'v2').map(key));
+  return rows.filter(p => p.plugin_api === 'v2' || !withV2.has(key(p)));
+}
+
 /** Who a private-hub row is shared with, for its badge. */
 export function ownerLabel(row: Owned): string | null {
   const v = visibilityOf(row);

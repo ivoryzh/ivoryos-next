@@ -241,16 +241,29 @@ create table if not exists sequence_pushes (
 
 create index if not exists sequence_pushes_status_idx on sequence_pushes(status);
 
--- Short-lived, single-use device pairing codes. Replaces carrying a base64 token (which, on AWS,
--- wrapped a device private key) between machines by hand.
-create table if not exists pairing_codes (
+-- Device pairing (src/lib/pairing.js): the edge starts a request and shows its code, a signed-in
+-- person approves it, the edge collects its credentials with the secret only it holds.
+-- status: waiting -> approved -> provisioning -> redeemed, or waiting -> denied.
+create table if not exists pairing_requests (
     code text primary key,
+    secret_hash text not null unique,
+    requested_id text,                       -- the device's own lasting id (edge CLOUD_DEVICE_ID)
     device_name text not null default '',
-    status text not null default 'pending',
+    instruments text not null default '[]',
+    status text not null default 'waiting',
     device_id text,
     created_at text,
-    expires_at text,
+    expires_at text not null,
+    approved_at text,
     redeemed_at text
+);
+
+-- Devices removed from Cloud (their Devices page, or the device leaving). A device that is still
+-- running, or a retained message the broker replays, would otherwise register it again from its
+-- next heartbeat; the daemon ignores these ids until the device is paired again.
+create table if not exists removed_devices (
+    id text primary key,
+    removed_at text not null
 );
 `;
 
@@ -346,6 +359,7 @@ function createSqliteStore(filePath) {
     'alter table devices add column image_updated_at text',
     'alter table run_tasks add column results text',
     "alter table runs add column after_runs text not null default '[]'",
+    'alter table pairing_requests add column requested_id text',
   ]) {
     try { db.exec(ddl); } catch { /* column already present */ }
   }
@@ -976,41 +990,91 @@ function createSqliteStore(filePath) {
       return res.changes > 0;
     },
 
-    // --- device pairing ------------------------------------------------------------------
-    async createPairingCode({ code, deviceName, expiresAt }) {
+    // --- device pairing (src/lib/pairing.js) ----------------------------------------------
+    async createPairingRequest({ code, secretHash, requestedId, deviceName, instruments, expiresAt }) {
       run(
-        `insert into pairing_codes (code, device_name, status, created_at, expires_at)
-         values (?, ?, 'pending', ?, ?)`,
-        code, deviceName || '', nowIso(), expiresAt,
+        `insert into pairing_requests (code, secret_hash, requested_id, device_name, instruments, status, created_at, expires_at)
+         values (?, ?, ?, ?, ?, 'waiting', ?, ?)`,
+        code, secretHash, requestedId || null, deviceName || '', JSON.stringify(instruments || []), nowIso(), expiresAt,
       );
     },
 
-    async getPairingCode(code) {
-      return get('select * from pairing_codes where code = ?', code) || null;
+    // --- removed devices (never re-registered from a heartbeat until paired again) --------
+    async markDeviceRemoved(deviceId) {
+      run(
+        `insert into removed_devices (id, removed_at) values (?, ?)
+         on conflict(id) do update set removed_at = excluded.removed_at`,
+        deviceId, nowIso(),
+      );
     },
 
-    /** Claim atomically: only the first redeemer of an unexpired, unredeemed code wins. Doing
-     *  this as one conditional UPDATE rather than read-then-write is what stops two devices
-     *  racing the same code into two provisioned identities. */
-    async claimPairingCode(code, nowIsoStr) {
+    async clearDeviceRemoved(deviceId) {
+      run('delete from removed_devices where id = ?', deviceId);
+    },
+
+    async listRemovedDeviceIds() {
+      return all('select id from removed_devices').map((r) => r.id);
+    },
+
+    async isDeviceRemoved(deviceId) {
+      return !!get('select 1 as x from removed_devices where id = ?', deviceId);
+    },
+
+    async getPairingRequest(code) {
+      const row = get('select * from pairing_requests where code = ?', code);
+      return row ? { ...row, instruments: jsonParse(row.instruments, []) } : null;
+    },
+
+    async getPairingRequestBySecret(secretHash) {
+      const row = get('select * from pairing_requests where secret_hash = ?', secretHash);
+      return row ? { ...row, instruments: jsonParse(row.instruments, []) } : null;
+    },
+
+    /** waiting -> approved, only while unexpired. Approval restarts the clock, so a request
+     *  approved at 9:59 is not lost before the edge's next poll collects it. */
+    async approvePairingRequest(code, deviceName, nowIsoStr, expiresAt) {
       const res = run(
-        `update pairing_codes set status = 'redeeming', redeemed_at = ?
-         where code = ? and status = 'pending' and expires_at > ?`,
-        nowIso(), code, nowIsoStr,
+        `update pairing_requests set status = 'approved', device_name = ?, approved_at = ?, expires_at = ?
+         where code = ? and status = 'waiting' and expires_at > ?`,
+        deviceName, nowIso(), expiresAt, code, nowIsoStr,
       );
       return res.changes > 0;
     },
 
-    async finishPairingCode(code, deviceId, status) {
+    async denyPairingRequest(code, nowIsoStr) {
+      const res = run(
+        `update pairing_requests set status = 'denied'
+         where code = ? and status = 'waiting' and expires_at > ?`,
+        code, nowIsoStr,
+      );
+      return res.changes > 0;
+    },
+
+    /** approved -> provisioning, atomically: one conditional UPDATE, so two polls can never both
+     *  mint credentials (on AWS, two Things and two certificates) from one approval. */
+    async claimPairingRequest(secretHash, nowIsoStr) {
+      const res = run(
+        `update pairing_requests set status = 'provisioning'
+         where secret_hash = ? and status = 'approved' and expires_at > ?`,
+        secretHash, nowIsoStr,
+      );
+      return res.changes > 0;
+    },
+
+    async finishPairingRequest(code, deviceId, status) {
       run(
-        'update pairing_codes set status = ?, device_id = ? where code = ?',
-        status, deviceId || null, code,
+        'update pairing_requests set status = ?, device_id = ?, redeemed_at = ? where code = ?',
+        status, deviceId || null, status === 'redeemed' ? nowIso() : null, code,
       );
     },
 
-    async purgeExpiredPairingCodes(nowIsoStr) {
+    /** Requests nobody finished: expired while waiting or approved, and denied ones. A redeemed
+     *  request is kept as the record of which request became which device. */
+    async purgeExpiredPairingRequests(nowIsoStr) {
       const res = run(
-        "delete from pairing_codes where status = 'pending' and expires_at <= ?", nowIsoStr,
+        `delete from pairing_requests
+         where status in ('waiting', 'approved', 'denied') and expires_at <= ?`,
+        nowIsoStr,
       );
       return res.changes;
     },

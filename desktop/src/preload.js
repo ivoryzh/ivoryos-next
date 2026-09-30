@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     openCloud: () => call('cloud:open'),
     openCloudInBrowser: () => call('cloud:open-in-browser'),
     checkCloud: () => call('cloud:check'),
+    pairWithCloud: (profileId, opts) => call('cloud:pair', profileId, opts),
+    cancelCloudPairing: (profileId) => call('cloud:pair-cancel', profileId),
     hubSearch: (q) => call('hub:search', q),
     hubBrowse: () => call('hub:browse'),
     hubModule: (moduleId) => call('hub:module', moduleId),

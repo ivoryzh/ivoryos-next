@@ -8,7 +8,7 @@ import {
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { Deck, DesktopApi, HubModule, HubPlatform, HubPlugin, HubTemplate } from '@/desktop';
 import { emptyFields, toForm, type FormValues } from '@/launcherArgs';
-import { inScope, type Scope } from '@/hubCatalog';
+import { inScope, preferV2, type Scope } from '@/hubCatalog';
 import ArgsForm from './ArgsForm';
 import PrivateRepos, { type InstrumentSeed } from './PrivateRepos';
 import { PlatformCard, PlatformDetail } from './HubPlatforms';
@@ -99,8 +99,10 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
     setStars(list => (on ? [...(list || []), key] : (list || []).filter(k => k !== key)));
     api.hubStar(key, on).catch(e => notify(e.message, { tone: 'error' }));
   };
+  // A one-cell grid, so the card fills the wrapper: a <button> in plain block flow shrinks to its
+  // content, which left every card a different width and height inside the grid.
   const withStar = (key: string, card: React.ReactNode) => (
-    <div key={key} className="relative group/star">
+    <div key={key} className="relative group/star grid">
       {card}
       <StarButton on={starred.has(key)} onClick={() => toggleStar(key)} />
     </div>
@@ -124,7 +126,7 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
     return {
       instruments: (modules.items || []).filter(m => inScope(m, scope) && (!testedOnly || m.is_tested_with_ivoryos) && match(haystack(m))),
       platforms: (platforms.items || []).filter(p => inScope(p, scope) && match([p.name, p.description].join(' ').toLowerCase())),
-      plugins: (plugins.items || []).filter(p => inScope(p, scope) && match([p.name, p.description, p.pip_name].join(' ').toLowerCase())),
+      plugins: preferV2((plugins.items || []).filter(p => inScope(p, scope) && match([p.name, p.description, p.pip_name].join(' ').toLowerCase()))),
       workflows: (templates.items || []).filter(t => inScope(t, scope) && match([templateTitle(t), t.description, ...t.instruments].join(' ').toLowerCase())),
     };
   }, [modules.items, platforms.items, plugins.items, templates.items, scope, testedOnly, words]);

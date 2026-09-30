@@ -33,6 +33,7 @@ const { runContext } = require('./src/lib/cloudLogic.js');
 const { commandStep } = require('./src/lib/taskCommands.js');
 const { getStore, resolveBrokerUrl } = require('./src/lib/store');
 const { startEmbeddedBroker } = require('./src/lib/embedded-broker.js');
+const { removeDevice } = require('./src/lib/deviceRemoval.js');
 
 let store;
 try {
@@ -97,6 +98,8 @@ client.on('connect', () => {
     client.subscribe(`${TOPIC_PREFIX}/+/task-status`);
     // A finished Cloud task's run record (edge queue.build_cloud_result), sent once at the end.
     client.subscribe(`${TOPIC_PREFIX}/+/task-result`);
+    // A device leaving Cloud on its own (the edge's "Remove from Cloud").
+    client.subscribe(`${TOPIC_PREFIX}/+/leave`);
     // Retained messages replay immediately on subscribe — this is the entire "catch up on
     // reconnect" mechanism, for both this daemon restarting AND an edge device reconnecting.
     // No polling, no explicit sync request needed on either side.
@@ -137,8 +140,38 @@ client.on('message', async (topic, message) => {
         return;
     }
 
+    if (kind === 'leave') {
+        // The device asked to be removed. Only it can publish here: on AWS its certificate's
+        // policy covers its own topics alone; on a LAN broker anyone could, as for every topic.
+        try {
+            removedDevices.add(deviceId);
+            await removeDevice(store, deviceId);
+            console.log(`[Daemon] ${deviceId} left Cloud; removed.`);
+        } catch (e) {
+            console.error(`[Daemon] Failed to remove ${deviceId} as it left:`, e.message);
+        }
+        return;
+    }
+    if (removedDevices.has(deviceId)) {
+        // The list here is a few seconds old; a device paired again since must not be told it
+        // was removed (it would forget the pairing it just got). The store has the answer.
+        if (!(await store.isDeviceRemoved(deviceId).catch(() => true))) {
+            removedDevices.delete(deviceId);
+        } else {
+            // Removed from Cloud (deviceRemoval.js): nothing it sends registers it again. If it
+            // is still running, tell it to forget its pairing (not retained; again after a while
+            // if it keeps going, e.g. it was offline when first told).
+            if (kind === 'status' && payload && payload.online) tellRemoved(deviceId);
+            return;
+        }
+    }
+
     try {
-        if (kind === 'status') {
+        if (kind === 'status' && payload && payload.paused) {
+            // Paused on the device on purpose: kept, shown as paused, sent nothing until it resumes.
+            deviceState.set(deviceId, { online: false, session: null, busy: false, at: Date.now(), idleSince: null });
+            await store.upsertDeviceStatus(deviceId, 'paused', false);
+        } else if (kind === 'status') {
             const prev = deviceState.get(deviceId);
             // An edge too old to report `busy` is never assumed idle, or its tasks could be failed
             // as lost while they wait in its queue.
@@ -882,6 +915,37 @@ setInterval(async () => {
         console.error('[Daemon] Failed to mark stale devices offline:', e.message);
     }
 }, 5000);
+
+// Devices removed from Cloud (store removed_devices), read often: the Devices page removes them
+// in the web app, which cannot reach this process except through the store.
+const removedDevices = new Set();
+async function refreshRemovedDevices() {
+    try {
+        const ids = await store.listRemovedDeviceIds();
+        // Newly removed (on the Devices page) since the last look: a heartbeat that arrived in
+        // between may have registered it again, so delete its record once more.
+        const fresh = ids.filter((id) => !removedDevices.has(id));
+        removedDevices.clear();
+        for (const id of ids) removedDevices.add(id);
+        for (const id of fresh) {
+            try { await store.deleteDevice(id); } catch { /* next look tries again */ }
+        }
+    } catch (e) {
+        console.error('[Daemon] Failed to read removed devices:', e.message);
+    }
+}
+setInterval(refreshRemovedDevices, 3000);
+refreshRemovedDevices();
+
+// Tell a removed device that is still running to forget its pairing (edge: the `removed` topic).
+const toldRemovedAt = new Map();
+function tellRemoved(deviceId) {
+    const last = toldRemovedAt.get(deviceId) || 0;
+    if (Date.now() - last < 30000) return;
+    toldRemovedAt.set(deviceId, Date.now());
+    client.publish(`${TOPIC_PREFIX}/${deviceId}/removed`, JSON.stringify({ ts: Date.now() / 1000 }), { qos: 1 });
+    console.log(`[Daemon] ${deviceId} was removed from Cloud but is still connected; told it to forget its pairing.`);
+}
 
 // Leave a truthful heartbeat behind on a clean exit, so the UI says "backend stopped" straight
 // away instead of waiting for the row to age out.

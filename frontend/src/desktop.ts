@@ -101,7 +101,22 @@ export type CloudLink = {
   connection_error?: string | null;
   /** Where the edge keeps its pairing (never the token itself). Absent from older edges. */
   pairing_file?: string | null;
+  /** Paired but paused on purpose: kept, not connecting until resumed. */
+  paused?: boolean;
+  /** This edge's lasting Cloud identity (kept when it leaves, so pairing again reattaches it). */
+  device_id?: string | null;
+  /** A pairing in progress (the code waiting for approval on Cloud), or the last one's outcome. */
+  pairing?: {
+    state: 'waiting' | 'approved' | 'connected' | 'denied' | 'expired' | 'error' | 'cancelled';
+    code: string; approve_url: string; cloud_url: string; expires_at: string | null; error: string | null;
+  } | null;
 };
+
+/** `cloud:pair`: approved in one step, or the workspaces to choose from before approving. */
+export type CloudPairResult =
+  | { status: 'approved'; code: string; name: string; workspace: string }
+  | { status: 'choose-workspace'; workspaces: { id: string; name: string; kind: string }[] }
+  | { status: 'sign-in-needed'; code: string; approveUrl: string | null };
 
 export type ArgDef = { name: string; type?: string; default?: unknown; import_path?: string; class_name?: string; args?: ArgDef[] };
 
@@ -236,6 +251,13 @@ export interface DesktopApi {
   openCloud(): Promise<void>;
   openCloudInBrowser(): Promise<void>;
   checkCloud(): Promise<CloudCheck>;
+  /**
+   * Pair a running deck with Cloud in one step: the deck starts pairing, and the app approves it
+   * with its own sign-in. Without a sign-in (or to another workspace), see CloudPairResult.
+   */
+  pairWithCloud(profileId: string, opts?: { workspace?: string; name?: string }): Promise<CloudPairResult>;
+  /** Stop a deck's pairing in progress. */
+  cancelCloudPairing(profileId: string): Promise<void>;
   hubSearch(q: string): Promise<{ modules: HubModule[] }>;
   hubBrowse(): Promise<{ modules: HubModule[] }>;
   hubModule(id: number): Promise<{ module: HubModule }>;

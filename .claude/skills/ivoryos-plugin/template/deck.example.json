@@ -1,0 +1,10 @@
+{
+  "format": "ivoryos-deck/1",
+  "name": "My Plugin test deck",
+  "packages": [],
+  "paths": ["."],
+  "instruments": [
+    { "name": "pump", "import": "my_driver_module", "class": "MyPump", "args": {} }
+  ],
+  "plugins": ["my_plugin.plugin:plugin"]
+}

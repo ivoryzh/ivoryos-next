@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Plugin</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+    body { margin: 0; padding: 12px; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    #status { font-size: 12px; opacity: .6; }
+    ul { list-style: none; padding: 0; margin: 8px 0 0; }
+    li { padding: 4px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+    .error { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <h1>My Plugin <span id="status">connecting…</span></h1>
+  <ul id="calls"></ul>
+  <script>
+    // Relative URLs only: the page is served under /plugins/<id>/ on whatever host the edge uses.
+    function render(s) {
+      document.getElementById("calls").innerHTML = s.calls.slice().reverse().map(c =>
+        `<li class="${c.error ? "error" : ""}">${s.instrument}.${c.method} · ${c.error || c.phase}</li>`
+      ).join("") || "<li>No calls yet. Run a step on the deck.</li>";
+    }
+
+    fetch("api/state").then(r => r.json()).then(render);
+
+    function connect() {
+      const url = new URL("events", location.href);
+      url.protocol = url.protocol.replace("http", "ws");
+      const ws = new WebSocket(url);
+      ws.onopen = () => document.getElementById("status").textContent = "live";
+      ws.onmessage = e => render(JSON.parse(e.data));
+      ws.onclose = () => {  // the edge restarted: reconnect
+        document.getElementById("status").textContent = "reconnecting…";
+        setTimeout(connect, 2000);
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>

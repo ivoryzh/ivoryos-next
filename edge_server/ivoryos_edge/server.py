@@ -284,7 +284,7 @@ async def handle_sequence_push(payload: dict):
 
 
 def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, error: str = None,
-                        progress: dict = None):
+                        progress: dict = None, reliable: bool = False, issues: dict = None):
     """Report a cloud-originated task's state back to Cloud.
 
     A dedicated topic, NOT .../status — that one is the plain {online, ts} device heartbeat
@@ -299,12 +299,16 @@ def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, erro
         payload["error"] = error
     if progress:
         payload["progress"] = progress
+    if issues:
+        # A finished run that got there through retries or skips (queue.run_issues).
+        payload["issues"] = issues
     try:
         global_broker.publish(
             f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload,
             # A progress update is superseded by the next one, so it need not be redelivered;
-            # a status change (running/completed/error) must arrive.
-            qos=0 if progress else 1,
+            # a status change (running/completed/error) must arrive, and so must a progress
+            # update saying the run has stopped for a person (`reliable`).
+            qos=0 if progress and not reliable else 1,
         )
     except Exception as e:
         print(f"Failed to emit cloud '{status}' status for {cloud_node_id}: {e}")
@@ -402,6 +406,15 @@ async def handle_broker_message(topic: str, payload: dict):
         queue_manager.cloud_queue = payload if isinstance(payload, dict) else None
         await queue_manager.broadcast_global_queue()
         return
+    if topic.rsplit("/", 1)[-1] == "task-control":
+        # Someone in Cloud answered a question or decided about an error (see
+        # WorkflowQueueManager.apply_cloud_control).
+        outcome = await queue_manager.apply_cloud_control(
+            payload.get("runId"), payload.get("nodeId"), payload.get("pause"),
+            payload.get("action"), payload.get("value"),
+        )
+        print(f"Cloud '{payload.get('action')}' for {payload.get('nodeId')}: {outcome}")
+        return
 
     print(f"Received cloud task from topic {topic}: {payload}")
     await handle_cloud_task(payload)
@@ -419,6 +432,18 @@ def _safe_optimizer_catalog():
     except Exception as e:
         print(f"Could not include optimizers in the published schema: {e}")
         return {}
+
+
+def host_info():
+    """Which computer this edge runs on, for Cloud's device list: a device is named at pairing,
+    and "pump" says nothing about which bench PC to walk over to when it goes offline."""
+    import platform
+    import socket
+    try:
+        computer = socket.gethostname()
+    except OSError:
+        computer = platform.node()
+    return {"computer": computer or None, "os": f"{platform.system()} {platform.release()}".strip()}
 
 
 def publish_schema(broker, topic_prefix, client_id):
@@ -447,6 +472,9 @@ def publish_schema(broker, topic_prefix, client_id):
         # Which recorded shape of this deck the schema above is -- see deck.py. Lets Cloud tell a
         # device whose drivers changed apart from one that merely reconnected.
         "deck_version": deck.current_version(),
+        # The computer this edge runs on. Here rather than in the 5-second heartbeat: it cannot
+        # change without a restart, and the heartbeat is kept tiny on purpose (AWS IoT metering).
+        "host": host_info(),
     }
     broker.publish(f"{topic_prefix}/{client_id}/schema", schema, retain=True, qos=1)
 
@@ -681,6 +709,8 @@ async def setup_broker():
             global_broker.subscribe(f"{topic_prefix}/{client_id}/cloud-queue")
             # Another process connecting under this identity: a second copy of this edge.
             global_broker.watch_identity(f"{topic_prefix}/{client_id}/presence", global_session)
+            # Answers and error decisions for a Cloud task stopped here for a person.
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/task-control")
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the

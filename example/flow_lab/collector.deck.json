@@ -1,0 +1,8 @@
+{
+  "format": "ivoryos-deck/1",
+  "name": "Flow lab: fraction collector",
+  "paths": ["."],
+  "instruments": [
+    { "name": "fraction_collector", "import": "flow_drivers", "class": "FractionCollector" }
+  ]
+}

@@ -2,19 +2,16 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, PanelRight, Gauge, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
+import { Settings, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, PanelRight, Gauge, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { isPanelPlugin, openInPanel, setPanel, usePanel } from '@/pluginPanel';
 import { lastRunTabHref, runTabForPath, samePath } from './RunTabs';
 
-interface SidebarProps {
-  theme: 'light' | 'dark';
-  toggleTheme: () => void;
-}
-
-export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
+// The theme is not chosen here: every page follows one setting (ThemeSync in the root layout; in
+// the desktop app, the app's own Settings). See packages/shared-ui/src/theme.tsx.
+export default function Sidebar() {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [plugins, setPlugins] = useState<any[]>([]);
   // Starts at the same default on server and client, then corrects from localStorage in an
@@ -308,15 +305,7 @@ export default function Sidebar({ theme, toggleTheme }: SidebarProps) {
           </Link>
         </div>
 
-        <button 
-            onClick={toggleTheme}
-            className={`mx-3 flex items-center py-3 px-3 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-white dark:hover:bg-white/5 transition-colors overflow-hidden`}
-        >
-            <div className="w-5 h-5 flex justify-center shrink-0">
-                {theme === 'light' ? <Moon className="w-5 h-5 shrink-0" /> : <Sun className="w-5 h-5 shrink-0" />}
-            </div>
-            {isExpanded && <span className="ml-4 text-sm font-medium whitespace-nowrap">{theme === 'light' ? 'Dark Mode' : 'Light Mode'}</span>}
-        </button>
+        <div className="text-sm font-medium text-gray-600 dark:text-gray-400">{navItem('/settings', 'Settings', <Settings className="w-5 h-5 shrink-0" />)}</div>
       </div>
     </aside>
     </>

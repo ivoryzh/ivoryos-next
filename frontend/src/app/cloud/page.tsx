@@ -1,4 +1,5 @@
 "use client";
+import { useDocumentTheme } from '@ivoryos/shared-ui';
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
@@ -6,7 +7,7 @@ import { Cloud, Save, CheckCircle2, AlertTriangle } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
 export default function CloudSettingsPage() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [paired, setPaired] = useState(false);
   const [pairedAs, setPairedAs] = useState<{ clientId: string; broker: string } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -23,10 +24,6 @@ export default function CloudSettingsPage() {
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected' | 'error' | 'disconnected'>('idle');
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     // Fetch current settings
     fetch(`${API_BASE}/api/cloud-settings`)
@@ -43,13 +40,6 @@ export default function CloudSettingsPage() {
       });
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   // Validate: the POST below blocks on the edge server actually attempting the connection (up to
   // ~5s — see setup_broker's is_connected() poll) and its response IS the real outcome, so there's
@@ -114,7 +104,7 @@ export default function CloudSettingsPage() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       <main className="flex-1 flex flex-col h-full w-full overflow-y-auto">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-8 bg-white dark:bg-black/20 z-10">

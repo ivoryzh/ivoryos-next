@@ -14,12 +14,14 @@ import {
   WorkflowPeek,
   notify,
   confirmDialog,
+  chooseDialog,
 } from '@ivoryos/shared-ui';
 import { validateGraph, isDynamicValue, effectiveParamValue, blankParamsOf, TERMINAL_TASK_STATUSES, ACTIVE_TASK_STATUSES, isDeviceNode, deviceIdOf } from '@/lib/dag';
 import { graphSignature, isEmptyGraph } from '@/lib/graphSignature';
 import { runConfigOf, runModeOf, type NodeCadence, type RunMode } from '@/lib/runPayload';
 import RunConfigPanel, { ConfigurableNode } from '@/components/RunConfigPanel';
 import ScheduleDialog from '@/components/ScheduleDialog';
+import { saveLibraryWorkflow, uploadBrowserLibrary } from '@/lib/cloudLibrary';
 
 /** The node every canvas starts from. */
 const startNode = (): Node => ({
@@ -90,6 +92,9 @@ export default function CloudDesignerPage() {
   // Persisted with the canvas, so the Library can ask the same question before replacing it.
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
+
+  // Workflows this browser saved before the Library moved to the server go up once.
+  useEffect(() => { uploadBrowserLibrary(); }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem('cloud_workflow');
@@ -353,26 +358,18 @@ export default function CloudDesignerPage() {
       await notify('Give the workflow a name (top left) before saving it.', { title: 'Name needed' });
       return;
     }
-    const saved = localStorage.getItem('cloud_saved_workflows');
-    const library = saved ? JSON.parse(saved) : [];
-    
-    const existingIndex = library.findIndex((w: any) => w.name === currentWorkflowName);
-    const newWf = {
-      name: currentWorkflowName,
-      description: currentWorkflowDescription,
-      nodes,
-      edges,
-      updated_at: Date.now(),
-      created_at: existingIndex >= 0 ? library[existingIndex].created_at : Date.now()
-    };
-    
-    if (existingIndex >= 0) {
-      library[existingIndex] = newWf;
-    } else {
-      library.push(newWf);
+    // Saved to Cloud, not this browser: the Library is shared by everyone who opens this Cloud.
+    try {
+      await saveLibraryWorkflow({
+        name: currentWorkflowName.trim(),
+        description: currentWorkflowDescription,
+        nodes,
+        edges,
+      });
+    } catch (e: any) {
+      await notify(e.message, { title: 'Not saved', tone: 'error' });
+      return;
     }
-    
-    localStorage.setItem('cloud_saved_workflows', JSON.stringify(library));
     // The badge is the confirmation: "Unsaved" disappearing says it landed.
     setSavedSignature(currentSignature);
   };
@@ -551,9 +548,43 @@ export default function CloudDesignerPage() {
     await dispatchRun();
   };
 
+  /**
+   * When the devices this run uses still have work open (a run in progress, or a repeat waiting
+   * for its next occurrence), whether to start now -- taking each device whenever it is free, so
+   * steps interleave with that work -- or to queue behind it. Null means cancel. Only asked when
+   * there is something to wait for; otherwise a run starts now, as it always has.
+   */
+  const chooseStart = async (): Promise<'now' | 'after' | null> => {
+    const targets = Array.from(new Set(nodes.filter(isDeviceNode).map(n => deviceIdOf(n)).filter(Boolean)));
+    if (!targets.length) return 'now';
+    let ahead: { name: string; openTasks: number }[] = [];
+    try {
+      const res = await fetch(`/api/cloud-workflows/runs?devices=${encodeURIComponent(targets.join(','))}`);
+      ahead = (await res.json()).ahead || [];
+    } catch {
+      return 'now'; // cannot tell what is open: start now, as before this was asked
+    }
+    if (!ahead.length) return 'now';
+    const names = ahead.map(r => `"${r.name}"`).join(', ');
+    const choice = await chooseDialog({
+      title: 'Devices already have work',
+      message: `${names} still ${ahead.length === 1 ? 'has' : 'have'} steps to run on ${targets.join(', ')}. `
+        + 'Start now and this run takes each device whenever it is free, in between that work. '
+        + 'Or queue it to start once that work is done.',
+      actions: [
+        { id: 'cancel', label: 'Cancel', kind: 'cancel' },
+        { id: 'after', label: 'After current work' },
+        { id: 'now', label: 'Start now', kind: 'primary' },
+      ],
+    });
+    return choice === 'now' || choice === 'after' ? choice : null;
+  };
+
   const dispatchRun = async () => {
     // Checked again here: the run panel can stay open while a device drops.
     if (await refuseIfOffline()) return;
+    const start = await chooseStart();
+    if (!start) return;
     setShowConfigPanel(false);
     setIsExecuting(true);
     try {
@@ -571,6 +602,7 @@ export default function CloudDesignerPage() {
           base: currentWorkflowName || 'Experiment',
           nodes,
           edges,
+          after: start === 'after',
         }),
       });
       const data = await res.json();

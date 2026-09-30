@@ -3,7 +3,7 @@ import { API_BASE, WS_BASE } from '@/config';
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Trash2, Settings2, Sun, Moon, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
+import { Play, Trash2, Settings2, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import AgentPanel from '@/components/AgentPanel';
 import AgentToolboxButton from '@/components/AgentToolboxButton';
@@ -22,8 +22,7 @@ import {
   chooseDialog,
   confirmDialog,
   notify,
-  promptDialog,
-} from '@ivoryos/shared-ui';
+  promptDialog, useDocumentTheme } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
@@ -52,7 +51,7 @@ export default function DesignerPage() {
     results: {}
   });
 
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   // The assistant panel is opt-in and remembered: a lab with no model configured should
   // never see it, and one that uses it every day should not reopen it every visit.
   const [agentOpen, setAgentOpen] = useState(false);
@@ -155,10 +154,6 @@ export default function DesignerPage() {
         }
       });
 
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     // Load saved sequence if exists
     setAgentOpen(localStorage.getItem('ivoryos_agent_panel') === 'true');
@@ -315,13 +310,6 @@ export default function DesignerPage() {
     localStorage.setItem('ivoryos_agent_panel', String(next));
   };
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const startNewWorkflow = async () => {
     // Was "Clear" with a trash icon, which read as destroying something rather than starting
@@ -737,7 +725,7 @@ export default function DesignerPage() {
         full width, which is what it cost when the two were shown side by side. */}
       <div className={`flex h-full ${agentOpen ? 'min-w-[1208px]' : 'min-w-[1080px]'}`}>
         {/* Sidebar */}
-        <Sidebar theme={theme} toggleTheme={toggleTheme} />
+        <Sidebar />
 
         {agentOpen && (
           <AgentPanel

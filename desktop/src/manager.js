@@ -18,6 +18,7 @@ const {
 } = require('./profiles');
 const { validateManifest, mergeIntoDeck } = require('./manifest');
 const { updateInstrument, removeInstrument, setInstrumentEnabled } = require('./deckEdit');
+const { addWorkflows } = require('./library');
 
 function portIsFree(port) {
     return new Promise((resolve) => {
@@ -89,11 +90,32 @@ class ProfileManager extends EventEmitter {
     }
 
     create(fields) {
-        const profile = withDefaults(this.home, { ...fields, id: undefined });
+        // A new profile takes the first port no other profile has: two on 8080 cannot run at once,
+        // and a deck made from a Hub platform is meant to run beside the one it was made from.
+        const used = new Set(this.store.profiles.map((p) => Number(p.port)));
+        let port = Number(fields && fields.port) || 8080;
+        if (!(fields && fields.port)) while (used.has(port)) port += 1;
+        const profile = withDefaults(this.home, { ...fields, port, id: undefined });
         this.store.profiles.push(profile);
-        if (profile.kind === 'deck') writeDeckFile(profile.deck, readDeckFile(profile.deck));
+        // A new deck file carries the profile's name (readDeckFile's default is "My deck").
+        if (profile.kind === 'deck') {
+            writeDeckFile(profile.deck, fs.existsSync(profile.deck) ? readDeckFile(profile.deck) : { ...readDeckFile(profile.deck), name: profile.name });
+        }
         this._save();
         return profile;
+    }
+
+    /**
+     * The first port from 8080 that no profile uses and nothing on this computer is listening on,
+     * for a new profile. `create` alone only avoids other profiles, since it cannot wait; a port
+     * another program holds would otherwise surface only when the new deck fails to start.
+     */
+    async freePort(from = 8080) {
+        const used = new Set(this.store.profiles.map((p) => Number(p.port)));
+        for (let port = from; port < from + 200; port += 1) {
+            if (!used.has(port) && (await portIsFree(port))) return port;
+        }
+        return from;
     }
 
     update(id, patch) {
@@ -148,6 +170,49 @@ class ProfileManager extends EventEmitter {
     }
 
     /** Where decks pair with IvoryOS Cloud: the hosted service unless a lab runs its own. */
+    /** 'system' | 'light' | 'dark': the app's one theme, applied to every page it shows. */
+    get theme() {
+        return this.store.theme || 'system';
+    }
+
+    setTheme(theme) {
+        if (!['system', 'light', 'dark'].includes(theme)) throw new Error(`Unknown theme: ${theme}`);
+        this.store.theme = theme;
+        this._save();
+    }
+
+    /**
+     * Automation Hub items this account starred ('module:12', 'platform:4', 'plugin:3',
+     * 'template:9'), for the browser's Starred view. Kept per account on this computer: two people
+     * sharing a bench PC each get their own, and signing out shows the signed-out list.
+     */
+    starred(account) {
+        const all = this.store.starred || {};
+        return Array.isArray(all[account]) ? all[account] : [];
+    }
+
+    setStarred(account, key, on) {
+        if (!/^(module|platform|plugin|template):\d+$/.test(String(key))) throw new Error(`Not a Hub item: ${key}`);
+        const all = { ...(this.store.starred || {}) };
+        const list = (Array.isArray(all[account]) ? all[account] : []).filter((k) => k !== key);
+        all[account] = on ? [...list, key] : list;
+        this.store.starred = all;
+        this._save();
+        return all[account];
+    }
+
+    /**
+     * Put the profiles in this order (the launcher's sidebar, dragged). Ids not listed keep their
+     * relative order after the listed ones, so a profile created meanwhile is never dropped.
+     */
+    reorder(ids) {
+        const byId = new Map(this.store.profiles.map((p) => [p.id, p]));
+        const listed = (Array.isArray(ids) ? ids : []).filter((id) => byId.has(id));
+        const rest = this.store.profiles.filter((p) => !listed.includes(p.id));
+        this.store.profiles = [...listed.map((id) => byId.get(id)), ...rest];
+        this._save();
+    }
+
     get cloudUrl() {
         return this.store.cloudUrl || process.env.IVORYOS_CLOUD_URL || 'https://cloud.ivoryos.app';
     }
@@ -338,7 +403,22 @@ class ProfileManager extends EventEmitter {
             throw e;
         }
         if (wasRunning) await this._start(id);
-        return { added: merged.added, replaced: merged.replaced };
+        return { added: merged.added, replaced: merged.replaced, pluginsAdded: merged.pluginsAdded };
+    }
+
+    // --- the workflow library ---------------------------------------------------------------
+
+    /**
+     * Add workflows ({name, body}) to this profile's library (library.js): through the edge's API
+     * while it runs, as files it adopts otherwise. Returns [{requested, saved}].
+     */
+    addWorkflows(id, workflows) {
+        // Queued with the profile's other operations: a file written while the edge restarts
+        // after an install would otherwise race the edge reading its library at startup.
+        return this._exclusive(id, () => {
+            const status = this.statusOf(id);
+            return addWorkflows(this.get(id), workflows, { url: status.state === 'running' ? status.url : null });
+        });
     }
 }
 

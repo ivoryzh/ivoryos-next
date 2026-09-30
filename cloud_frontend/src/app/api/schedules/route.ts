@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { workflowSourcesFor } from '@/lib/runSources';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { ownedKeys, setOwner } from '@/lib/workspace';
 import { planRun } from '@/lib/dag';
 import { buildRunTasks, resolveGraphForDispatch } from '@/lib/planTasks';
 
@@ -23,10 +25,14 @@ export const dynamic = 'force-dynamic';
 const MIN_INTERVAL_MS = 60_000; // a minute; anything finer is a per-node cadence, not a schedule
 
 export async function GET() {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
   try {
-    const schedules = await getStore().listSchedules();
+    const mine = await ownedKeys('schedule', ws);
+    const schedules = (await getStore().listSchedules() as any[]).filter((s) => mine.has(String(s.id)));
     return NextResponse.json(
-      (schedules as any[]).map((s) => ({
+      schedules.map((s) => ({
         id: s.id,
         name: s.name,
         enabled: !!s.enabled,
@@ -47,6 +53,10 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
+
   try {
     const body = await req.json();
     const nodes: any[] = body.nodes || [];
@@ -86,6 +96,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: built.problems.join('\n') }, { status: 400 });
     }
 
+    // Like a run, a schedule may only fire this workspace's devices.
+    const devicesHere = await ownedKeys('device', ws);
+    const foreign = [...new Set((built.rows || []).map((r: any) => String(r.device_id)))]
+      .filter((d) => d && d !== '@cloud' && !devicesHere.has(d));
+    if (foreign.length) return NextResponse.json({ error: `${foreign.join(', ')} not in this workspace.` }, { status: 403 });
+    await setOwner('schedule', scheduleId, ws);
     await getStore().insertSchedule({
       id: scheduleId,
       name,

@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { ownedKeys } from '@/lib/workspace';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,9 +12,13 @@ const ACTIVE = ['queued', 'running', 'waiting_input'];
 // devices already report (heartbeat, schema, sequences, task status/progress/results); nothing
 // is asked of a device to build it.
 export async function GET() {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
   try {
     const store = getStore();
-    const [devices, sequences, recent, waiting, results, schedules] = await Promise.all([
+    const mine = await ownedKeys('device', ws);
+    const [allDevices, sequences, recent, waiting, results, schedules] = await Promise.all([
       store.listDevices(),
       store.listSequences(),
       store.listRecentTasks(500),
@@ -21,6 +27,7 @@ export async function GET() {
       store.listSchedules(),
     ]);
 
+    const devices = (allDevices as any[]).filter((d) => mine.has(String(d.id)));
     const runNames = new Map<string, string>();
     const nameOf = async (runId: string) => {
       if (!runNames.has(runId)) runNames.set(runId, (await store.getRun(runId))?.name || runId);
@@ -43,6 +50,10 @@ export async function GET() {
         busy: !!d.busy,
         lastSeen: d.last_seen,
         deckVersion: d.schema?.deck_version ?? null,
+        // The computer the edge runs on (edge server.py host_info), for finding the bench PC.
+        computer: d.schema?.host?.computer ?? null,
+        os: d.schema?.host?.os ?? null,
+        imageVersion: d.image_version ?? null,
         instruments: Object.keys(d.schema?.instruments || {}).length,
         optimizers: Object.keys(d.schema?.optimizers || {}).length,
         workflows: mySequences.length,

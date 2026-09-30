@@ -2,9 +2,9 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Sun, Moon, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag, Plus } from 'lucide-react';
+import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag, Plus } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { workflowSignature, toSequenceBlocks, confirmDialog, notify, runtimeSummary, formatDuration, type WorkflowRuntime } from '@ivoryos/shared-ui';
+import { workflowSignature, toSequenceBlocks, confirmDialog, notify, runtimeSummary, formatDuration, type WorkflowRuntime, useDocumentTheme } from '@ivoryos/shared-ui';
 
 type WorkflowItem = {
   name: string;
@@ -149,7 +149,7 @@ type VersionEntry = {
 
 export default function LibraryPage() {
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'created_at' | 'updated_at'>('updated_at');
@@ -172,11 +172,6 @@ export default function LibraryPage() {
   const [versions, setVersions] = useState<VersionEntry[] | null>(null);
 
   useEffect(() => {
-    // Theme init
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     fetchWorkflows();
     
@@ -207,13 +202,6 @@ export default function LibraryPage() {
     }
   };
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   // Tags are compared case-insensitively everywhere, matching how the server dedupes them. The
   // filter bar shows one chip for "screening"/"Screening", so an exact-match filter would silently
@@ -433,7 +421,7 @@ export default function LibraryPage() {
         </div>
       )}
       {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       {/* Main Area */}
       <div className="flex-1 flex flex-col relative z-0">

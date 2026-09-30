@@ -243,14 +243,20 @@ export function SpreadsheetTable({
     </DragDropContext>
   );
 
+  // Compact sits flush in its host's card (Cloud's run panel), edge to edge, rather than as a
+  // rounded box inside a box; the full-size page keeps its own framed table.
   return (
-    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-black/40 dark:shadow-none">
+    <div className={compact
+      ? 'overflow-hidden border-b border-gray-200 dark:border-white/10'
+      : 'overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-black/40 dark:shadow-none'}>
       <table className="w-full border-collapse text-left">
         {header}
         {onReorder ? draggableBody : staticBody}
       </table>
       {onAddRow && (
-        <div className="border-t border-gray-200 bg-gray-50 p-3 dark:border-white/10 dark:bg-white/5">
+        <div className={compact
+          ? 'border-t border-gray-100 px-2 py-1.5 dark:border-white/5'
+          : 'border-t border-gray-200 bg-gray-50 p-3 dark:border-white/10 dark:bg-white/5'}>
           <button
             onClick={onAddRow}
             className="flex items-center space-x-2 px-2 py-1 text-sm font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300"

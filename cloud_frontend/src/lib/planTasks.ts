@@ -20,7 +20,7 @@ import {
   runModeOf,
   singleValuesOf,
   validateNodeRunConfig,
-  type EdgeRunPayload,
+  type NodeRunPayload,
   type WorkflowSource,
 } from './runPayload';
 
@@ -29,7 +29,7 @@ export interface TaskRow {
   node_id: string;
   device_id: string;
   block: any;
-  run: EdgeRunPayload | null;
+  run: NodeRunPayload | null;
   members: string[];
   status: string;
   repeat_every_ms: number;
@@ -135,7 +135,7 @@ export function buildRunTasks(
 
     problems.push(...validateNodeRunConfig(head, labelForNode(head)));
 
-    let run: EdgeRunPayload | null = null;
+    let run: NodeRunPayload | null = null;
     try {
       run = buildNodeRun(head, `${runName} · ${labelForNode(head)}`, sourceOf(head));
     } catch (e: any) {

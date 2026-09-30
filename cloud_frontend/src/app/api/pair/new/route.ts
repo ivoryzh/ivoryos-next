@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { setOwner } from '@/lib/workspace';
 import { generateCode, formatCode, expiryFrom, TTL_MS } from '@/lib/pairing';
 
 export const dynamic = 'force-dynamic';
@@ -7,12 +9,12 @@ export const dynamic = 'force-dynamic';
 // Mint a pairing code for a new device. The code is shown in /settings and typed into the edge
 // server's Cloud Connect page; nothing is provisioned until it is redeemed.
 //
-// NOTE: like /api/devices/provision before it, this endpoint has no auth — Cloud has no user
-// accounts yet (see AGENTS.md). Pairing narrows the exposure rather than closing it: minting a
-// code is now a separate, harmless step, and the expensive part (an AWS IoT Thing plus
-// certificate) requires possessing an unexpired, unredeemed code. Real auth is still needed
-// before any public deployment.
+// Needs a signed-in session: the code records the workspace, and the device that redeems it is
+// placed there (pair/redeem). Before sign-in existed anyone who could reach Cloud could mint one.
 export async function POST(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
   try {
     const body = await req.json().catch(() => ({}));
     const deviceName = typeof body.name === 'string' && body.name.trim()
@@ -42,6 +44,7 @@ export async function POST(req: Request) {
     const code = generateCode();
     const expiresAt = expiryFrom();
     await store.createPairingCode({ code, deviceName, expiresAt });
+    await setOwner('pairing', code, ws);
 
     return NextResponse.json({
       code: formatCode(code),

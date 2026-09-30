@@ -164,3 +164,33 @@ test('the first profile of a fresh install gets its data folder when started', a
     assert.ok(fs.existsSync(first.dataDir));
     assert.doesNotMatch(mgr.logTail(first.id), /ENOENT/);
 });
+
+test('a new profile gets a port no profile uses and nothing listens on; a new deck file takes its name', async (t) => {
+    const home = tmp();
+    const mgr = new ProfileManager({ home, getRuntime: async () => fakeRuntime() });
+    const busy = net.createServer();
+    const start = await freePort();
+    await new Promise((r) => busy.listen(start, '0.0.0.0', r));
+    t.after(() => busy.close());
+    mgr.create({ kind: 'script', name: 'Other', script: FAKE, port: start + 1 });
+    const port = await mgr.freePort(start);
+    assert.ok(port !== start && port !== start + 1, `picked ${port}`);
+    const deck = mgr.create({ kind: 'deck', name: 'Hein Lab flow bench', port });
+    assert.equal(mgr.readDeck(deck.id).name, 'Hein Lab flow bench');
+});
+
+test('stars are kept per account, deduplicated, and survive a reload', () => {
+    const home = tmp();
+    const mgr = new ProfileManager({ home, getRuntime: async () => fakeRuntime() });
+    mgr.setStarred('u1', 'module:12', true);
+    mgr.setStarred('u1', 'module:12', true);
+    mgr.setStarred('u1', 'platform:4', true);
+    mgr.setStarred('u2', 'plugin:3', true);
+    assert.deepEqual(mgr.starred('u1'), ['module:12', 'platform:4']);
+    mgr.setStarred('u1', 'module:12', false);
+    assert.throws(() => mgr.setStarred('u1', 'rm -rf', true), /Not a Hub item/);
+    const again = new ProfileManager({ home, getRuntime: async () => fakeRuntime() });
+    assert.deepEqual(again.starred('u1'), ['platform:4']);
+    assert.deepEqual(again.starred('u2'), ['plugin:3']);
+    assert.deepEqual(again.starred('nobody'), []);
+});

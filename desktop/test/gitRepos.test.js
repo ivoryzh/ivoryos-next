@@ -110,3 +110,58 @@ test('versions compare numerically, pre-releases before their release', () => {
     assert.equal(compareVersions('0.2.0-test.1', '0.2.0'), -1);
     assert.equal(compareVersions('0.1.0', '0.1.1'), -1);
 });
+
+test('signing in from the browser: GitHub device flow, polled until approved', async () => {
+    let polls = 0;
+    const { fetch, calls } = fakeForge({
+        'https://github.com/login/device/code': () => [200, { device_code: 'dev1', user_code: 'ABCD-1234', verification_uri: 'https://github.com/login/device', interval: 5, expires_in: 900 }],
+        'https://github.com/login/oauth/access_token': () => {
+            polls += 1;
+            return polls === 1 ? [200, { error: 'authorization_pending' }] : polls === 2 ? [200, { error: 'slow_down' }] : [200, { access_token: 'gho_ok', token_type: 'bearer' }];
+        },
+        'https://api.github.com/user': (_u, headers) => [200, { login: headers.Authorization === 'Bearer gho_ok' ? 'ada' : '?' }],
+    });
+    const waits = [];
+    const store = memoryStore();
+    const git = new GitConnections({ fetch, store, downloadDir: os.tmpdir(), clientIds: { github: 'Iv1.test', gitlab: '' }, sleep: async (ms) => { waits.push(ms); } });
+    assert.equal(git.list().find((c) => c.provider === 'github').oauth, true);
+    assert.equal(git.list().find((c) => c.provider === 'gitlab').oauth, false);
+    const flow = await git.startSignIn('github');
+    assert.deepEqual([flow.userCode, flow.verificationUri], ['ABCD-1234', 'https://github.com/login/device']);
+    const list = await git.finishSignIn('github');
+    assert.equal(list.find((c) => c.provider === 'github').login, 'ada');
+    assert.deepEqual(waits, [5000, 5000, 10000]); // slow_down adds five seconds
+    assert.equal(store.read().github.kind, 'oauth');
+    assert.ok(calls.some((c) => c.url === 'https://github.com/login/device/code'));
+});
+
+test('a GitLab sign-in renews its two-hour token with the refresh token', async () => {
+    let now = 1_000_000;
+    const { fetch } = fakeForge({
+        'https://gitlab.com/oauth/authorize_device': () => [200, { device_code: 'd', user_code: 'XY', verification_uri: 'https://gitlab.com/oauth/device', verification_uri_complete: 'https://gitlab.com/oauth/device?user_code=XY', interval: 5, expires_in: 300 }],
+        'https://gitlab.com/oauth/token': (_u, _h) => [200, { access_token: `glo_${now}`, refresh_token: `r_${now}`, expires_in: 7200 }],
+        'https://gitlab.com/api/v4/user': (_u, headers) => [200, { username: headers.Authorization ? 'lab' : '?' }],
+        'https://gitlab.com/api/v4/projects': (_u, headers) => [200, [{ id: 1, path_with_namespace: `a/${headers.Authorization}`, visibility: 'private' }]],
+    });
+    const store = memoryStore();
+    const git = new GitConnections({ fetch, store, downloadDir: os.tmpdir(), clientIds: { github: '', gitlab: 'gl-app' }, now: () => now, sleep: async () => {} });
+    const flow = await git.startSignIn('gitlab');
+    assert.match(flow.verificationUri, /user_code=XY/);
+    await git.finishSignIn('gitlab');
+    assert.equal(store.read().gitlab.token, 'glo_1000000');
+    now += 2 * 3600 * 1000; // two hours later the token is stale
+    const repos = await git.repos('gitlab');
+    assert.equal(repos[0].name, `a/Bearer glo_${now}`);
+    assert.equal(store.read().gitlab.refreshToken, `r_${now}`);
+});
+
+test('a declined or unavailable sign-in says so', async () => {
+    const { fetch } = fakeForge({
+        'https://github.com/login/device/code': () => [200, { device_code: 'd', user_code: 'U', verification_uri: 'https://github.com/login/device', interval: 5, expires_in: 900 }],
+        'https://github.com/login/oauth/access_token': () => [200, { error: 'access_denied' }],
+    });
+    const git = new GitConnections({ fetch, store: memoryStore(), downloadDir: os.tmpdir(), clientIds: { github: 'Iv1.test', gitlab: '' }, sleep: async () => {} });
+    await git.startSignIn('github');
+    await assert.rejects(git.finishSignIn('github'), /declined/);
+    await assert.rejects(git.startSignIn('gitlab'), /not set up/);
+});

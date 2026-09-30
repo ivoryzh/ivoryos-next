@@ -20,6 +20,7 @@
  */
 
 const { createClient } = require('@supabase/supabase-js');
+const { appendOccurrence, nextOccurrenceAt } = require('./sqlite.js');
 
 const nowIso = () => new Date().toISOString();
 
@@ -76,10 +77,26 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listDevices() {
       const { data, error } = await supabase.from('devices')
-        .select('id, name, status, busy, last_seen, schema')
-        .order('last_seen', { ascending: false });
+        .select('id, name, status, busy, last_seen, schema, image_updated_at')
+        .order('id', { ascending: true });
       if (error) fail('Failed to fetch devices', error);
-      return data;
+      return (data || []).map(({ image_updated_at, ...d }) => ({ ...d, image_version: image_updated_at || null }));
+    },
+
+    /** See the LAN backend. Returns whether the device exists; `image` null removes it. */
+    async setDeviceImage(deviceId, image) {
+      const { data, error } = await supabase.from('devices')
+        .update({ image, image_updated_at: image ? nowIso() : null })
+        .eq('id', deviceId).select('id');
+      if (error) fail(`Failed to set the image of ${deviceId}`, error);
+      return (data || []).length > 0;
+    },
+
+    async getDeviceImage(deviceId) {
+      const { data, error } = await supabase.from('devices')
+        .select('image, image_updated_at').eq('id', deviceId).maybeSingle();
+      if (error) fail(`Failed to read the image of ${deviceId}`, error);
+      return data && data.image ? { image: data.image, updated_at: data.image_updated_at } : null;
     },
 
     /** Cloud tasks not yet sent anywhere: ready but held (`pending`) or waiting on others (`blocked`). */
@@ -92,16 +109,21 @@ function createSupabaseStore(url, serviceRoleKey) {
       return (data || []).map(({ runs, ...t }) => ({ ...t, run_name: runs?.name || null }));
     },
 
+    /** See the LAN backend: `results` keeps every occurrence. The daemon is the only writer. */
     async setTaskResult(runId, nodeId, result) {
+      const { data: row, error: readError } = await supabase.from('run_tasks')
+        .select('results').eq('run_id', runId).eq('node_id', nodeId).maybeSingle();
+      if (readError) fail(`Failed to read the results of ${runId}/${nodeId}`, readError);
       const { error } = await supabase.from('run_tasks')
-        .update({ result: result ?? null }).eq('run_id', runId).eq('node_id', nodeId);
+        .update({ result: result ?? null, results: appendOccurrence(row && row.results, result) })
+        .eq('run_id', runId).eq('node_id', nodeId);
       if (error) fail(`Failed to store the result of ${runId}/${nodeId}`, error);
     },
 
     /** Every task of one Cloud run with whatever its device sent back -- one experiment's record. */
     async listRunTaskRecords(runId) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('node_id, device_id, status, dispatched_at, updated_at, result, progress')
+        .select('node_id, device_id, status, dispatched_at, updated_at, result, results, progress, command')
         .eq('run_id', runId);
       if (error) fail(`Failed to fetch the tasks of run ${runId}`, error);
       return data || [];
@@ -120,7 +142,7 @@ function createSupabaseStore(url, serviceRoleKey) {
     /** Recent tasks that have a synced result, newest first -- summaries only, not the steps. */
     async listTaskResults(limit) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, device_id, status, updated_at, runs(name), name:result->>name, edge_run_id:result->>edgeRunId, result_status:result->>status, end_time:result->>end_time')
+        .select('run_id, node_id, device_id, status, updated_at, runs(name), name:result->>name, edge_run_id:result->>edgeRunId, result_status:result->>status, issues:result->parameters->_issues, end_time:result->>end_time')
         .not('result', 'is', null)
         .order('updated_at', { ascending: false })
         .limit(limit);
@@ -191,10 +213,48 @@ function createSupabaseStore(url, serviceRoleKey) {
     },
 
     // --- runs ----------------------------------------------------------------------------
-    async insertRun({ id, name, status, nodes, edges }) {
+    async insertRun({ id, name, status, nodes, edges, after_runs }) {
       const { error } = await supabase.from('runs')
-        .insert({ id, name: name || '', status: status || 'running', nodes, edges });
+        .insert({ id, name: name || '', status: status || 'running', nodes, edges, after_runs: after_runs ?? [] });
       if (error) fail('Failed to create run', error);
+    },
+
+    /** See the LAN backend: judged by open tasks, oldest run first. */
+    async listOpenRunsOnDevices(deviceIds) {
+      if (!deviceIds.length) return [];
+      const { data, error } = await supabase.from('run_tasks')
+        .select('run_id, runs(name, created_at)')
+        .in('device_id', deviceIds).in('status', ['pending', 'blocked', 'queued', 'running']);
+      if (error) fail('Failed to list open runs', error);
+      const byRun = new Map();
+      for (const t of data || []) {
+        const e = byRun.get(t.run_id) || { id: t.run_id, name: t.runs?.name || '', open_tasks: 0, created_at: t.runs?.created_at || '' };
+        e.open_tasks += 1;
+        byRun.set(t.run_id, e);
+      }
+      return [...byRun.values()].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    },
+
+    async runsHaveOpenTasks(runIds) {
+      if (!runIds.length) return false;
+      const { data, error } = await supabase.from('run_tasks').select('node_id')
+        .in('run_id', runIds).in('status', ['pending', 'blocked', 'queued', 'running']).limit(1);
+      if (error) fail('Failed to check earlier runs', error);
+      return (data || []).length > 0;
+    },
+
+    async listQueuedRuns() {
+      const { data, error } = await supabase.from('runs')
+        .select('id, name, after_runs').eq('status', 'queued').order('created_at', { ascending: true });
+      if (error) fail('Failed to list queued runs', error);
+      return (data || []).map((r) => ({ ...r, after_runs: r.after_runs || [] }));
+    },
+
+    async updateRunStatusFrom(runId, fromStatus, toStatus) {
+      const { data, error } = await supabase.from('runs')
+        .update({ status: toStatus, updated_at: nowIso() }).eq('id', runId).eq('status', fromStatus).select('id');
+      if (error) fail(`Failed to move run ${runId} ${fromStatus}->${toStatus}`, error);
+      return (data || []).length > 0;
     },
 
     async getRun(runId) {
@@ -236,16 +296,16 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listRecentTasks(limit) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, device_id, status, members, progress, updated_at, edge_run_id:result->>edgeRunId')
+        .select('run_id, node_id, device_id, status, members, progress, command, updated_at, repeat_total, repeat_done, not_before, edge_run_id:result->>edgeRunId, runs(status)')
         .order('updated_at', { ascending: false })
         .limit(limit);
       if (error) fail('Failed to fetch run tasks', error);
-      return (data || []).map(withMembers);
+      return (data || []).map(({ runs, ...t }) => withMembers({ ...t, run_status: runs?.status || null }));
     },
 
     async listTasksByStatus(status) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress').eq('status', status)
+        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress, repeat_done').eq('status', status)
         .order('updated_at', { ascending: true });
       if (error) fail(`Failed to fetch ${status} tasks`, error);
       return (data || []).filter((t) => isDue(t));
@@ -309,10 +369,36 @@ function createSupabaseStore(url, serviceRoleKey) {
       return (data || []).length > 0;
     },
 
+    /** See the LAN backend: taken only while the task is still stopped on the named pause. */
+    async setTaskCommand(runId, nodeId, command) {
+      const { data, error } = await supabase.from('run_tasks')
+        .update({ command, updated_at: nowIso() })
+        .eq('run_id', runId).eq('node_id', nodeId).eq('status', 'running')
+        .eq('progress->>pause', command.pause)
+        .select('node_id');
+      if (error) fail(`Failed to record the decision for ${runId}/${nodeId}`, error);
+      return (data || []).length > 0;
+    },
+
+    async listTaskCommands() {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('run_id, node_id, device_id, status, progress, command')
+        .not('command', 'is', null);
+      if (error) fail('Failed to fetch pending decisions', error);
+      return data || [];
+    },
+
+    async updateTaskCommand(runId, nodeId, command) {
+      const { error } = await supabase.from('run_tasks')
+        .update({ command: command || null }).eq('run_id', runId).eq('node_id', nodeId);
+      if (error) fail(`Failed to update the decision for ${runId}/${nodeId}`, error);
+    },
+
     async updateTaskStatusFrom(runId, nodeId, fromStatus, toStatus, extra) {
       const patch = { status: toStatus, updated_at: nowIso() };
-      // A dispatch starts the task afresh, so the previous occurrence's progress must not show.
-      if (extra && extra.dispatched) { patch.dispatched_at = nowIso(); patch.progress = null; }
+      // A dispatch starts the task afresh, so the previous occurrence's progress (and any
+      // decision about it) must not show.
+      if (extra && extra.dispatched) { patch.dispatched_at = nowIso(); patch.progress = null; patch.command = null; }
       const { data, error } = await supabase.from('run_tasks')
         .update(patch)
         .eq('run_id', runId)
@@ -331,7 +417,7 @@ function createSupabaseStore(url, serviceRoleKey) {
      */
     async scheduleTaskRepeat(runId, nodeId) {
       const { data: rows, error: readErr } = await supabase.from('run_tasks')
-        .select('repeat_every_ms, repeat_total, repeat_done')
+        .select('repeat_every_ms, repeat_total, repeat_done, dispatched_at')
         .eq('run_id', runId).eq('node_id', nodeId).limit(1);
       if (readErr) fail(`Failed to read repeat state for ${runId}/${nodeId}`, readErr);
       const row = (rows || [])[0];
@@ -343,7 +429,7 @@ function createSupabaseStore(url, serviceRoleKey) {
         .update({
           status: 'pending',
           repeat_done: row.repeat_done + 1,
-          not_before: new Date(Date.now() + (row.repeat_every_ms || 0)).toISOString(),
+          not_before: nextOccurrenceAt(row),
           updated_at: nowIso(),
         })
         .eq('run_id', runId).eq('node_id', nodeId)
@@ -352,6 +438,26 @@ function createSupabaseStore(url, serviceRoleKey) {
         .select('status');
       if (error) fail(`Failed to schedule repeat for ${runId}/${nodeId}`, error);
       return (data || []).length > 0;
+    },
+
+    // --- the Cloud library of distributed workflows (see the LAN backend) -------------------
+    async listCloudWorkflows() {
+      const { data, error } = await supabase.from('cloud_workflows')
+        .select('*').order('updated_at', { ascending: false });
+      if (error) fail('Failed to list the Cloud library', error);
+      return data || [];
+    },
+
+    async upsertCloudWorkflow({ name, description, nodes, edges, created_at, updated_at }) {
+      const row = { name, description: description || '', nodes: nodes ?? [], edges: edges ?? [], updated_at: updated_at || nowIso() };
+      // created_at only on first insert: an upsert that sent it would reset it on every save.
+      const { data: existing, error: readError } = await supabase.from('cloud_workflows')
+        .select('name').eq('name', name).maybeSingle();
+      if (readError) fail(`Failed to read library workflow ${name}`, readError);
+      const { error } = existing
+        ? await supabase.from('cloud_workflows').update(row).eq('name', name)
+        : await supabase.from('cloud_workflows').insert({ ...row, created_at: created_at || nowIso() });
+      if (error) fail(`Failed to save library workflow ${name}`, error);
     },
 
     // --- schedules -----------------------------------------------------------------------
@@ -556,6 +662,95 @@ function createSupabaseStore(url, serviceRoleKey) {
         storeLocation: data.store_location || '',
         lastSeen: data.last_seen,
       };
+    },
+
+    // --- sessions (src/lib/auth.ts) ---------------------------------------------------------
+
+    async createSession(row) {
+      const { error } = await supabase.from('sessions').insert({
+        id: row.id, user_id: row.user_id, email: row.email ?? null, name: row.name ?? null,
+        access_token: row.access_token ?? null, refresh_token: row.refresh_token ?? null,
+        token_expires_at: Number(row.token_expires_at) || 0, workspace_id: row.workspace_id,
+        workspaces: row.workspaces || [], workspaces_checked_at: row.workspaces_checked_at ?? null,
+        expires_at: row.expires_at, last_seen: nowIso(),
+      });
+      if (error) fail('Failed to create session', error);
+    },
+
+    async getSession(id) {
+      const { data, error } = await supabase.from('sessions').select('*').eq('id', id).maybeSingle();
+      if (error) fail('Failed to read session', error);
+      return data || null;
+    },
+
+    async updateSession(id, patch) {
+      const allowed = ['access_token', 'refresh_token', 'token_expires_at', 'workspace_id', 'workspaces',
+        'workspaces_checked_at', 'expires_at', 'last_seen', 'name', 'email'];
+      const fields = Object.fromEntries(Object.entries(patch || {}).filter(([k]) => allowed.includes(k)));
+      if (!Object.keys(fields).length) return;
+      const { error } = await supabase.from('sessions').update(fields).eq('id', id);
+      if (error) fail('Failed to update session', error);
+    },
+
+    async deleteSession(id) {
+      const { error } = await supabase.from('sessions').delete().eq('id', id);
+      if (error) fail('Failed to delete session', error);
+    },
+
+    async purgeExpiredSessions(nowIsoStr) {
+      const { error } = await supabase.from('sessions').delete().lt('expires_at', nowIsoStr);
+      if (error) fail('Failed to purge sessions', error);
+    },
+
+    // --- ownership (src/lib/workspace.ts) -----------------------------------------------------
+
+    async setOwner(kind, key, workspaceId) {
+      const { error } = await supabase.from('ownership')
+        .upsert({ kind, key: String(key), workspace_id: workspaceId }, { onConflict: 'kind,key' });
+      if (error) fail('Failed to record ownership', error);
+    },
+
+    async getOwner(kind, key) {
+      const { data, error } = await supabase.from('ownership').select('workspace_id')
+        .eq('kind', kind).eq('key', String(key)).maybeSingle();
+      if (error) fail('Failed to read ownership', error);
+      return data ? data.workspace_id : null;
+    },
+
+    async listOwned(kind, workspaceId) {
+      const { data, error } = await supabase.from('ownership').select('key').eq('kind', kind).eq('workspace_id', workspaceId);
+      if (error) fail('Failed to list owned', error);
+      return (data || []).map((r) => r.key);
+    },
+
+    async listOwnedKeys(kind) {
+      const { data, error } = await supabase.from('ownership').select('key').eq('kind', kind);
+      if (error) fail('Failed to list owned', error);
+      return (data || []).map((r) => r.key);
+    },
+
+    async deleteOwner(kind, key) {
+      const { error } = await supabase.from('ownership').delete().eq('kind', kind).eq('key', String(key));
+      if (error) fail('Failed to delete ownership', error);
+    },
+
+    // --- platforms: groups of edges ----------------------------------------------------------
+
+    async listPlatforms(workspaceId) {
+      const { data, error } = await supabase.from('edge_platforms').select('*').eq('workspace_id', workspaceId).order('name');
+      if (error) fail('Failed to list platforms', error);
+      return data || [];
+    },
+
+    async upsertPlatform({ id, workspace_id, name, device_ids }) {
+      const { error } = await supabase.from('edge_platforms')
+        .upsert({ id, workspace_id, name, device_ids: device_ids || [], updated_at: nowIso() }, { onConflict: 'id' });
+      if (error) fail('Failed to save platform', error);
+    },
+
+    async deletePlatform(id, workspaceId) {
+      const { error } = await supabase.from('edge_platforms').delete().eq('id', id).eq('workspace_id', workspaceId);
+      if (error) fail('Failed to delete platform', error);
     },
 
     close() { /* the supabase-js client holds no socket to release */ },

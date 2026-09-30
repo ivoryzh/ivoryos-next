@@ -253,6 +253,18 @@ def test_load_plugin_refs_reports_bad_entries():
     assert "not an ivoryos_edge.plugins.Plugin" in errors[0]["error"]
 
 
+def test_a_v1_flask_blueprint_plugin_is_named_as_such(tmp_path, monkeypatch):
+    # A stand-in for flask.Blueprint, so the test needs no flask: matched by class name and module.
+    (tmp_path / "legacy_view.py").write_text(
+        "Blueprint = type('Blueprint', (), {'__module__': 'flask.blueprints'})\n"
+        "legacy_bp = Blueprint()\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    plugins, errors = load_plugin_refs(["legacy_view:legacy_bp"])
+    assert plugins == []
+    assert "v1 plugin" in errors[0]["error"] and "docs/plugins.md" in errors[0]["error"]
+
+
 def test_a_failing_on_start_is_reported_and_the_plugin_still_served():
     app = FastAPI()
     plugin = Plugin("Broken")

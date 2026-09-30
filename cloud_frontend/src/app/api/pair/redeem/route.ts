@@ -124,6 +124,9 @@ export async function POST(req: Request) {
     }
 
     await store.finishPairingCode(code, deviceId, 'redeemed');
+    // The device joins the workspace whose person made the code (pair/new).
+    const workspace = await store.getOwner('pairing', code);
+    if (workspace) await store.setOwner('device', deviceId, workspace);
 
     return NextResponse.json({
       token,

@@ -111,6 +111,10 @@ function loadProfiles(home) {
             minimizeToTray: stored.minimizeToTray !== false,
             closeToTray: stored.closeToTray !== false,
             trayHintShown: !!stored.trayHintShown,
+            // One theme for the launcher, every deck's page and Cloud (see main.js, nativeTheme).
+            theme: ['light', 'dark'].includes(stored.theme) ? stored.theme : 'system',
+            // Automation Hub items starred for quick access, per account: {accountId: ['module:12', ...]}.
+            starred: stored.starred && typeof stored.starred === 'object' ? stored.starred : {},
             profiles: stored.profiles.map((p) => withDefaults(home, p)),
         };
     }
@@ -123,11 +127,28 @@ function loadProfiles(home) {
     return initial;
 }
 
+/**
+ * rename(), retried briefly. On Windows a file another program has just opened -- antivirus
+ * scanning it, the search indexer -- refuses to be replaced for a moment (EPERM / EBUSY / EACCES),
+ * and failing then would lose the save.
+ */
+function replaceFile(tmp, target) {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            fs.renameSync(tmp, target);
+            return;
+        } catch (e) {
+            if (attempt >= 10 || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) throw e;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
+        }
+    }
+}
+
 function saveProfiles(home, store) {
     fs.mkdirSync(home, { recursive: true });
     const tmp = `${profilesFile(home)}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ version: 1, ...store }, null, 2));
-    fs.renameSync(tmp, profilesFile(home));
+    replaceFile(tmp, profilesFile(home));
 }
 
 /**
@@ -179,7 +200,7 @@ function writeDeckFile(file, deck) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ format: DECK_FORMAT, ...deck }, null, 2));
-    fs.renameSync(tmp, file); // never leave a half-written deck behind
+    replaceFile(tmp, file); // never leave a half-written deck behind
 }
 
 module.exports = {

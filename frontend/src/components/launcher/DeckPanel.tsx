@@ -11,13 +11,17 @@ import { Button, cardClass } from './ui';
 type LoadState = { loaded: Set<string>; errors: Record<string, string> } | null;
 
 /** One deck profile's instruments: what is on it, whether each loaded, and how to change it. */
-export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade }: {
+export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpenProfile, browsing, setBrowsing }: {
   api: DesktopApi; profile: Profile; hubUrl: string; pro: boolean; onUpgrade: () => void;
+  /** Show another profile, e.g. the deck a Hub platform was just installed as. */
+  onOpenProfile: (id: string) => void;
+  /** Whether the Hub browser is open: owned by the launcher so its sidebar can open it too. */
+  browsing: boolean;
+  setBrowsing: (open: boolean) => void;
 }) {
   const [deck, setDeck] = useState<Deck | null>(null);
   const [load, setLoad] = useState<LoadState>(null);
   const [editing, setEditing] = useState<DeckInstrument | null | 'new'>(null);
-  const [browsing, setBrowsing] = useState(false);
   const [seed, setSeed] = useState<InstrumentSeed | null>(null);
   const running = profile.status.state === 'running';
 
@@ -116,7 +120,7 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade }: {
         <HubBrowser
           api={api} profileId={profile.id} profileName={profile.name} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade}
           onPrivatePicked={s => { refresh(); setSeed(s); setEditing('new'); }}
-          onClose={() => setBrowsing(false)} onAdded={refresh}
+          onClose={() => setBrowsing(false)} onAdded={refresh} onOpenProfile={onOpenProfile}
         />
       )}
     </div>

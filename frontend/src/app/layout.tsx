@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { Inter } from 'next/font/google';
 import GlobalQueueBar from '@/components/GlobalQueueBar';
 import PluginPanelHost from '@/components/PluginPanel';
+import { ThemeSync } from '@ivoryos/shared-ui';
 import "./globals.css";
 
 const geistSans = Geist({
@@ -29,6 +30,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className={inter.className}>
+        {/* One theme for every page, the same one the desktop app and Cloud show. */}
+        <ThemeSync />
         {/* Around the pages, not inside one: a plugin panel stays mounted while you navigate. */}
         <PluginPanelHost>{children}</PluginPanelHost>
         <GlobalQueueBar />

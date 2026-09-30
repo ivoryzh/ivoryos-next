@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { isOwned } from '@/lib/workspace';
 import { ACTIVE_TASK_STATUSES } from '@/lib/dag';
 
 export const dynamic = 'force-dynamic';
@@ -12,10 +14,11 @@ export const dynamic = 'force-dynamic';
 // IS its MQTT client id, /api/pair/new then refuses to re-pair under that name (409), so a failed
 // attempt made its own name unusable with no supported way to reclaim it.
 //
-// NOTE: unauthenticated, like the rest of this API — Cloud has no user accounts yet (see
-// AGENTS.md). That is a pre-existing gap this route joins rather than widens, but it is worth
-// stating plainly that this one deletes.
+// Only a device of the signed-in workspace (lib/workspace.ts).
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
   try {
     const { id } = await params;
     const deviceId = decodeURIComponent(id || '').trim();
@@ -23,6 +26,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
       return NextResponse.json({ error: 'A device id is required.' }, { status: 400 });
     }
 
+    if (!(await isOwned('device', deviceId, ws))) {
+      return NextResponse.json({ error: `No device named "${deviceId}" is registered.` }, { status: 404 });
+    }
     const store = getStore();
 
     // Removing a device mid-run would strand the run: its tasks stay queued against a device that
@@ -41,6 +47,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     if (!removed) {
       return NextResponse.json({ error: `No device named "${deviceId}" is registered.` }, { status: 404 });
     }
+    await store.deleteOwner('device', deviceId);
 
     // The device itself is not told anything: there is no cloud->edge "you are unpaired" message,
     // and inventing one here would be a protocol change, not a delete. A device that is still

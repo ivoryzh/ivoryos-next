@@ -30,6 +30,7 @@ const {
     TERMINAL_TASK_STATUSES, CLOUD_DEVICE_ID, computeAdvance, evaluateCondition,
 } = require('./src/lib/dag.js');
 const { runContext } = require('./src/lib/cloudLogic.js');
+const { commandStep } = require('./src/lib/taskCommands.js');
 const { getStore, resolveBrokerUrl } = require('./src/lib/store');
 const { startEmbeddedBroker } = require('./src/lib/embedded-broker.js');
 
@@ -239,8 +240,11 @@ async function handleTaskStatus(payload) {
     // directly: a run that genuinely completed on the edge showed completed->running in this log,
     // stale "running" landing late during a reconnect). Once a task reaches a terminal status,
     // refuse to move it backwards — this simply matches zero rows if the task already finished.
+    // A run that finished only after retries or a skipped failure says so (edge run_issues); kept
+    // in progress so the canvas can tell it from a clean finish. Omitted, progress is left alone.
+    const issues = payload.issues && typeof payload.issues === 'object' ? payload.issues : null;
     const moved = await store.updateTaskStatusIfNotTerminal(
-        runId, nodeId, status, TERMINAL_TASK_STATUSES,
+        runId, nodeId, status, TERMINAL_TASK_STATUSES, issues ? { state: status, issues } : undefined,
     );
     if (!moved) {
         console.log(`[Daemon] Ignored stale '${status}' for already-finished task ${runId}/${nodeId}`);
@@ -270,7 +274,9 @@ async function handleTaskStatus(payload) {
         }
     }
 
-    if (status === 'completed' || status === 'error') {
+    // 'cancelled' too: a run stopped from Cloud while it waited for input ends that way, and so
+    // does one cancelled at the bench. Without advancing, the run sat at 'running' forever.
+    if (status === 'completed' || status === 'error' || status === 'cancelled') {
         await advanceRun(runId);
     }
 }
@@ -410,9 +416,12 @@ async function dispatchTask(task) {
         : [block.instrument, block.method].filter(Boolean).join('.');
     let runName = '';
     try { runName = (await store.getRun(task.run_id))?.name || ''; } catch { /* the edge has a fallback */ }
+    // A paced Iterate node stores one run per row; this firing sends its own row only.
+    const paced = task.run && Array.isArray(task.run.paced) ? task.run.paced : null;
+    const run = paced ? paced[Math.min(Number(task.repeat_done) || 0, paced.length - 1)] : task.run;
     const execPayload = JSON.stringify(
-        task.run
-            ? { run: task.run, runId: task.run_id, nodeId: task.node_id }
+        run
+            ? { run, runId: task.run_id, nodeId: task.node_id }
             : {
                 block: task.block, runId: task.run_id, nodeId: task.node_id,
                 name: [runName, stepLabel].filter(Boolean).join(' · ') || undefined,
@@ -705,6 +714,61 @@ async function failLostTasks() {
         }
     }
 }
+
+// --- Runs queued "after current work" -----------------------------------------------------
+// Submitted with everything blocked and the run 'queued' (see the run route). Started here the
+// moment every run it waits for has nothing open -- claimed with a compare-and-set, then walked
+// forward by the ordinary advanceRun, which releases the steps that depend on nothing. Judged by
+// open tasks rather than run status, so a run left 'running' by an old failure cannot hold the
+// queue forever.
+async function startQueuedRuns() {
+    for (const run of await store.listQueuedRuns()) {
+        if (await store.runsHaveOpenTasks(run.after_runs || [])) continue;
+        if (!(await store.updateRunStatusFrom(run.id, 'queued', 'running'))) continue;
+        console.log(`[Daemon] Run ${run.id} (${run.name}) starts: the work it was queued behind is done.`);
+        await advanceRun(run.id);
+    }
+}
+setInterval(() => startQueuedRuns().catch(e => console.error('[Daemon] Starting queued runs failed:', e.message)), 1000);
+
+// --- Decisions about a task a device has stopped on ------------------------------------------
+// An answer to a question, or retry/skip/stop on a failed step, chosen in Cloud (the control
+// route stores it on the task). Sent on {prefix}/{device}/task-control, not retained: a retained
+// decision would be replayed to the device on every reconnect. It is kept until the device's own
+// progress shows the pause has gone, and re-sent while it has not (src/lib/taskCommands.js); the
+// device ignores one whose pause is no longer current, so a re-send cannot apply twice.
+async function sendTaskCommands() {
+    if (!client.connected) return;
+    for (const task of await store.listTaskCommands()) {
+        const device = String(task.device_id || '');
+        const state = deviceState.get(device);
+        const up = !!state && state.online && Date.now() - state.at <= HEARTBEAT_STALE_MS;
+        const step = commandStep(task, up);
+        if (step === 'clear') {
+            await store.updateTaskCommand(task.run_id, task.node_id, null);
+            continue;
+        }
+        if (step !== 'send') continue;
+        const cmd = task.command;
+        const payload = JSON.stringify({
+            runId: task.run_id, nodeId: task.node_id, pause: cmd.pause, action: cmd.action, value: cmd.value,
+        });
+        await new Promise((resolve) => {
+            client.publish(`${TOPIC_PREFIX}/${device}/task-control`, payload, { qos: 1 }, async (err) => {
+                if (err) {
+                    console.error(`[Daemon] Failed to send '${cmd.action}' for ${task.run_id}/${task.node_id}:`, err.message);
+                } else {
+                    await store.updateTaskCommand(task.run_id, task.node_id, {
+                        ...cmd, state: 'sent', sent_at: new Date().toISOString(), attempts: (cmd.attempts || 0) + 1,
+                    });
+                    console.log(`[Daemon] Sent '${cmd.action}' for ${task.run_id}/${task.node_id} to ${device}.`);
+                }
+                resolve();
+            });
+        });
+    }
+}
+setInterval(() => sendTaskCommands().catch(e => console.error('[Daemon] Sending decisions failed:', e.message)), 1000);
 
 // --- What Cloud is holding for each device -------------------------------------------------
 // Tasks are never queued on a device (see dispatchTask), so a bench operator has no way to know

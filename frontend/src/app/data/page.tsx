@@ -2,11 +2,10 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Database, Download, Sun, Moon, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { Database, Download, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import {
-  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf,
-} from '@ivoryos/shared-ui';
+  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf, issuesLabel, useDocumentTheme } from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned, so unwrap that one key before handing the value to ResultView — otherwise every result
@@ -14,8 +13,13 @@ import {
 const stepResultValue = (outputs: unknown): unknown => {
   if (outputs === null || outputs === undefined) return outputs;
   if (typeof outputs === 'object' && !Array.isArray(outputs)) {
-    const keys = Object.keys(outputs as Record<string, unknown>);
-    if (keys.length === 1 && keys[0] === 'result') return (outputs as Record<string, unknown>).result;
+    // `attempts` is the step's record of failures before it succeeded (shown on the row, see
+    // StepList), not part of what it returned.
+    const { attempts: _attempts, ...rest } = outputs as Record<string, unknown>;
+    const keys = Object.keys(rest);
+    if (keys.length === 0) return undefined;
+    if (keys.length === 1 && keys[0] === 'result') return rest.result;
+    return rest;
   }
   return outputs;
 };
@@ -241,6 +245,15 @@ const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
               {hasMore && !step.error && (isOpen
                 ? <ChevronUp className="w-3 h-3 text-gray-400 shrink-0" />
                 : <ChevronDown className="w-3 h-3 text-gray-400 shrink-0" />)}
+              {/* Failed attempts before this outcome: retried, skipped or stopped at. */}
+              {(step.result?.attempts?.length || 0) > 0 && (
+                <span
+                  className="shrink-0 rounded px-1 text-[10px] font-sans font-semibold text-amber-700 bg-amber-50 dark:text-amber-300 dark:bg-amber-500/10"
+                  title={step.result.attempts.map((a: any, n: number) => `Attempt ${n + 1} failed${a.resolution ? ` (${a.resolution})` : ''}: ${a.error}`).join('\n')}
+                >
+                  failed ×{step.result.attempts.length}
+                </span>
+              )}
               <span className="text-[10px] text-gray-400 w-12 text-right shrink-0">{secondsBetween(step.start_time, step.end_time)}</span>
             </div>
             {step.error && (
@@ -651,7 +664,7 @@ export default function DataPage() {
   const [query, setQuery] = useState('');
   const [listLoaded, setListLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [selectedRun, setSelectedRun] = useState<any>(null);
   const [plots, setPlots] = useState<Record<string, string> | null>(null);
@@ -700,11 +713,6 @@ export default function DataPage() {
   }, [selectedId]);
 
   useEffect(() => {
-    // Theme init
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
@@ -764,13 +772,6 @@ export default function DataPage() {
     return () => { cancelled = true; };
   }, [selectedRun?.id, selectedRun?.type]);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const deleteRun = async (run: any) => {
     setIsDeletingRun(true);
@@ -948,7 +949,7 @@ export default function DataPage() {
         </div>
       )}
       {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden min-w-0">
@@ -1004,7 +1005,12 @@ export default function DataPage() {
                 >
                   <div className="flex justify-between items-center mb-1 gap-2">
                     <span className="flex items-center gap-1.5 min-w-0">
-                      <span title={run.status} className={`w-1.5 h-1.5 rounded-full shrink-0 ${LIST_DOT[run.status] || 'bg-gray-300 dark:bg-gray-600'}`} />
+                      {/* Completed, but only after retries or skipping a failed step: not the
+                          same outcome as a clean run, so not the same green. */}
+                      <span
+                        title={run.issues ? `${run.status} · ${issuesLabel(run.issues)}` : run.status}
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${run.status === 'completed' && run.issues ? 'bg-amber-500' : LIST_DOT[run.status] || 'bg-gray-300 dark:bg-gray-600'}`}
+                      />
                       <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate">{String(run.name).split(' - ')[0]}</span>
                     </span>
                     <div className="flex items-center gap-1.5 shrink-0">

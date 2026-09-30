@@ -2,11 +2,11 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect, useRef } from 'react';
-import { Sun, Moon, Info, Search, RotateCw, AlertTriangle } from 'lucide-react';
+import { Info, Search, RotateCw, AlertTriangle } from 'lucide-react';
 import { restartEdge } from '@/restartEdge';
 import Sidebar from '@/components/Sidebar';
 import DeckHistory from '@/components/DeckHistory';
-import { ExtraArguments, ResultView, confirmDialog } from '@ivoryos/shared-ui';
+import { ExtraArguments, ResultView, confirmDialog, useDocumentTheme } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
 type LogEntry = {
@@ -21,7 +21,7 @@ export default function InstrumentsPage() {
   const [formValues, setFormValues] = useState<Record<string, any>>({});
   const [executing, setExecuting] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<any[]>([]);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [activeTab, setActiveTab] = useState<string>('');
   // The log used to be a fixed 160px strip, which is fine for "Executed successfully" and far too
   // short for a structured result — the thing you ran the method to read scrolled inside a box two
@@ -41,11 +41,6 @@ export default function InstrumentsPage() {
   const [busyState, setBusyState] = useState<{ running: boolean; paused: boolean }>({ running: false, paused: false });
 
   useEffect(() => {
-    // Theme init
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
@@ -73,13 +68,6 @@ export default function InstrumentsPage() {
     return () => ws.close();
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const handleInputChange = (instrument: string, method: string, param: string, value: any) => {
     const key = `${instrument}.${method}`;
@@ -301,7 +289,7 @@ export default function InstrumentsPage() {
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
       {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-100 dark:bg-transparent">

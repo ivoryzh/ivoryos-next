@@ -68,7 +68,11 @@ export type UpdateStatus = {
 };
 
 export type GitProvider = 'github' | 'gitlab';
-export type GitConnection = { provider: GitProvider; label: string; tokenHelp: string; scopes: string; connected: boolean; login: string | null; host: string };
+export type GitConnection = {
+  provider: GitProvider; label: string; tokenHelp: string; scopes: string; connected: boolean; login: string | null; host: string;
+  /** Signing in from the browser is set up for this provider (an OAuth app id is configured). */
+  oauth: boolean;
+};
 export type GitRepo = { id: string; name: string; description: string | null; private: boolean; defaultBranch: string; updatedAt: string; url: string };
 export type DriverScan = {
   distribution?: string; version?: string; modules?: string[];
@@ -83,6 +87,8 @@ export type Snapshot = {
   platform: string; account: AccountInfo; update: UpdateStatus; autoUpdate: boolean; secretsPersist: boolean;
   /** Windows/Linux: whether a tray icon exists, and what minimizing / closing the window do. */
   tray: { available: boolean; minimizeToTray: boolean; closeToTray: boolean };
+  /** The app's one theme: every page it shows (launcher, decks, Cloud) follows it. */
+  theme: 'system' | 'light' | 'dark';
 };
 
 /** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
@@ -109,7 +115,14 @@ export type DeckInstrument = {
   hub?: { moduleId: number | string; name: string; init_args: ArgDef[]; connection: string[] };
 };
 
-export type Deck = { format?: string; name?: string; packages?: string[]; paths?: string[]; instruments?: DeckInstrument[] };
+export type Deck = { format?: string; name?: string; packages?: string[]; paths?: string[]; instruments?: DeckInstrument[]; plugins?: string[] };
+
+/**
+ * Who may see a Hub row. `private`: its contributor; `org`: every member of its organization. The
+ * Hub decides (row-level security); the launcher only labels what it was given.
+ */
+export type Visibility = 'public' | 'private' | 'org';
+type HubOwned = { visibility?: Visibility | null; org_id?: string | null; organizations?: { name: string } | null };
 
 export type HubModule = {
   id: number;
@@ -123,7 +136,55 @@ export type HubModule = {
   init_args?: ArgDef[] | null;
   is_tested_with_ivoryos?: boolean | null;
   devices?: { name?: string; vendor?: string; category?: string | null; image_url?: string | null } | null;
-};
+} & HubOwned;
+
+/** A plugin's deck entry, or why it cannot have one (a v1 Flask blueprint, which Core cannot run). */
+export type PluginEntry = { packages: string[]; plugins: string[]; blocked: null } | { packages: []; plugins: []; blocked: string };
+
+export type HubPlugin = {
+  id: number;
+  name: string;
+  description?: string | null;
+  pip_name: string;
+  import_path?: string | null;
+  module_name?: string | null;
+  /** 'v1': a legacy Flask blueprint. 'v2': an ivoryos_edge Plugin. Only v2 can be added to a deck. */
+  plugin_api?: 'v1' | 'v2' | null;
+  is_agnostic?: boolean | null;
+  module_ids?: number[] | null;
+  platform_ids?: number[] | null;
+  screenshot_urls?: string[] | null;
+  entry: PluginEntry;
+} & HubOwned;
+
+export type HubTemplate = {
+  id: number;
+  title: string | null;
+  description?: string | null;
+  module_ids: number[];
+  platform_id?: number | null;
+  /** The name its workflow was saved under, used for the library. */
+  workflowName: string;
+  /** Instrument names its steps call (Flow Control aside). */
+  instruments: string[];
+  steps: { prep: number; script: number; cleanup: number };
+  /** The body the edge saves; only on /templates/[id]. */
+  workflow?: Record<string, unknown>;
+} & HubOwned;
+
+export type HubPlatform = {
+  id: number;
+  name: string;
+  description?: string | null;
+  image_url?: string | null;
+  demo_url?: string | null;
+  /** Module ids on the list; full modules on /platforms/[id]. */
+  modules: number[] | HubModule[];
+  /** On /platforms/[id]: modules in the platform the caller may not see (someone's private driver). */
+  hiddenModules?: number[];
+  plugins?: HubPlugin[];
+  templates?: HubTemplate[];
+} & HubOwned;
 
 export interface DesktopApi {
   isDesktop: true;
@@ -143,6 +204,10 @@ export interface DesktopApi {
   showTab(id: string | null): Promise<void>;
   closeTab(id: string): Promise<void>;
   setTabBarHeight(px: number): Promise<void>;
+  /** Where edge and Cloud tabs start from the left: the sidebar's width, 0 when it is hidden. */
+  setSidebarWidth(px: number): Promise<void>;
+  /** Ctrl+B pressed in an edge or Cloud tab (the page itself does not see the key there). */
+  onToggleSidebar(cb: () => void): () => void;
   onTabs(cb: (tabs: Tabs) => void): () => void;
   log(id: string): Promise<string>;
   copy(text: string): Promise<void>;
@@ -153,7 +218,9 @@ export interface DesktopApi {
   saveInstrument(id: string, originalName: string | null, entry: DeckInstrument): Promise<Deck>;
   removeInstrument(id: string, name: string): Promise<Deck>;
   setInstrumentEnabled(id: string, name: string, enabled: boolean): Promise<Deck>;
-  install(id: string, manifest: { packages: string[]; instruments: DeckInstrument[] }): Promise<{ added: string[]; replaced: string[] }>;
+  install(id: string, manifest: { name?: string; packages: string[]; instruments: DeckInstrument[]; plugins?: string[] }): Promise<{ added: string[]; replaced: string[]; pluginsAdded?: string[] }>;
+  /** Add workflows to a profile's library without replacing any; a name in use gets a number. */
+  addWorkflows(id: string, workflows: { name: string; body: Record<string, unknown> }[]): Promise<{ requested: string; saved: string }[]>;
   installFromFile(): Promise<void>;
   freeName(id: string, suggestion: string): Promise<string>;
   setHubUrl(url: string): Promise<void>;
@@ -177,6 +244,15 @@ export interface DesktopApi {
     name: string;
     connection: { type?: string; port?: string; ip?: string; networkPort?: string; args?: Record<string, unknown> };
   }): Promise<{ instrument: DeckInstrument; packages: string[]; warnings: string[] }>;
+  hubPlatforms(): Promise<{ platforms: HubPlatform[] }>;
+  hubPlatform(id: number): Promise<{ platform: HubPlatform & { modules: HubModule[] } }>;
+  hubPlugins(): Promise<{ plugins: HubPlugin[] }>;
+  hubPlugin(id: number): Promise<{ plugin: HubPlugin }>;
+  hubTemplates(): Promise<{ templates: HubTemplate[] }>;
+  hubTemplate(id: number): Promise<{ template: HubTemplate & { workflow: Record<string, unknown> } }>;
+  /** Starred Hub items of the signed-in account: 'module:12', 'platform:4', 'plugin:3', 'template:9'. */
+  hubStarred(): Promise<string[]>;
+  hubStar(key: string, on: boolean): Promise<string[]>;
 
   account(): Promise<AccountInfo>;
   signIn(email: string, password: string): Promise<AccountInfo>;
@@ -186,7 +262,7 @@ export interface DesktopApi {
   signInWith(provider: 'github' | 'google'): Promise<AccountInfo>;
   cancelSignIn(): Promise<void>;
   signOut(): Promise<void>;
-  updateProfile(fields: { full_name?: string; lab_info?: string }): Promise<AccountInfo>;
+  updateAccount(fields: { full_name?: string; lab_info?: string }): Promise<AccountInfo>;
   changePassword(password: string): Promise<void>;
   /** Preview only: no payment is taken (desktop/src/account.js). */
   setPlan(plan: Plan): Promise<AccountInfo>;
@@ -194,6 +270,11 @@ export interface DesktopApi {
 
   gitList(): Promise<GitConnection[]>;
   gitConnect(provider: GitProvider, token: string, host?: string): Promise<GitConnection[]>;
+  /** Start signing in: the app opens the approval page; show `userCode` for the person to enter. */
+  gitSignInStart(provider: GitProvider, host?: string): Promise<{ userCode: string; verificationUri: string; expiresIn: number }>;
+  /** Resolves once approved in the browser (or rejects: declined, expired, cancelled). */
+  gitSignInFinish(provider: GitProvider): Promise<GitConnection[]>;
+  gitSignInCancel(provider: GitProvider): Promise<void>;
   gitDisconnect(provider: GitProvider): Promise<GitConnection[]>;
   gitRepos(provider: GitProvider, query?: string): Promise<GitRepo[]>;
   gitImport(profileId: string, provider: GitProvider, repoId: string, ref?: string): Promise<GitImport>;
@@ -206,6 +287,11 @@ export interface DesktopApi {
   setAutoUpdate(on: boolean): Promise<void>;
   setWindowPref(key: 'minimizeToTray' | 'closeToTray', on: boolean): Promise<void>;
   revealData(): Promise<void>;
+  setTheme(theme: 'system' | 'light' | 'dark'): Promise<void>;
+  /** The sidebar's order, dragged; ids not listed keep their place after these. */
+  reorderProfiles(ids: string[]): Promise<void>;
+  /** Reload the active deck or Cloud tab. */
+  reloadTab(): Promise<void>;
 }
 
 export type PythonInfo = { ok: boolean; python: string; version?: string; edge?: string | null; prefix?: string; error?: string };

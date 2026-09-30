@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { experimentName, workflowSourcesFor } from '@/lib/runSources';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { ownedKeys, setOwner } from '@/lib/workspace';
 import { planRun, CLOUD_DEVICE_ID } from '@/lib/dag';
 import { buildRunTasks, resolveGraphForDispatch } from '@/lib/planTasks';
 
@@ -23,6 +25,10 @@ import { buildRunTasks, resolveGraphForDispatch } from '@/lib/planTasks';
 // payload that is going to reach real hardware should be validated while someone is still looking
 // at the screen that produced it.
 export async function POST(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
+
   try {
     const body = await req.json();
     const nodes: any[] = body.nodes || [];
@@ -48,6 +54,12 @@ export async function POST(req: Request) {
     // down when a schedule is created says nothing about when it next fires.)
     const store = getStore();
     const targets = new Set(tasks.map((t: any) => String(t.device_id)).filter((d: string) => d && d !== CLOUD_DEVICE_ID));
+    // A run may only move this workspace's devices.
+    const mine = await ownedKeys('device', ws);
+    const foreign = Array.from(targets).filter((id) => !mine.has(id));
+    if (foreign.length) {
+      return NextResponse.json({ error: `${foreign.join(', ')} ${foreign.length === 1 ? 'is' : 'are'} not in this workspace.` }, { status: 403 });
+    }
     if (targets.size) {
       const devices = await store.listDevices() as any[];
       const offline = Array.from(targets).filter(id =>
@@ -66,18 +78,47 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: built.problems.join('\n') }, { status: 400 });
     }
 
+    // "After current work": wait for every run that has work open on these devices now, rather
+    // than slotting into their gaps (a repeat's 5-minute wait leaves the device idle, and a run
+    // started now would use it). Everything starts blocked and the run 'queued'; daemon.js
+    // starts it -- releasing its first steps through the ordinary advanceRun -- once those runs
+    // have nothing open. Asked for with nothing ahead, it is simply a run that starts now.
+    const ahead = body.after ? await store.listOpenRunsOnDevices(Array.from(targets)) as any[] : [];
+    const queued = ahead.length > 0;
+
     await store.insertRun({
       id: runId,
       name,
-      status: 'running',
+      status: queued ? 'queued' : 'running',
       // The resolved graph, so the stored run records what ran rather than what was drawn.
       nodes: resolved,
       edges,
+      after_runs: ahead.map((r) => r.id),
     });
 
-    if (built.rows.length > 0) await store.insertTasks(built.rows);
+    await setOwner('run', runId, ws);
+    const rows = queued ? built.rows.map((r: any) => ({ ...r, status: 'blocked' })) : built.rows;
+    if (rows.length > 0) await store.insertTasks(rows);
 
-    return NextResponse.json({ runId });
+    return NextResponse.json({ runId, queuedAfter: ahead.map((r) => r.name || r.id) });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+// What is already open on these devices: the runs a new one would wait for if queued "after
+// current work". The canvas asks before dispatching, and only offers the choice when this is
+// not empty. GET /api/cloud-workflows/runs?devices=a,b
+export async function GET(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
+  try {
+    const runs = await ownedKeys('run', ws);
+    const devices = (new URL(req.url).searchParams.get('devices') || '')
+      .split(',').map((d) => d.trim()).filter((d) => d && d !== CLOUD_DEVICE_ID);
+    const ahead = (await getStore().listOpenRunsOnDevices(devices) as any[]).filter((r) => runs.has(String(r.id)));
+    return NextResponse.json({ ahead: ahead.map((r) => ({ id: r.id, name: r.name || r.id, openTasks: r.open_tasks })) });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

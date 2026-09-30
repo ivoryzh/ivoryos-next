@@ -1,7 +1,11 @@
 "use client";
 import { Settings2, Key, Radio } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { ThemeChoice, inDesktopApp, useThemePreference } from '@ivoryos/shared-ui';
 export default function SettingsPage() {
+  const [themePref, setThemePref] = useThemePreference();
+  const [desktop, setDesktop] = useState(false);
+  useEffect(() => { setDesktop(inDesktopApp()); }, []);
   const [clientId, setClientId] = useState('');
   const [isPairing, setIsPairing] = useState(false);
   const [pairError, setPairError] = useState('');
@@ -113,6 +117,18 @@ export default function SettingsPage() {
       <div className="pt-4 px-8 pb-8 max-w-4xl mx-auto w-full">
         <div className="glass-panel p-8 rounded-xl space-y-8" style={{ background: 'var(--panel-bg)', border: '1px solid var(--panel-border)' }}>
           
+          <section>
+            <h2 className="text-xl font-semibold mb-4 border-b pb-2" style={{ borderColor: 'var(--panel-border)' }}>Appearance</h2>
+            {desktop ? (
+              <p className="text-sm text-gray-500">Follows the IvoryOS app. Change it in the app&apos;s Settings.</p>
+            ) : (
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-sm text-gray-500">One theme for every page. System follows your computer.</p>
+                <ThemeChoice value={themePref} onChange={setThemePref} />
+              </div>
+            )}
+          </section>
+
           <section>
             <h2 className="text-xl font-semibold mb-4 border-b pb-2" style={{ borderColor: 'var(--panel-border)' }}>Global Orchestration</h2>
             <div className="space-y-4">

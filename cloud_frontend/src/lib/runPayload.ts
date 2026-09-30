@@ -22,7 +22,10 @@
 import {
   buildOptimizationParameters,
   buildSpreadsheetParameters,
+  chunkRowGroups,
   expandSpreadsheet,
+  groupSizeFor,
+  isRowActive,
   LIBRARY_INSTRUMENT,
   resolveFixedBlock,
   RunConfigError,
@@ -64,6 +67,9 @@ export interface NodeRunConfig {
    * Re-run this node on a fixed cadence within the run. Two devices on different timelines — one
    * every 20 minutes, one every 35 — is two nodes with different cadences in one graph, which is
    * the thing that is tedious to express as repeated triggering on a single edge.
+   *
+   * On an Iterate node only `everyMinutes` applies: one row -- or one batch, with a batch size --
+   * fires every N minutes (see `isPaced`).
    */
   schedule?: NodeCadence;
 }
@@ -131,6 +137,7 @@ export function validateNodeRunConfig(node: any, label: string): string[] {
       problems.push(`${label}: spreadsheet mode with no rows filled in.`);
       return problems;
     }
+
     rows.forEach((row, i) => {
       const missing = vars.filter((v) => isBlank(row[v]));
       if (missing.length) {
@@ -207,15 +214,52 @@ export interface EdgeRunPayload {
 }
 
 /**
+ * A paced Iterate node's payloads: one whole run per firing (a row, or a batch of rows).
+ * Sent one per firing. The daemon picks
+ * `paced[repeat_done]` at dispatch (see dispatchTask), so each firing carries only its own row --
+ * sending the whole list every time would multiply the message by the row count, and AWS IoT
+ * meters in 5 KB steps.
+ */
+export interface PacedRunPayload {
+  paced: EdgeRunPayload[];
+}
+
+export type NodeRunPayload = EdgeRunPayload | PacedRunPayload;
+
+/** The node with only these rows and no pacing: what one firing of a paced node runs. */
+function withRows(node: any, rows: SpreadsheetRow[]): any {
+  const config = runConfigOf(node);
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      runConfig: { ...config, spreadsheet: { ...(config.spreadsheet || {}), rows }, schedule: {} },
+    },
+  };
+}
+
+/**
  * Build the run payload for one node, or `null` when the node is a plain single step.
  *
  * `null` is not a failure — it means "this dispatches as the bare block it always did", which
  * keeps the common case off the wire at its original size. AWS IoT meters in 5KB increments, and
  * every ordinary instrument step would otherwise grow a run envelope around it for nothing.
  */
-export function buildNodeRun(node: any, runName: string, source?: WorkflowSource | null): EdgeRunPayload | null {
+export function buildNodeRun(node: any, runName: string, source?: WorkflowSource | null): NodeRunPayload | null {
   const mode = runModeOf(node);
   const block = blockOf(node);
+
+  if (isPaced(node)) {
+    // Each firing is exactly what the same rows would be unpaced: a saved workflow with a batch
+    // size walks its per-sample and batch steps over the group, a plain step runs the group's
+    // rows back to back.
+    const groups = firingGroupsOf(node);
+    const unit = firingUnitOf(node);
+    return {
+      paced: groups.map((rows, i) =>
+        buildNodeRun(withRows(node, rows), `${runName} · ${unit} ${i + 1} of ${groups.length}`, source) as EdgeRunPayload),
+    };
+  }
 
   if (mode === 'single' && iterationsOf(node) > 1) {
     return iteratedRun(node, block, runName, iterationsOf(node));
@@ -448,12 +492,41 @@ function phaseLink(block: any, params: Record<string, any>, phase: 'prep' | 'cle
 }
 
 /** Minutes -> milliseconds, or 0 when the node has no cadence set. */
-export function repeatIntervalMs(node: any): number {
-  // Once-mode only, matching the panel: a cadence left over from before a node was switched to
-  // Iterate or Optimize must not quietly re-run a whole campaign.
-  if (runModeOf(node) !== 'single') return 0;
+function everyMs(node: any): number {
   const every = Number(runConfigOf(node).schedule?.everyMinutes);
   return Number.isFinite(every) && every > 0 ? Math.round(every * 60_000) : 0;
+}
+
+/**
+ * An Iterate node set to fire one row every N minutes: each row is its own firing, spaced like a
+ * repeat, instead of all rows back to back in one run. What a flow rig stepping its pump rates
+ * every 10 minutes is -- the rows are the rates, and the spacing is the hold. One row, or no
+ * interval, or a batch size (which runs rows together), is not paced.
+ */
+export function isPaced(node: any): boolean {
+  return runModeOf(node) === 'spreadsheet' && everyMs(node) > 0 && firingGroupsOf(node).length > 1;
+}
+
+/**
+ * What one firing of a paced node runs: a batch of rows when a batch size is set, else one row.
+ * Cut by row POSITION with the same `chunkRowGroups` the table's "Batch N" labels come from, so a
+ * blank row in the middle never shifts which rows fire together (AGENTS.md section 8). A group
+ * that is blank end to end is dropped; blank rows inside a group are left out of its run.
+ */
+export function firingGroupsOf(node: any): SpreadsheetRow[][] {
+  const config = runConfigOf(node);
+  return chunkRowGroups(config.spreadsheet?.rows || [], groupSizeFor(config.spreadsheet?.batchSize))
+    .map((g) => g.rows.filter(isRowActive));
+}
+
+/** "batch" when rows fire in groups, "row" when one at a time. */
+export const firingUnitOf = (node: any): 'batch' | 'row' => (batchSizeOf(node) > 1 ? 'batch' : 'row');
+
+export function repeatIntervalMs(node: any): number {
+  // A cadence left over from before a node was switched to Optimize must not quietly re-run a
+  // whole campaign; on Iterate it paces the rows (isPaced).
+  if (runModeOf(node) === 'single') return everyMs(node);
+  return isPaced(node) ? everyMs(node) : 0;
 }
 
 /**
@@ -461,6 +534,7 @@ export function repeatIntervalMs(node: any): number {
  * one run with iterations (`iterationsOf`), not separate dispatches.
  */
 export function repeatTotal(node: any): number {
+  if (isPaced(node)) return firingGroupsOf(node).length;
   if (runModeOf(node) !== 'single' || repeatIntervalMs(node) === 0) return 0;
   const repeat = Number(runConfigOf(node).schedule?.repeat);
   return Number.isFinite(repeat) && repeat > 0 ? Math.floor(repeat) : 0;

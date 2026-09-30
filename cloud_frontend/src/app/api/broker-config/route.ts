@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getStore, resolveBrokerUrl } from '@/lib/store';
+import { authorize } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,6 +12,8 @@ export const dynamic = 'force-dynamic';
 // which reports the URL the daemon is really connected to — so the UI can tell "saved" apart
 // from "connected", which are not the same thing when the host is wrong.
 export async function GET() {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
   try {
     const stored = await getStore().getBrokerConfig();
     return NextResponse.json({
@@ -26,6 +29,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
   const body = await req.json().catch(() => null);
   const host = typeof body?.host === 'string' ? body.host.trim() : '';
   const port = Number(body?.port ?? 1883);

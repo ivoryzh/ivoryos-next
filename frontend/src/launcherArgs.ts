@@ -83,3 +83,13 @@ export function showLiteral(value: unknown): string {
   if (value === undefined) return '';
   return JSON.stringify(value);
 }
+
+/** Text settings left empty, by dotted name: they are left out of the constructor call. */
+export function emptyFields(defs: ArgDef[], values: FormValues, prefix = ''): string[] {
+  return defs.flatMap(def => {
+    const v = values[def.name];
+    if (def.type === 'object') return emptyFields(def.args || [], (v as FormValues) || {}, `${prefix}${def.name}.`);
+    if (def.type === 'bool') return [];
+    return v === undefined || v === null || String(v).trim() === '' ? [`${prefix}${def.name}`] : [];
+  });
+}

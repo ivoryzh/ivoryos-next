@@ -382,7 +382,7 @@ export default function RunConfigPanel({
                 )}
 
                 {node.mode === 'spreadsheet' && (
-                  <div className="space-y-2 px-4 py-3">
+                  <div>
                     <SpreadsheetTable
                       compact
                       idPrefix={`cloud-${node.id}`}
@@ -399,27 +399,59 @@ export default function RunConfigPanel({
                       onRemoveRow={(rowIndex) =>
                         onRowsChange(node.id, node.rows.filter((_, i) => i !== rowIndex))}
                     />
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                      {node.isWorkflow && (
-                        <>
-                          <span>batch size</span>
+                    {(() => {
+                      // "One row every N min": each row fires on its own, N minutes after the
+                      // previous one started -- a flow rig stepping pump rates, where the rows
+                      // are the rates and the spacing is the hold. Blank runs the rows back to
+                      // back in one run, as before.
+                      const every = node.schedule.everyMinutes;
+                      const paced = !isBlank(every) && Number(every) > 0;
+                      const size = Math.max(1, parseInt(String(node.batchSize || ''), 10) || 1);
+                      const batched = size > 1;
+                      const unit = batched ? 'batch' : 'row';
+                      // By position, as the table draws its "Batch N" lines (see firingGroupsOf).
+                      const firings = node.rows.reduce((n, _r, i) =>
+                        n + (i % size === 0 && node.rows.slice(i, i + size).some(rowHasContent) ? 1 : 0), 0);
+                      return (
+                        <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-gray-500 dark:text-gray-400">
+                          <Repeat size={13} className="text-gray-400" />
+                          <span>one {unit} every</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step="any"
+                            placeholder="—"
+                            aria-label={`Minutes between ${unit === 'batch' ? 'batches' : 'rows'} of ${node.label}`}
+                            title="Left empty, the rows run back to back in one run"
+                            value={every ?? ''}
+                            onChange={(e) => onScheduleChange(node.id, { ...node.schedule, everyMinutes: e.target.value })}
+                            className={`${input} w-16`}
+                          />
+                          <span>min</span>
+                          <span className="ml-2">batch size</span>
                           <input
                             type="number"
                             min={1}
                             placeholder="—"
                             value={node.batchSize}
                             onChange={(e) => onBatchSizeChange(node.id, e.target.value)}
-                            title="Rows per batch: the workflow's per-sample steps run for each row of a batch, its batch steps once per batch"
+                            title={node.isWorkflow
+                              ? "Rows per batch: the workflow's per-sample steps run for each row of a batch, its batch steps once per batch"
+                              : 'Rows per batch: with a pace set, each batch fires together, one batch every N min'}
                             className={`${input} w-16`}
                           />
-                        </>
-                      )}
-                      <span className="basis-full sm:basis-auto">
-                        {node.isWorkflow && !isBlank(node.batchSize)
-                          ? `Rows run in batches of ${node.batchSize}: each step of the workflow runs for every row in the batch, batch steps once per batch.`
-                          : `Each row runs the whole ${node.isWorkflow ? 'workflow' : 'step'} on ${node.deviceId || 'its device'}, in order.`}
-                      </span>
-                    </div>
+                          <span className="basis-full sm:basis-auto">
+                            {paced
+                              ? `${batched ? `Batch 1 (rows 1–${size})` : 'Row 1'} fires when this step starts, then one ${unit} every ${every} min${firings > 1 ? ` (${firings} ${unit === 'batch' ? 'batches' : 'rows'}, last at ${+(Number(every) * (firings - 1)).toFixed(2)} min)` : ''}${batched ? `, its ${size} rows back to back` : ''}. Steps after this start once the last ${unit} has fired.`
+                              : batched && node.isWorkflow
+                                ? `Rows run in batches of ${node.batchSize}: each step of the workflow runs for every row in the batch, batch steps once per batch.`
+                                : batched
+                                  ? `Rows are grouped ${size} to a batch, which matters once a pace is set: then one batch fires every N min.`
+                                  : `Each row runs the whole ${node.isWorkflow ? 'workflow' : 'step'} on ${node.deviceId || 'its device'}, in order.`}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 

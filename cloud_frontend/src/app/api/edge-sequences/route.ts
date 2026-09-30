@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { isOwned, ownedKeys } from '@/lib/workspace';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,10 +10,17 @@ export const dynamic = 'force-dynamic';
 // Cloud edge-sequence page). Both write the same shape — {device_id, name, description, body} —
 // so the Library page can list them together regardless of which side created them.
 export async function GET(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
   const { searchParams } = new URL(req.url);
   const deviceId = searchParams.get('device_id');
   try {
-    return NextResponse.json(await getStore().listSequences(deviceId || undefined));
+    // The workflows of this workspace's devices only.
+    const mine = await ownedKeys('device', ws);
+    if (deviceId && !mine.has(deviceId)) return NextResponse.json([]);
+    const rows = await getStore().listSequences(deviceId || undefined) as any[];
+    return NextResponse.json(rows.filter((r) => mine.has(String(r.device_id))));
   } catch (error: any) {
     console.error('Failed to fetch edge sequences:', error.message);
     return NextResponse.json([]);
@@ -19,11 +28,18 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
   const body = await req.json().catch(() => null);
   const deviceId = body?.device_id;
   const name = body?.name;
   if (!deviceId || !name) {
     return NextResponse.json({ error: 'device_id and name are required.' }, { status: 400 });
+  }
+
+  if (!(await isOwned('device', String(deviceId), ws))) {
+    return NextResponse.json({ error: 'No such device.' }, { status: 404 });
   }
 
   try {

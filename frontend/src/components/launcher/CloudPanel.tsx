@@ -65,7 +65,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
 
   const setAddress = async () => {
     const url = await promptDialog(
-      'The address of the IvoryOS Cloud your decks pair with. Change it only if your lab runs its own Cloud on its network. Each deck uses the new address from its next start.',
+      'The address of the Cloud your decks pair with. Change it only if your lab runs its own Cloud on its network. Each deck uses the new address from its next start.',
       { title: 'Cloud address', defaultValue: cloudUrl },
     );
     if (url !== null && url !== undefined) run(() => api.setCloudUrl(url.trim()));
@@ -80,7 +80,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
     <div className="p-6 space-y-6 max-w-5xl">
       <div className="rounded-2xl p-6 bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm">
         <div className="flex items-center gap-2 text-sm font-medium text-indigo-100">
-          <Cloud className="w-4 h-4" /> IvoryOS Cloud
+          <Cloud className="w-4 h-4" /> Cloud
           <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/15">Early access</span>
         </div>
         <h2 className="mt-2 text-2xl font-semibold">Manage every deck from one place</h2>
@@ -89,7 +89,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <button type="button" disabled={reach?.reachable === false} onClick={() => run(() => api.openCloud())} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-indigo-700 text-sm font-semibold hover:bg-indigo-50 disabled:opacity-60 disabled:cursor-not-allowed">
-            <Cloud className="w-3.5 h-3.5" /> Open IvoryOS Cloud
+            <Cloud className="w-3.5 h-3.5" /> Open Cloud
           </button>
           <button type="button" disabled={reach?.reachable === false} title="Open it in your web browser instead" onClick={() => run(() => api.openCloudInBrowser())} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 text-white text-sm font-medium hover:bg-white/25 disabled:opacity-60 disabled:cursor-not-allowed">
             <ExternalLink className="w-3.5 h-3.5" /> Browser
@@ -104,7 +104,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
         <div className="rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-900/10 p-4 flex gap-3 text-sm">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
           <div className="flex-1 space-y-1 text-amber-900 dark:text-amber-200">
-            <p className="font-medium">IvoryOS Cloud is not answering at {cloudUrl}.</p>
+            <p className="font-medium">Cloud is not answering at {cloudUrl}.</p>
             {reach.suggestion ? (
               <p className="text-amber-800/90 dark:text-amber-200/80">
                 Found one at <span className="font-mono">{reach.suggestion.url}</span>. {reach.suggestion.reason}

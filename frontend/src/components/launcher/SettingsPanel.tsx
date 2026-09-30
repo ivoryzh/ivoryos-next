@@ -6,24 +6,20 @@ import type { DesktopApi, Snapshot, UpdateStatus } from '@/desktop';
 import PythonEnvironment from './PythonEnvironment';
 import { Button, cardClass } from './ui';
 
-export type ThemeChoice = 'light' | 'dark';
-
 /**
  * App-wide settings: everything the menu bar and the header used to hold, in one page reached
  * from the corner of the sidebar. Per-deck settings stay on each deck's own Settings tab.
  */
-export default function SettingsPanel({ api, snap, theme, setTheme }: {
+export default function SettingsPanel({ api, snap }: {
   api: DesktopApi;
   snap: Snapshot;
-  theme: ThemeChoice;
-  setTheme: (t: ThemeChoice) => void;
 }) {
   const [rebuilding, setRebuilding] = useState(false);
   const isMac = snap.platform === 'darwin';
   const mod = isMac ? '⌘' : 'Ctrl';
 
   const setHub = async () => {
-    const url = await promptDialog('Where the launcher finds drivers. Leave empty for the IvoryOS Hub; use http://localhost:3000 while developing the Hub.', { title: 'Hub address', defaultValue: snap.hubUrl });
+    const url = await promptDialog('The Hub website the launcher links to (your profile, contributing a driver). The Automation Hub catalog itself is read from its database, not from this address. Leave empty for ivoryos.ai.', { title: 'Hub address', defaultValue: snap.hubUrl });
     if (url !== null && url !== undefined) api.setHubUrl(url.trim()).catch(e => notify(e.message, { tone: 'error' }));
   };
 
@@ -32,13 +28,15 @@ export default function SettingsPanel({ api, snap, theme, setTheme }: {
       <h2 className="text-xl font-semibold">Settings</h2>
 
       <Section title="Appearance">
+        {/* One theme for the whole app: the launcher, every deck's page and Cloud follow it. */}
         <div className="flex gap-2">
-          {([['light', Sun, 'Light'], ['dark', Moon, 'Dark']] as const).map(([value, Icon, label]) => (
-            <button key={value} type="button" onClick={() => setTheme(value)} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${theme === value ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300 dark:border-indigo-500/40' : 'border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/5'}`}>
+          {([['system', Monitor, 'System'], ['light', Sun, 'Light'], ['dark', Moon, 'Dark']] as const).map(([value, Icon, label]) => (
+            <button key={value} type="button" onClick={() => api.setTheme(value).catch(e => notify(e.message, { tone: 'error' }))} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${(snap.theme || 'system') === value ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300 dark:border-indigo-500/40' : 'border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/5'}`}>
               <Icon className="w-4 h-4" /> {label}
             </button>
           ))}
         </div>
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Every deck&apos;s page and Cloud use it too. System follows your computer.</p>
       </Section>
 
       {snap.tray?.available && !isMac && (
@@ -69,7 +67,7 @@ export default function SettingsPanel({ api, snap, theme, setTheme }: {
       <Section title="Drivers">
         <div className="flex items-center gap-3 text-sm">
           <Globe className="w-4 h-4 text-gray-400" />
-          <span className="flex-1">Hub: <span className="font-mono">{snap.hubUrl}</span></span>
+          <span className="flex-1">Hub website: <span className="font-mono">{snap.hubUrl}</span></span>
           <Button small onClick={setHub}>Change</Button>
         </div>
       </Section>

@@ -58,3 +58,19 @@ test('mergeIntoDeck replaces by name and by package, and keeps everything else',
     assert.deepEqual(added, ['hplc']);
     assert.deepEqual(replaced, ['pump_1']);
 });
+
+test('plugins are validated as "module:attribute" references and merged without duplicates', () => {
+    assert.throws(() => validateManifest({ plugins: ['not a ref'] }), /not a plugin reference/);
+    assert.throws(() => validateManifest({ plugins: ['pkg.mod:attr; import os'] }), /not a plugin reference/);
+    assert.throws(() => validateManifest({ plugins: 'pkg.mod:plugin' }), /must be a list/);
+    const { manifest } = validateManifest({ packages: ['view-kit==1.0'], plugins: ['view_kit.plugin:plugin'] });
+    const deck = { name: 'Bench', packages: [], instruments: [pump], plugins: ['other.plugin:plugin'] };
+    const first = mergeIntoDeck(deck, manifest);
+    assert.deepEqual(first.deck.plugins, ['other.plugin:plugin', 'view_kit.plugin:plugin']);
+    assert.deepEqual(first.pluginsAdded, ['view_kit.plugin:plugin']);
+    const again = mergeIntoDeck(first.deck, manifest);
+    assert.deepEqual(again.deck.plugins, first.deck.plugins);
+    assert.deepEqual(again.pluginsAdded, []);
+    // A deck without plugins does not gain an empty list.
+    assert.equal('plugins' in mergeIntoDeck({ instruments: [] }, { instruments: [pump] }).deck, false);
+});

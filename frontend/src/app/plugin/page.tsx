@@ -1,9 +1,10 @@
 "use client";
+import { useDocumentTheme } from '@ivoryos/shared-ui';
 import { API_BASE } from '@/config';
 
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Sun, Moon, Loader2, PanelRight } from 'lucide-react';
+import { Loader2, PanelRight } from 'lucide-react';
 import { openInPanel } from '@/pluginPanel';
 import Sidebar from '@/components/Sidebar';
 
@@ -11,31 +12,12 @@ function PluginContent() {
   const searchParams = useSearchParams();
   const pluginId = searchParams.get('id');
 
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [plugin, setPlugin] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   // Check localStorage for theme
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  };
 
   useEffect(() => {
     setLoading(true);
@@ -57,7 +39,7 @@ function PluginContent() {
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
       {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden bg-white dark:bg-transparent">

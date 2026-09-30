@@ -30,8 +30,10 @@ const {
     TERMINAL_TASK_STATUSES, CLOUD_DEVICE_ID, computeAdvance, evaluateCondition,
 } = require('./src/lib/dag.js');
 const { runContext } = require('./src/lib/cloudLogic.js');
+const { commandStep } = require('./src/lib/taskCommands.js');
 const { getStore, resolveBrokerUrl } = require('./src/lib/store');
 const { startEmbeddedBroker } = require('./src/lib/embedded-broker.js');
+const { removeDevice } = require('./src/lib/deviceRemoval.js');
 
 let store;
 try {
@@ -96,6 +98,8 @@ client.on('connect', () => {
     client.subscribe(`${TOPIC_PREFIX}/+/task-status`);
     // A finished Cloud task's run record (edge queue.build_cloud_result), sent once at the end.
     client.subscribe(`${TOPIC_PREFIX}/+/task-result`);
+    // A device leaving Cloud on its own (the edge's "Remove from Cloud").
+    client.subscribe(`${TOPIC_PREFIX}/+/leave`);
     // Retained messages replay immediately on subscribe — this is the entire "catch up on
     // reconnect" mechanism, for both this daemon restarting AND an edge device reconnecting.
     // No polling, no explicit sync request needed on either side.
@@ -136,8 +140,38 @@ client.on('message', async (topic, message) => {
         return;
     }
 
+    if (kind === 'leave') {
+        // The device asked to be removed. Only it can publish here: on AWS its certificate's
+        // policy covers its own topics alone; on a LAN broker anyone could, as for every topic.
+        try {
+            removedDevices.add(deviceId);
+            await removeDevice(store, deviceId);
+            console.log(`[Daemon] ${deviceId} left Cloud; removed.`);
+        } catch (e) {
+            console.error(`[Daemon] Failed to remove ${deviceId} as it left:`, e.message);
+        }
+        return;
+    }
+    if (removedDevices.has(deviceId)) {
+        // The list here is a few seconds old; a device paired again since must not be told it
+        // was removed (it would forget the pairing it just got). The store has the answer.
+        if (!(await store.isDeviceRemoved(deviceId).catch(() => true))) {
+            removedDevices.delete(deviceId);
+        } else {
+            // Removed from Cloud (deviceRemoval.js): nothing it sends registers it again. If it
+            // is still running, tell it to forget its pairing (not retained; again after a while
+            // if it keeps going, e.g. it was offline when first told).
+            if (kind === 'status' && payload && payload.online) tellRemoved(deviceId);
+            return;
+        }
+    }
+
     try {
-        if (kind === 'status') {
+        if (kind === 'status' && payload && payload.paused) {
+            // Paused on the device on purpose: kept, shown as paused, sent nothing until it resumes.
+            deviceState.set(deviceId, { online: false, session: null, busy: false, at: Date.now(), idleSince: null });
+            await store.upsertDeviceStatus(deviceId, 'paused', false);
+        } else if (kind === 'status') {
             const prev = deviceState.get(deviceId);
             // An edge too old to report `busy` is never assumed idle, or its tasks could be failed
             // as lost while they wait in its queue.
@@ -239,8 +273,11 @@ async function handleTaskStatus(payload) {
     // directly: a run that genuinely completed on the edge showed completed->running in this log,
     // stale "running" landing late during a reconnect). Once a task reaches a terminal status,
     // refuse to move it backwards — this simply matches zero rows if the task already finished.
+    // A run that finished only after retries or a skipped failure says so (edge run_issues); kept
+    // in progress so the canvas can tell it from a clean finish. Omitted, progress is left alone.
+    const issues = payload.issues && typeof payload.issues === 'object' ? payload.issues : null;
     const moved = await store.updateTaskStatusIfNotTerminal(
-        runId, nodeId, status, TERMINAL_TASK_STATUSES,
+        runId, nodeId, status, TERMINAL_TASK_STATUSES, issues ? { state: status, issues } : undefined,
     );
     if (!moved) {
         console.log(`[Daemon] Ignored stale '${status}' for already-finished task ${runId}/${nodeId}`);
@@ -270,7 +307,9 @@ async function handleTaskStatus(payload) {
         }
     }
 
-    if (status === 'completed' || status === 'error') {
+    // 'cancelled' too: a run stopped from Cloud while it waited for input ends that way, and so
+    // does one cancelled at the bench. Without advancing, the run sat at 'running' forever.
+    if (status === 'completed' || status === 'error' || status === 'cancelled') {
         await advanceRun(runId);
     }
 }
@@ -410,9 +449,12 @@ async function dispatchTask(task) {
         : [block.instrument, block.method].filter(Boolean).join('.');
     let runName = '';
     try { runName = (await store.getRun(task.run_id))?.name || ''; } catch { /* the edge has a fallback */ }
+    // A paced Iterate node stores one run per row; this firing sends its own row only.
+    const paced = task.run && Array.isArray(task.run.paced) ? task.run.paced : null;
+    const run = paced ? paced[Math.min(Number(task.repeat_done) || 0, paced.length - 1)] : task.run;
     const execPayload = JSON.stringify(
-        task.run
-            ? { run: task.run, runId: task.run_id, nodeId: task.node_id }
+        run
+            ? { run, runId: task.run_id, nodeId: task.node_id }
             : {
                 block: task.block, runId: task.run_id, nodeId: task.node_id,
                 name: [runName, stepLabel].filter(Boolean).join(' · ') || undefined,
@@ -706,6 +748,61 @@ async function failLostTasks() {
     }
 }
 
+// --- Runs queued "after current work" -----------------------------------------------------
+// Submitted with everything blocked and the run 'queued' (see the run route). Started here the
+// moment every run it waits for has nothing open -- claimed with a compare-and-set, then walked
+// forward by the ordinary advanceRun, which releases the steps that depend on nothing. Judged by
+// open tasks rather than run status, so a run left 'running' by an old failure cannot hold the
+// queue forever.
+async function startQueuedRuns() {
+    for (const run of await store.listQueuedRuns()) {
+        if (await store.runsHaveOpenTasks(run.after_runs || [])) continue;
+        if (!(await store.updateRunStatusFrom(run.id, 'queued', 'running'))) continue;
+        console.log(`[Daemon] Run ${run.id} (${run.name}) starts: the work it was queued behind is done.`);
+        await advanceRun(run.id);
+    }
+}
+setInterval(() => startQueuedRuns().catch(e => console.error('[Daemon] Starting queued runs failed:', e.message)), 1000);
+
+// --- Decisions about a task a device has stopped on ------------------------------------------
+// An answer to a question, or retry/skip/stop on a failed step, chosen in Cloud (the control
+// route stores it on the task). Sent on {prefix}/{device}/task-control, not retained: a retained
+// decision would be replayed to the device on every reconnect. It is kept until the device's own
+// progress shows the pause has gone, and re-sent while it has not (src/lib/taskCommands.js); the
+// device ignores one whose pause is no longer current, so a re-send cannot apply twice.
+async function sendTaskCommands() {
+    if (!client.connected) return;
+    for (const task of await store.listTaskCommands()) {
+        const device = String(task.device_id || '');
+        const state = deviceState.get(device);
+        const up = !!state && state.online && Date.now() - state.at <= HEARTBEAT_STALE_MS;
+        const step = commandStep(task, up);
+        if (step === 'clear') {
+            await store.updateTaskCommand(task.run_id, task.node_id, null);
+            continue;
+        }
+        if (step !== 'send') continue;
+        const cmd = task.command;
+        const payload = JSON.stringify({
+            runId: task.run_id, nodeId: task.node_id, pause: cmd.pause, action: cmd.action, value: cmd.value,
+        });
+        await new Promise((resolve) => {
+            client.publish(`${TOPIC_PREFIX}/${device}/task-control`, payload, { qos: 1 }, async (err) => {
+                if (err) {
+                    console.error(`[Daemon] Failed to send '${cmd.action}' for ${task.run_id}/${task.node_id}:`, err.message);
+                } else {
+                    await store.updateTaskCommand(task.run_id, task.node_id, {
+                        ...cmd, state: 'sent', sent_at: new Date().toISOString(), attempts: (cmd.attempts || 0) + 1,
+                    });
+                    console.log(`[Daemon] Sent '${cmd.action}' for ${task.run_id}/${task.node_id} to ${device}.`);
+                }
+                resolve();
+            });
+        });
+    }
+}
+setInterval(() => sendTaskCommands().catch(e => console.error('[Daemon] Sending decisions failed:', e.message)), 1000);
+
 // --- What Cloud is holding for each device -------------------------------------------------
 // Tasks are never queued on a device (see dispatchTask), so a bench operator has no way to know
 // that Cloud has three more waiting for this instrument, or a scheduled run due at 14:00. Each
@@ -818,6 +915,37 @@ setInterval(async () => {
         console.error('[Daemon] Failed to mark stale devices offline:', e.message);
     }
 }, 5000);
+
+// Devices removed from Cloud (store removed_devices), read often: the Devices page removes them
+// in the web app, which cannot reach this process except through the store.
+const removedDevices = new Set();
+async function refreshRemovedDevices() {
+    try {
+        const ids = await store.listRemovedDeviceIds();
+        // Newly removed (on the Devices page) since the last look: a heartbeat that arrived in
+        // between may have registered it again, so delete its record once more.
+        const fresh = ids.filter((id) => !removedDevices.has(id));
+        removedDevices.clear();
+        for (const id of ids) removedDevices.add(id);
+        for (const id of fresh) {
+            try { await store.deleteDevice(id); } catch { /* next look tries again */ }
+        }
+    } catch (e) {
+        console.error('[Daemon] Failed to read removed devices:', e.message);
+    }
+}
+setInterval(refreshRemovedDevices, 3000);
+refreshRemovedDevices();
+
+// Tell a removed device that is still running to forget its pairing (edge: the `removed` topic).
+const toldRemovedAt = new Map();
+function tellRemoved(deviceId) {
+    const last = toldRemovedAt.get(deviceId) || 0;
+    if (Date.now() - last < 30000) return;
+    toldRemovedAt.set(deviceId, Date.now());
+    client.publish(`${TOPIC_PREFIX}/${deviceId}/removed`, JSON.stringify({ ts: Date.now() / 1000 }), { qos: 1 });
+    console.log(`[Daemon] ${deviceId} was removed from Cloud but is still connected; told it to forget its pairing.`);
+}
 
 // Leave a truthful heartbeat behind on a clean exit, so the UI says "backend stopped" straight
 // away instead of waiting for the row to age out.

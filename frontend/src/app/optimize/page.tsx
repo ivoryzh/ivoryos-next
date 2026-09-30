@@ -2,7 +2,7 @@
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 import { useState, useEffect } from 'react';
-import { Settings2, Info, Zap, Sun, ChevronDown, Plus, X } from 'lucide-react';
+import { Settings2, Info, Zap, ChevronDown, Plus, X } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
 import {
@@ -14,8 +14,7 @@ import {
   getVarMode as sharedGetVarMode,
   getVarModeType as sharedGetVarModeType,
   isPerIteration as sharedIsPerIteration,
-  getIterationValue as sharedGetIterationValue,
-} from '@ivoryos/shared-ui';
+  getIterationValue as sharedGetIterationValue, useDocumentTheme } from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
   baybe: 'BayBE',
@@ -39,7 +38,7 @@ const RequiredColumns = ({ params, objectives }: { params: string[]; objectives:
 );
 
 export default function OptimizePage() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [variables, setVariables] = useState<string[]>([]);
   const [globalVariables, setGlobalVariables] = useState<string[]>([]);
   const [varTypes, setVarTypes] = useState<Record<string, string>>({});
@@ -123,11 +122,6 @@ export default function OptimizePage() {
   };
 
   useEffect(() => {
-    // Theme init
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     fetch(`${API_BASE}/api/status`)
       .then(res => res.json())
@@ -242,13 +236,6 @@ export default function OptimizePage() {
     }
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const startOptimization = async () => {
     if (isStarting) return; // guard against double-click while the request/optimizer init is in flight
@@ -461,7 +448,7 @@ export default function OptimizePage() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
       
       <div className="flex-1 flex flex-col relative z-0">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">

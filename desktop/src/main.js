@@ -20,7 +20,7 @@
 //   <userData>/git.bin               GitHub/GitLab tokens for private drivers (encrypted)
 //   <userData>/private-packages/     private repositories downloaded at one commit each
 
-const { app, BrowserWindow, WebContentsView, Menu, Tray, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, safeStorage } = require('electron');
+const { app, BrowserWindow, WebContentsView, Menu, Tray, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, nativeTheme, safeStorage } = require('electron');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -29,6 +29,7 @@ const { pathToFileURL } = require('node:url');
 const { ProfileManager } = require('./manager');
 const { PythonRuntime, run: runProcess } = require('./runtime');
 const { Account, pkcePair } = require('./account');
+const { HubCatalog } = require('./hubCatalog');
 const { GitConnections } = require('./gitRepos');
 const { secretFile } = require('./secrets');
 const { Updates } = require('./updater');
@@ -60,10 +61,14 @@ let launcherWindow = null;
 const edgeTabs = new Map(); // profile id -> WebContentsView
 let activeTab = null; // profile id, or null for the launcher itself
 let tabBarHeight = 44; // reported by the launcher page, which draws the tab bar
+// The launcher's sidebar stays usable beside an edge or Cloud tab: the page reports its width (0
+// when hidden) and tabs are laid out to the right of it.
+let sidebarWidth = 0;
 // macOS icons are a tile; Windows and Linux icons are their own shape (scripts/make-icon.py).
 const ICON = path.join(__dirname, '..', 'build', process.platform === 'darwin' ? 'icon.png' : 'icon-win.png');
 let manager = null;
 let account = null;
+let catalog = null; // the Automation Hub, read from its database (hubCatalog.js)
 let git = null;
 let updates = null;
 let runtimePromise = null;
@@ -153,6 +158,10 @@ function showLauncher() {
     launcherWindow = new BrowserWindow({
         width: 1400, height: 900, minWidth: 1080, minHeight: 600, title: 'IvoryOS',
         show: !SMOKE_TEST, webPreferences,
+        // No separate title bar: the launcher's own slim bar is the window's title bar (draggable,
+        // with the sidebar toggle), and the system's window buttons sit on it -- an overlay on
+        // Windows/Linux, the inset traffic lights on macOS.
+        ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : { titleBarStyle: 'hidden', titleBarOverlay: titleBarOverlay() }),
         ...(fs.existsSync(ICON) ? { icon: ICON } : {}),
     });
     keepToOrigin(launcherWindow, (url) => url.startsWith(`${APP_SCHEME}://`));
@@ -204,7 +213,7 @@ function layoutTabs() {
         const attached = launcherWindow.contentView.children.includes(view);
         if (id === activeTab) {
             if (!attached) launcherWindow.contentView.addChildView(view);
-            view.setBounds({ x: 0, y: tabBarHeight, width, height: Math.max(0, height - tabBarHeight) });
+            view.setBounds({ x: sidebarWidth, y: tabBarHeight, width: Math.max(0, width - sidebarWidth), height: Math.max(0, height - tabBarHeight) });
         } else if (attached) {
             launcherWindow.contentView.removeChildView(view);
         }
@@ -255,7 +264,102 @@ function closeEdgeTab(id) {
 /** The Cloud tab: IvoryOS Cloud in this window, beside the decks, under this id. */
 const CLOUD_TAB = '@cloud';
 
-function openCloudTab() {
+/**
+ * The app's one theme, on every page it shows. `nativeTheme` is what each page sees as
+ * `prefers-color-scheme`, and every IvoryOS page follows that inside the app (shared-ui theme.tsx)
+ * -- the launcher, each deck's UI and Cloud alike, whatever each once stored for itself.
+ */
+/** The window buttons' strip, in the launcher bar's colours (page.tsx header) for the theme. */
+const TITLE_BAR_HEIGHT = 36;
+function titleBarOverlay() {
+    const dark = nativeTheme.shouldUseDarkColors;
+    return { color: dark ? '#111111' : '#ffffff', symbolColor: dark ? '#d1d5db' : '#4b5563', height: TITLE_BAR_HEIGHT };
+}
+
+function refreshTitleBar() {
+    if (launcherWindow && !launcherWindow.isDestroyed() && process.platform !== 'darwin') {
+        try { launcherWindow.setTitleBarOverlay(titleBarOverlay()); } catch { /* no overlay on this window */ }
+    }
+}
+
+function applyTheme() {
+    nativeTheme.themeSource = manager.theme;
+    refreshTitleBar();
+    const view = edgeTabs.get(CLOUD_TAB);
+    if (view) setCloudThemeCookie(view, manager.cloudUrl);
+}
+
+/**
+ * Cloud renders `<html>` in the theme its `theme` cookie names, so without this its first paint is
+ * its default (dark) even inside a light app, and corrects only once its page script runs.
+ */
+function setCloudThemeCookie(view, url) {
+    view.webContents.session.cookies.set({
+        url, name: 'theme', value: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+        path: '/', expirationDate: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
+    }).catch(() => { /* a bad address: the tab says so itself */ });
+}
+
+/**
+ * Sign the Cloud tab in with the account the app is signed in to, so one sign-in covers both. The
+ * app's main process sends its IvoryOS tokens to Cloud (`/api/auth/exchange`, which checks them
+ * with the IvoryOS account service) and puts the session cookie that comes back into the tab; no
+ * page ever holds a token. Only to an https Cloud, or one on this computer or the lab's network:
+ * a Cloud address is a setting, and the tokens are the person's login. Otherwise, and whenever
+ * anything fails, the tab simply shows Cloud's own sign-in page.
+ */
+async function signInCloudTab(view, url) {
+    try {
+        if (!account.describe().signedIn) return;
+        const u = new URL(url);
+        if (u.protocol !== 'https:' && !LOCAL_HOST.test(u.hostname)) return;
+        const jar = view.webContents.session.cookies;
+        const [kept] = await jar.get({ url, name: 'ivoryos_session' });
+        if (kept) {
+            // A cookie is not a session: Cloud may have ended it (expired, signed out there, its
+            // database replaced). Keeping a dead one left the tab signed out for good, every page
+            // loading and every call answering 401, since a new one was only made when none existed.
+            const check = await net.fetch(`${u.origin}/api/auth/session`, {
+                headers: { Cookie: `ivoryos_session=${kept.value}` }, signal: AbortSignal.timeout(5_000),
+            }).catch(() => null);
+            if (!check || check.status !== 401) return; // valid, or Cloud unreachable: leave it be
+            await jar.remove(u.origin, 'ivoryos_session');
+        }
+        const token = await account.token();
+        if (!token) return;
+        const res = await net.fetch(`${u.origin}/api/auth/exchange`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: account.session && account.session.refresh_token }),
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return;
+        const { session } = await res.json();
+        if (!session) return;
+        await jar.set({
+            url: u.origin, name: 'ivoryos_session', value: session, path: '/', httpOnly: true,
+            secure: u.protocol === 'https:', sameSite: 'lax', expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+        });
+    } catch { /* the tab shows Cloud's own sign-in */ }
+}
+
+/** Signing out of the app signs the Cloud tab out too, and ends the sessions kept for pairing. */
+async function signOutCloudTab() {
+    for (const [origin, s] of cloudSessions) {
+        net.fetch(`${origin}/api/auth/sign-out`, { method: 'POST', headers: { Cookie: `ivoryos_session=${s.id}` } }).catch(() => {});
+    }
+    cloudSessions.clear();
+    const view = edgeTabs.get(CLOUD_TAB);
+    if (!view) return;
+    const url = manager.cloudUrl;
+    try {
+        await net.fetch(`${new URL(url).origin}/api/auth/sign-out`, { method: 'POST' }).catch(() => {});
+        await view.webContents.session.cookies.remove(new URL(url).origin, 'ivoryos_session');
+    } catch { /* best effort */ }
+    view.webContents.reload();
+}
+
+async function openCloudTab() {
     showLauncher();
     const url = manager.cloudUrl;
     let view = edgeTabs.get(CLOUD_TAB);
@@ -268,8 +372,10 @@ function openCloudTab() {
         const origin = new URL(url).origin;
         keepToOrigin(view, (u) => u.startsWith(origin));
         addShortcuts(view.webContents);
-        view.webContents.loadURL(url);
         edgeTabs.set(CLOUD_TAB, view);
+        await setCloudThemeCookie(view, url);
+        await signInCloudTab(view, url);
+        view.webContents.loadURL(url);
     }
     showTab(CLOUD_TAB);
 }
@@ -325,7 +431,8 @@ async function confirmAndInstall(text, { source, fromFile = null }) {
         detail: `From ${source}`,
     });
     if (pick === choices.length - 1) return;
-    const target = pick < decks.length ? decks[pick] : manager.create({ kind: 'deck', name: manifest.name || 'New deck' });
+    const target = pick < decks.length ? decks[pick]
+        : manager.create({ kind: 'deck', name: manifest.name || 'New deck', port: await manager.freePort() });
 
     const preview = mergeIntoDeck(manager.readDeck(target.id), manifest);
     const { response } = await dialog.showMessageBox(parent, {
@@ -377,30 +484,6 @@ async function installFromFile() {
     if (!canceled && filePaths[0]) await confirmAndInstall(fs.readFileSync(filePaths[0], 'utf8'), { source: filePaths[0], fromFile: filePaths[0] });
 }
 
-// --- the Hub catalog -------------------------------------------------------------------------------
-
-async function hubFetch(pathAndQuery, init) {
-    const url = `${manager.hubUrl}${pathAndQuery}`;
-    let res;
-    try {
-        res = await net.fetch(url, init);
-    } catch (e) {
-        throw new Error(`Could not reach the Hub at ${manager.hubUrl} (${e.message}).`);
-    }
-    // A Hub without the catalog does not 404: its login redirect answers every unknown path with
-    // the sign-in *page*. Read as JSON that became `{}`, so the launcher showed an empty catalog
-    // and no error at all. Say what happened instead.
-    const type = res.headers.get('content-type') || '';
-    if (res.ok && !type.includes('json')) {
-        throw new Error(/\/(auth\/)?login/.test(res.url)
-            ? `The Hub at ${manager.hubUrl} answered with its sign-in page, not the driver catalog: it does not serve /api/catalog yet.`
-            : `The Hub at ${manager.hubUrl} did not answer with a driver catalog.`);
-    }
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `The Hub answered ${res.status}.`);
-    return body;
-}
-
 // --- IvoryOS Cloud ---------------------------------------------------------------------------------
 
 /** Cloud's own /api/health: whether it answers, and whether it is really an IvoryOS Cloud. */
@@ -445,6 +528,92 @@ async function checkCloud() {
         if (probe.ok && probe.isCloud) return { url, reachable: false, error: found.error, suggestion: c };
     }
     return { url, reachable: false, error: found.error };
+}
+
+/**
+ * A Cloud session for this process, made from the app's IvoryOS sign-in (`/api/auth/exchange`,
+ * the same door the Cloud tab uses) and kept per Cloud address. The same rules as signInCloudTab:
+ * the tokens are the person's login, so they only go to an https Cloud or one on the lab network.
+ */
+const cloudSessions = new Map(); // origin -> { id, workspaces }
+async function mainCloudSession(origin, { fresh = false } = {}) {
+    if (!fresh && cloudSessions.has(origin)) return cloudSessions.get(origin);
+    const u = new URL(origin);
+    if (u.protocol !== 'https:' && !LOCAL_HOST.test(u.hostname)) return null;
+    if (!account.describe().signedIn) return null;
+    const token = await account.token();
+    if (!token) return null;
+    const res = await net.fetch(`${origin}/api/auth/exchange`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: account.session && account.session.refresh_token }),
+        signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.session) throw new Error(body.error || `Cloud refused the sign-in (${res.status}).`);
+    const session = { id: body.session, workspaces: body.workspaces || (body.workspace ? [body.workspace] : []) };
+    cloudSessions.set(origin, session);
+    return session;
+}
+
+/**
+ * Connect a running deck to Cloud in one step. The deck starts pairing (it shows a code and keeps
+ * the secret that collects its credentials; the app never sees the token), and the app approves
+ * that code on Cloud with its own sign-in, through the same route a person uses on Cloud's page.
+ *
+ * Answers `choose-workspace` when the account has several and none was given, and `sign-in-needed`
+ * (with the code) when the app is not signed in, so the person approves it on Cloud themselves.
+ * The deck pairs under its own lasting id, so a deck paired before simply reconnects.
+ */
+async function pairWithCloud(profileId, { workspace, name } = {}) {
+    const profile = manager.get(profileId);
+    const status = manager.statusOf(profileId);
+    if (!profile || status.state !== 'running' || !status.url) throw new Error('Start the deck first.');
+    const origin = new URL(manager.cloudUrl).origin;
+
+    let session = await mainCloudSession(origin);
+    if (session && !workspace && session.workspaces.length > 1) {
+        return { status: 'choose-workspace', workspaces: session.workspaces };
+    }
+
+    const deckName = (name || profile.name || '').trim();
+    const started = await net.fetch(`${status.url}/api/cloud-settings/pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cloud_url: manager.cloudUrl, name: deckName }),
+        signal: AbortSignal.timeout(30_000),
+    });
+    const pairing = await started.json().catch(() => ({}));
+    if (!started.ok || !pairing.code) throw new Error(pairing.error || 'The deck could not start pairing.');
+    const pairingCode = pairing.code;
+    const approveUrl = pairing.approve_url;
+    if (!session) return { status: 'sign-in-needed', code: pairingCode, approveUrl };
+
+    const approve = (s) => net.fetch(`${origin}/api/pair/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `ivoryos_session=${s.id}` },
+        body: JSON.stringify({ code: pairingCode, decision: 'approve', name: deckName, workspace }),
+        signal: AbortSignal.timeout(15_000),
+    });
+    let res = await approve(session);
+    if (res.status === 401) { // the kept session ended (signed out on Cloud, expired): make a new one
+        session = await mainCloudSession(origin, { fresh: true });
+        if (!session) return { status: 'sign-in-needed', code: pairingCode, approveUrl };
+        res = await approve(session);
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        await cancelCloudPairing(profileId); // leave nothing waiting on the deck for a refused request
+        throw new Error(body.error || `Cloud did not approve the deck (${res.status}).`);
+    }
+    return { status: 'approved', code: pairingCode, name: body.name, workspace: body.workspace && body.workspace.name };
+}
+
+/** Stop a deck's pairing in progress (it stops showing its code and stops asking Cloud). */
+async function cancelCloudPairing(profileId) {
+    const status = manager.statusOf(profileId);
+    if (status.state !== 'running' || !status.url) return;
+    await net.fetch(`${status.url}/api/cloud-settings/pair`, { method: 'DELETE' }).catch(() => {});
 }
 
 // --- account ------------------------------------------------------------------------------------
@@ -570,6 +739,7 @@ function snapshot() {
         update: updates.status(),
         autoUpdate: manager.autoUpdate,
         tray: { available: !!tray, minimizeToTray: manager.windowPref('minimizeToTray'), closeToTray: manager.windowPref('closeToTray') },
+        theme: manager.theme,
         // False where the OS has no keychain: sign-ins then last until the app quits.
         secretsPersist: safeStorage.isEncryptionAvailable(),
     };
@@ -577,7 +747,7 @@ function snapshot() {
 
 function registerIpc() {
     handle('launcher:snapshot', () => snapshot());
-    handle('launcher:create', (fields) => manager.create(fields));
+    handle('launcher:create', async (fields) => manager.create({ ...fields, port: (fields && fields.port) || await manager.freePort() }));
     handle('launcher:update', (id, patch) => manager.update(id, patch));
     handle('launcher:remove', async (id) => { closeEdgeTab(id); await manager.remove(id); });
     handle('launcher:start', (id) => manager.start(id));
@@ -587,6 +757,7 @@ function registerIpc() {
     handle('launcher:show-tab', (id) => showTab(id || null));
     handle('launcher:close-tab', (id) => closeEdgeTab(id));
     handle('launcher:tab-bar-height', (px) => { tabBarHeight = Math.max(0, Math.round(Number(px) || 0)); layoutTabs(); });
+    handle('launcher:sidebar-width', (px) => { sidebarWidth = Math.max(0, Math.round(Number(px) || 0)); layoutTabs(); });
     // The edge is an ordinary web server: its page opens in any browser, on this machine (and on
     // others when the profile listens on the network).
     handle('launcher:open-in-browser', (id) => {
@@ -634,6 +805,8 @@ function registerIpc() {
     handle('cloud:open', () => openCloudTab());
     handle('cloud:open-in-browser', () => shell.openExternal(manager.cloudUrl));
     handle('cloud:check', () => checkCloud());
+    handle('cloud:pair', (profileId, opts) => pairWithCloud(profileId, opts || {}));
+    handle('cloud:pair-cancel', (profileId) => cancelCloudPairing(profileId));
     // Python environments the person also uses from their own editor.
     handle('python:launcher', async () => (await getRuntime()).python);
     handle('python:inspect', async (python) => (await getRuntime()).inspect(python || (await getRuntime()).python));
@@ -642,21 +815,28 @@ function registerIpc() {
         return (await getRuntime()).createProjectVenv(folder);
     });
     handle('python:install-edge', async (python) => { await (await getRuntime()).installEdgeInto(python); });
-    handle('hub:search', (q) => hubFetch(`/api/catalog/modules?limit=60&q=${encodeURIComponent(q || '')}`));
-    // The whole catalog as cards, for the category browser. A Hub from before /browse existed
-    // answers 404; its search endpoint gives the same cards, capped at 200.
-    handle('hub:browse', async () => {
-        try {
-            return await hubFetch('/api/catalog/browse');
-        } catch (e) {
-            if (!/404/.test(e.message)) throw e;
-            return hubFetch('/api/catalog/modules?limit=200');
+    // The Automation Hub, straight from its database: public rows for everyone, the person's own and
+    // their organizations' too when signed in (row-level security; hubCatalog.js).
+    handle('hub:search', (q) => catalog.search(q));
+    handle('hub:browse', () => catalog.browse());
+    handle('hub:module', (moduleId) => catalog.module(moduleId));
+    handle('hub:entry', (payload) => catalog.deckEntry(payload || {}));
+    handle('hub:platforms', () => catalog.platforms());
+    handle('hub:platform', (id) => catalog.platform(id));
+    handle('hub:plugins', () => catalog.plugins());
+    handle('hub:plugin', (id) => catalog.plugin(id));
+    handle('hub:templates', () => catalog.templates());
+    handle('hub:template', (id) => catalog.template(id));
+    // Stars for quick access, per signed-in account ('signed-out' when nobody is).
+    const starAccount = () => (account.describe().user ? account.describe().user.id : 'signed-out');
+    handle('hub:starred', () => manager.starred(starAccount()));
+    handle('hub:star', (key, on) => manager.setStarred(starAccount(), String(key), !!on));
+    handle('launcher:add-workflows', async (id, workflows) => {
+        if (!Array.isArray(workflows) || workflows.some((w) => !w || typeof w.name !== 'string' || !w.body || typeof w.body !== 'object')) {
+            throw new Error('Expected a list of {name, body} workflows.');
         }
+        try { return await manager.addWorkflows(id, workflows); } finally { broadcast('launcher:changed'); }
     });
-    handle('hub:module', (moduleId) => hubFetch(`/api/catalog/modules/${encodeURIComponent(moduleId)}`));
-    handle('hub:entry', (payload) => hubFetch('/api/catalog/deck-entry', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-    }));
 
     // Account: the Hub's accounts. The page gets `describe()` (who, which plan), never a token.
     handle('account:get', accountCall(async () => {
@@ -675,7 +855,7 @@ function registerIpc() {
     handle('account:reset-password', (email) => account.resetPassword(email));
     handle('account:oauth', accountCall((provider) => signInWithProvider(provider)));
     handle('account:oauth-cancel', () => { if (pendingOAuth) pendingOAuth.cancel(); });
-    handle('account:sign-out', accountCall(() => account.signOut()));
+    handle('account:sign-out', accountCall(async () => { await account.signOut(); await signOutCloudTab(); }));
     handle('account:update-profile', accountCall(async (fields) => { await account.updateProfile(fields || {}); return account.describe(); }));
     handle('account:change-password', (password) => account.changePassword(password));
     handle('account:set-plan', accountCall((plan) => account.setPlan(plan)));
@@ -687,6 +867,15 @@ function registerIpc() {
     // Private repositories (Pro): tokens stay in this process, encrypted on disk.
     handle('git:list', () => git.list());
     handle('git:connect', (provider, token, host) => { requirePro(); return git.connect(provider, token, host); });
+    // Signing in from the browser: show the code, open the approval page, then wait for it.
+    handle('git:sign-in-start', async (provider, host) => {
+        requirePro();
+        const flow = await git.startSignIn(provider, host);
+        shell.openExternal(flow.verificationUri);
+        return flow;
+    });
+    handle('git:sign-in-finish', (provider) => git.finishSignIn(provider));
+    handle('git:sign-in-cancel', (provider) => git.cancelSignIn(provider));
     handle('git:disconnect', (provider) => git.disconnect(provider));
     handle('git:repos', (provider, query) => { requirePro(); return git.repos(provider, query); });
     handle('git:import', (profileId, provider, repoId, ref) => importFromGit(profileId, provider, repoId, ref));
@@ -711,6 +900,13 @@ function registerIpc() {
         broadcast('launcher:changed');
     });
     handle('app:reveal-data', () => shell.openPath(home()));
+    handle('app:set-theme', (theme) => { manager.setTheme(theme); applyTheme(); broadcast('launcher:changed'); });
+    handle('launcher:reorder', (ids) => manager.reorder(ids));
+    // The active edge or Cloud tab, reloaded: for a page that did not pick up a change.
+    handle('launcher:reload-tab', () => {
+        const view = activeTab ? edgeTabs.get(activeTab) : null;
+        if (view) view.webContents.reload();
+    });
 }
 
 // --- tray ----------------------------------------------------------------------------------------
@@ -798,6 +994,7 @@ function buildMenu() {
             label: 'File',
             submenu: [
                 { label: 'Show Launcher', accelerator: 'CmdOrCtrl+L', click: () => { showLauncher(); showTab(null); } },
+                { label: 'Show or Hide Sidebar', accelerator: 'CmdOrCtrl+B', click: () => broadcast('launcher:toggle-sidebar') },
                 { label: 'Install Drivers from Deck File…', click: () => installFromFile() },
                 { type: 'separator' },
                 isMac ? { role: 'close' } : { role: 'quit' },
@@ -819,6 +1016,9 @@ function addShortcuts(contents) {
         const ctrl = input.control || input.meta;
         const act = (fn) => { event.preventDefault(); fn(); };
         if (ctrl && !input.shift && key === 'l') act(() => { showLauncher(); showTab(null); });
+        // The sidebar belongs to the launcher page, so a key pressed in an edge or Cloud tab is
+        // passed to it; the page does the toggling and reports its new width back.
+        else if (ctrl && !input.shift && key === 'b') act(() => broadcast('launcher:toggle-sidebar'));
         else if ((ctrl && !input.shift && key === 'r') || key === 'f5') act(() => contents.reload());
         else if ((ctrl && input.shift && key === 'i') || key === 'f12') act(() => contents.toggleDevTools());
         else if (ctrl && (key === '=' || key === '+')) act(() => contents.setZoomLevel(contents.getZoomLevel() + 0.5));
@@ -893,6 +1093,12 @@ app.whenReady().then(async () => {
     manager.on('log', (id, line) => broadcast('launcher:log', id, line));
     manager.on('crashed', (id) => closeEdgeTab(id));
     account = new Account({ fetch: (...a) => net.fetch(...a), store: secretFile(path.join(home(), 'account.bin'), safeStorage) });
+    // Same project as the accounts, so a signed-in session is also what the catalog's RLS reads.
+    catalog = new HubCatalog({
+        fetch: (...a) => net.fetch(...a), url: account.url, key: account.key,
+        token: async () => (account.describe().signedIn ? account.token() : null),
+        userId: () => (account.describe().user ? account.describe().user.id : null),
+    });
     git = new GitConnections({
         fetch: (...a) => net.fetch(...a),
         store: secretFile(path.join(home(), 'git.bin'), safeStorage),
@@ -910,6 +1116,9 @@ app.whenReady().then(async () => {
 
     registerIpc();
     buildMenu();
+    applyTheme();
+    // "System" follows the OS, which can switch at any time (a schedule, the person).
+    nativeTheme.on('updated', refreshTitleBar);
     if (!SMOKE_TEST) createTray();
     showLauncher();
     getRuntime().catch(() => {}); // warm Python up while the launcher draws
@@ -969,11 +1178,11 @@ async function smokeTest() {
                 await new Promise(r => setTimeout(r, 2500));
                 return !!b;
             })()`);
-            launcher.cloudPage = await click('IvoryOS Cloud');
+            launcher.cloudPage = await click('Cloud', 'nav');
             fs.writeFileSync(`${base}-cloud.png`, (await launcherWindow.webContents.capturePage()).toPNG());
             // Accept a suggested Cloud address if one is offered, then open Cloud as a tab.
             launcher.cloudSuggestion = await click('Use ', 'main');
-            launcher.cloudTab = await click('Open IvoryOS Cloud', 'main');
+            launcher.cloudTab = await click('Open Cloud', 'main');
             const cloudView = edgeTabs.get(CLOUD_TAB);
             if (cloudView) {
                 await new Promise((r) => setTimeout(r, 2500));
@@ -1000,7 +1209,7 @@ async function smokeTest() {
             };
             launcher.settings = await shoot('settings', `document.querySelector('nav button[title^="Settings"]')`);
             launcher.signIn = await shoot('account', `[...document.querySelectorAll('nav button')].find(b => b.textContent.trim() === 'Sign in')`);
-            launcher.upgrade = await shoot('upgrade', `[...document.querySelectorAll('nav button')].find(b => b.textContent.includes('IvoryOS Cloud'))`);
+            launcher.upgrade = await shoot('upgrade', `[...document.querySelectorAll('nav button')].find(b => b.textContent.startsWith('Cloud'))`);
             // The profile's own Configuration / Settings tab (its Cloud connection card).
             await shoot('profile', `[...document.querySelectorAll('nav button')].find(b => b.textContent.includes(${JSON.stringify(target.name)}))`);
             await new Promise((r) => setTimeout(r, 6000)); // a Cloud status poll or two

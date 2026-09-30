@@ -55,6 +55,10 @@ create table if not exists devices (
     busy integer not null default 0,
     last_seen text,
     schema text not null default '{}',
+    -- A picture of the bench, set from the Devices page: a small data: URL (the browser scales it
+    -- down before upload). Never read by listDevices, which is polled; see getDeviceImage.
+    image text,
+    image_updated_at text,
     created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -74,6 +78,9 @@ create table if not exists runs (
     status text not null default 'running',
     nodes text not null default '[]',
     edges text not null default '[]',
+    -- A run submitted "after current work" starts 'queued' and waits for these runs (the ones with
+    -- work open on its devices at submission) to have nothing left open. See daemon.js.
+    after_runs text not null default '[]',
     created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -106,6 +113,13 @@ create table if not exists run_tasks (
     -- The finished run's record as the device sent it (edge queue.build_cloud_result): the same
     -- parameters + steps shape the edge's Data History reads, so Cloud builds the same datasheet.
     result text,
+    -- Every occurrence's record for a repeating task (JSON array, oldest first); see setTaskResult.
+    results text,
+    -- A decision made in Cloud about a task its device has stopped on -- an answer, or
+    -- retry/skip/stop on an error -- until the device shows it took effect. JSON:
+    -- {action, value, pause, state: 'pending'|'sent', sent_at, attempts}. See daemon.js
+    -- sendTaskCommands.
+    command text,
     updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     primary key (run_id, node_id)
 );
@@ -117,6 +131,18 @@ create index if not exists run_tasks_status_idx on run_tasks(status);
 -- build step and cannot import the TypeScript that builds run payloads, and a schedule that fires
 -- unattended every ten minutes should replay something a person validated once, not re-derive it
 -- from a canvas nobody is looking at.
+-- The Orchestrator's saved multi-device graphs (the Library's "Distributed" workflows). Kept
+-- here rather than in one browser's localStorage, where they used to live: a workflow saved on
+-- one machine did not exist on any other, which is not what a shared Cloud library is for.
+create table if not exists cloud_workflows (
+    name text primary key,
+    description text not null default '',
+    nodes text not null default '[]',
+    edges text not null default '[]',
+    created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
 create table if not exists schedules (
     id text primary key,
     name text not null default '',
@@ -143,6 +169,45 @@ create index if not exists schedules_due_idx on schedules(enabled, next_fire_at)
 -- The daemon's liveness beacon, read by /api/health. One row, id='daemon'. Deliberately a table
 -- and not a pid file: the Next app may not share a filesystem with the daemon in cloud mode, and
 -- the health check must work identically in both.
+-- Signed-in sessions (src/lib/auth.ts). The browser holds only the random id, in an http-only
+-- cookie; the IvoryOS tokens stay here, so a self-hosted Cloud keeps a session working offline.
+create table if not exists sessions (
+    id text primary key,
+    user_id text not null,
+    email text,
+    name text,
+    access_token text,
+    refresh_token text,
+    token_expires_at integer not null default 0,
+    workspace_id text not null,
+    workspaces text not null default '[]',
+    workspaces_checked_at text,
+    expires_at text not null,
+    created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    last_seen text
+);
+
+-- Which workspace owns what (src/lib/workspace.ts): a device, a run, a library workflow, a
+-- schedule, a pairing code. Kept apart from those tables so the daemon, which works on every
+-- workspace's tasks alike, never has to know workspaces exist.
+create table if not exists ownership (
+    kind text not null,
+    key text not null,
+    workspace_id text not null,
+    primary key (kind, key)
+);
+create index if not exists ownership_workspace_idx on ownership(kind, workspace_id);
+
+-- Platforms: named groups of edges inside a workspace ("Flow rig" = pump + collector).
+create table if not exists edge_platforms (
+    id text primary key,
+    workspace_id text not null,
+    name text not null,
+    device_ids text not null default '[]',
+    created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
 create table if not exists cloud_status (
     id text primary key,
     broker_connected integer not null default 0,
@@ -176,16 +241,29 @@ create table if not exists sequence_pushes (
 
 create index if not exists sequence_pushes_status_idx on sequence_pushes(status);
 
--- Short-lived, single-use device pairing codes. Replaces carrying a base64 token (which, on AWS,
--- wrapped a device private key) between machines by hand.
-create table if not exists pairing_codes (
+-- Device pairing (src/lib/pairing.js): the edge starts a request and shows its code, a signed-in
+-- person approves it, the edge collects its credentials with the secret only it holds.
+-- status: waiting -> approved -> provisioning -> redeemed, or waiting -> denied.
+create table if not exists pairing_requests (
     code text primary key,
+    secret_hash text not null unique,
+    requested_id text,                       -- the device's own lasting id (edge CLOUD_DEVICE_ID)
     device_name text not null default '',
-    status text not null default 'pending',
+    instruments text not null default '[]',
+    status text not null default 'waiting',
     device_id text,
     created_at text,
-    expires_at text,
+    expires_at text not null,
+    approved_at text,
     redeemed_at text
+);
+
+-- Devices removed from Cloud (their Devices page, or the device leaving). A device that is still
+-- running, or a retained message the broker replays, would otherwise register it again from its
+-- next heartbeat; the daemon ignores these ids until the device is paired again.
+create table if not exists removed_devices (
+    id text primary key,
+    removed_at text not null
 );
 `;
 
@@ -196,6 +274,26 @@ function jsonParse(value, fallback) {
 }
 
 const nowIso = () => new Date().toISOString();
+
+/**
+ * When a repeating task's next occurrence is due: `repeat_every_ms` after the previous one STARTED
+ * (it was dispatched), not after it finished -- "every 10 minutes" means the changes land 10
+ * minutes apart, however long each takes. Never in the past: an occurrence that overran its
+ * interval is followed at once rather than skipped. Without a dispatch time, from now.
+ */
+function nextOccurrenceAt(row, now = Date.now()) {
+  const started = Date.parse(row && row.dispatched_at || '');
+  const base = Number.isNaN(started) ? now : started;
+  return new Date(Math.max(now, base + ((row && row.repeat_every_ms) || 0))).toISOString();
+}
+
+/** Add one device record to a task's occurrences, replacing a redelivered copy of the same run. */
+function appendOccurrence(results, result) {
+  if (!result) return results || [];
+  const kept = (Array.isArray(results) ? results : [])
+    .filter((r) => result.edgeRunId === undefined || r.edgeRunId !== result.edgeRunId);
+  return [...kept, result];
+}
 
 /** Row -> task, with the two JSON columns parsed. `run` stays null for a plain single-step task. */
 function hydrateTask(r) {
@@ -256,6 +354,12 @@ function createSqliteStore(filePath) {
     'alter table run_tasks add column progress text',
     'alter table run_tasks add column result text',
     'alter table devices add column busy integer not null default 0',
+    'alter table run_tasks add column command text',
+    'alter table devices add column image text',
+    'alter table devices add column image_updated_at text',
+    'alter table run_tasks add column results text',
+    "alter table runs add column after_runs text not null default '[]'",
+    'alter table pairing_requests add column requested_id text',
   ]) {
     try { db.exec(ddl); } catch { /* column already present */ }
   }
@@ -273,6 +377,8 @@ function createSqliteStore(filePath) {
     busy: !!row.busy,
     last_seen: row.last_seen,
     schema: jsonParse(row.schema, {}),
+    // Changes whenever the picture does, so it can key the image URL and bust the cache.
+    image_version: row.image_updated_at || null,
   });
 
   const mapSequence = (row) => row && ({
@@ -321,9 +427,24 @@ function createSqliteStore(filePath) {
       );
     },
 
+    // A fixed order (by name, which is the id), never by last_seen: every device's heartbeat
+    // bumps last_seen every 5 s, so with several devices that order reshuffled on every poll and
+    // every list built from it -- the Orchestrator toolbox, Devices, the sidebar -- jumped around.
     async listDevices() {
-      return all('select id, name, status, busy, last_seen, schema from devices order by last_seen desc')
+      return all('select id, name, status, busy, last_seen, schema, image_updated_at from devices order by id collate nocase, id')
         .map(mapDevice);
+    },
+
+    /** Returns whether the device exists. `image` null removes the picture. */
+    async setDeviceImage(deviceId, image) {
+      const res = run('update devices set image = ?, image_updated_at = ? where id = ?',
+        image, image ? nowIso() : null, deviceId);
+      return res.changes > 0;
+    },
+
+    async getDeviceImage(deviceId) {
+      const row = get('select image, image_updated_at from devices where id = ?', deviceId);
+      return row && row.image ? { image: row.image, updated_at: row.image_updated_at } : null;
     },
 
     /** Cloud tasks not yet sent anywhere: ready but held (`pending`) or waiting on others (`blocked`). */
@@ -335,18 +456,31 @@ function createSqliteStore(filePath) {
       ).map(r => ({ ...r, block: jsonParse(r.block, {}) }));
     },
 
+    /**
+     * `result` is the latest record; `results` keeps every occurrence of a repeating task ("every
+     * 5 minutes, 3 times" is three runs on the device, and used to leave only the last one here).
+     * Keyed on the device's run id, so a redelivered message replaces its entry, not duplicates it.
+     */
     async setTaskResult(runId, nodeId, result) {
-      run('update run_tasks set result = ? where run_id = ? and node_id = ?',
-        JSON.stringify(result ?? null), runId, nodeId);
+      const row = get('select results from run_tasks where run_id = ? and node_id = ?', runId, nodeId);
+      const results = appendOccurrence(row ? jsonParse(row.results, []) : [], result);
+      run('update run_tasks set result = ?, results = ? where run_id = ? and node_id = ?',
+        JSON.stringify(result ?? null), JSON.stringify(results), runId, nodeId);
     },
 
     /** Every task of one Cloud run with whatever its device sent back -- one experiment's record. */
     async listRunTaskRecords(runId) {
       return all(
-        `select node_id, device_id, status, dispatched_at, updated_at, result, progress
+        `select node_id, device_id, status, dispatched_at, updated_at, result, results, progress, command
          from run_tasks where run_id = ?`,
         runId,
-      ).map(r => ({ ...r, result: r.result ? jsonParse(r.result, null) : null, progress: r.progress ? jsonParse(r.progress, null) : null }));
+      ).map(r => ({
+        ...r,
+        result: r.result ? jsonParse(r.result, null) : null,
+        results: r.results ? jsonParse(r.results, []) : [],
+        progress: r.progress ? jsonParse(r.progress, null) : null,
+        command: r.command ? jsonParse(r.command, null) : null,
+      }));
     },
 
     async getTaskResult(runId, nodeId) {
@@ -365,6 +499,7 @@ function createSqliteStore(filePath) {
                 json_extract(t.result, '$.name') as name,
                 json_extract(t.result, '$.edgeRunId') as edge_run_id,
                 json_extract(t.result, '$.status') as result_status,
+                json_extract(t.result, '$.parameters._issues') as issues,
                 json_extract(t.result, '$.end_time') as end_time,
                 json_array_length(t.result, '$.steps') as step_count
          from run_tasks t left join runs r on r.id = t.run_id
@@ -429,11 +564,52 @@ function createSqliteStore(filePath) {
     },
 
     // --- runs ----------------------------------------------------------------------------
-    async insertRun({ id, name, status, nodes, edges }) {
+    async insertRun({ id, name, status, nodes, edges, after_runs }) {
       run(
-        'insert into runs (id, name, status, nodes, edges) values (?, ?, ?, ?, ?)',
+        'insert into runs (id, name, status, nodes, edges, after_runs) values (?, ?, ?, ?, ?, ?)',
         id, name || '', status || 'running', JSON.stringify(nodes ?? []), JSON.stringify(edges ?? []),
+        JSON.stringify(after_runs ?? []),
       );
+    },
+
+    /**
+     * Runs with work still open on any of these devices -- running, sent, ready or waiting on an
+     * earlier step (a repeat's next occurrence included) -- oldest first. Judged by the tasks, not
+     * the run's own status, so a run left marked 'running' by an old failure holds nothing up.
+     */
+    async listOpenRunsOnDevices(deviceIds) {
+      if (!deviceIds.length) return [];
+      const marks = deviceIds.map(() => '?').join(',');
+      return all(
+        `select r.id, r.name, count(*) as open_tasks, min(r.created_at) as created_at
+         from run_tasks t join runs r on r.id = t.run_id
+         where t.device_id in (${marks}) and t.status in ('pending','blocked','queued','running')
+         group by r.id order by created_at asc`,
+        ...deviceIds,
+      );
+    },
+
+    /** Whether any of these runs still has a task that has not finished. */
+    async runsHaveOpenTasks(runIds) {
+      if (!runIds.length) return false;
+      const marks = runIds.map(() => '?').join(',');
+      return !!get(
+        `select 1 as open from run_tasks
+         where run_id in (${marks}) and status in ('pending','blocked','queued','running') limit 1`,
+        ...runIds,
+      );
+    },
+
+    async listQueuedRuns() {
+      return all(`select id, name, after_runs from runs where status = 'queued' order by created_at asc`)
+        .map(r => ({ ...r, after_runs: jsonParse(r.after_runs, []) }));
+    },
+
+    /** Compare-and-set, so two sweeps cannot both start one queued run. */
+    async updateRunStatusFrom(runId, fromStatus, toStatus) {
+      const res = run('update runs set status = ?, updated_at = ? where id = ? and status = ?',
+        toStatus, nowIso(), runId, fromStatus);
+      return res.changes > 0;
     },
 
     async getRun(runId) {
@@ -499,18 +675,24 @@ function createSqliteStore(filePath) {
 
     async listRecentTasks(limit) {
       return all(
-        `select run_id, node_id, device_id, status, members, progress, updated_at,
-                json_extract(result, '$.edgeRunId') as edge_run_id
-         from run_tasks order by updated_at desc limit ?`,
+        `select t.run_id, t.node_id, t.device_id, t.status, t.members, t.progress, t.command, t.updated_at,
+                t.repeat_total, t.repeat_done, t.not_before,
+                json_extract(t.result, '$.edgeRunId') as edge_run_id, r.status as run_status
+         from run_tasks t left join runs r on r.id = t.run_id order by t.updated_at desc limit ?`,
         limit,
-      ).map(r => ({ ...r, members: jsonParse(r.members, [r.node_id]), progress: r.progress ? jsonParse(r.progress, null) : null }));
+      ).map(r => ({
+        ...r,
+        members: jsonParse(r.members, [r.node_id]),
+        progress: r.progress ? jsonParse(r.progress, null) : null,
+        command: r.command ? jsonParse(r.command, null) : null,
+      }));
     },
 
     async listTasksByStatus(status) {
       // Oldest first: tasks now wait their turn per device (see deviceHasActiveTask), so the
       // order they are offered in is the order a device works through them.
       return all(
-        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress
+        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress, repeat_done
          from run_tasks where status = ? order by updated_at asc`,
         status,
       ).map(hydrateTask).filter((t) => isDue(t));
@@ -543,7 +725,7 @@ function createSqliteStore(filePath) {
         inFlight = true;
         try {
           const rows = all(
-            `select run_id, node_id, device_id, block, run, status, not_before
+            `select run_id, node_id, device_id, block, run, status, not_before, repeat_done
              from run_tasks where status = 'pending'`,
           ).map(hydrateTask).filter((t) => isDue(t));
           for (const r of rows) {
@@ -592,10 +774,39 @@ function createSqliteStore(filePath) {
       return res.changes > 0;
     },
 
+    /**
+     * Record a decision about a task its device has stopped on. Taken only while the task is
+     * still stopped on the pause the decision names -- a second click, or a decision racing the
+     * bench's own answer, finds the pause gone and changes nothing.
+     */
+    async setTaskCommand(runId, nodeId, command) {
+      const res = run(
+        `update run_tasks set command = ?, updated_at = ?
+         where run_id = ? and node_id = ? and status = 'running'
+           and json_extract(progress, '$.pause') = ?`,
+        JSON.stringify(command), nowIso(), runId, nodeId, command.pause,
+      );
+      return res.changes > 0;
+    },
+
+    /** Decisions not yet seen to take effect, with the progress to check them against. */
+    async listTaskCommands() {
+      return all(
+        `select run_id, node_id, device_id, status, progress, command
+         from run_tasks where command is not null`,
+      ).map(r => ({ ...r, progress: r.progress ? jsonParse(r.progress, null) : null, command: jsonParse(r.command, null) }));
+    },
+
+    /** Unguarded: the daemon is the only writer after the route, and `null` clears it. */
+    async updateTaskCommand(runId, nodeId, command) {
+      run('update run_tasks set command = ? where run_id = ? and node_id = ?',
+        command ? JSON.stringify(command) : null, runId, nodeId);
+    },
+
     async updateTaskStatusFrom(runId, nodeId, fromStatus, toStatus, extra) {
       // A dispatch starts the task afresh (a repeat's next occurrence included), so the previous
-      // occurrence's progress must not show against it.
-      const setDispatched = extra && extra.dispatched ? ', dispatched_at = ?, progress = null' : '';
+      // occurrence's progress -- and any decision about it -- must not show against it.
+      const setDispatched = extra && extra.dispatched ? ', dispatched_at = ?, progress = null, command = null' : '';
       const args = extra && extra.dispatched
         ? [toStatus, nowIso(), nowIso(), runId, nodeId, fromStatus]
         : [toStatus, nowIso(), runId, nodeId, fromStatus];
@@ -622,7 +833,7 @@ function createSqliteStore(filePath) {
       // count with no interval means back to back -- it used to mean "never", so "2 times" with
       // the minutes box left empty silently ran once.
       const row = get(
-        'select repeat_every_ms, repeat_total from run_tasks where run_id = ? and node_id = ?', runId, nodeId,
+        'select repeat_every_ms, repeat_total, dispatched_at from run_tasks where run_id = ? and node_id = ?', runId, nodeId,
       );
       if (!row || !(row.repeat_total > 1)) return false;
       const res = run(
@@ -630,9 +841,28 @@ function createSqliteStore(filePath) {
          set status = 'pending', repeat_done = repeat_done + 1, not_before = ?, updated_at = ?
          where run_id = ? and node_id = ? and status = 'completed'
            and repeat_total > 1 and repeat_done + 1 < repeat_total`,
-        new Date(Date.now() + (row.repeat_every_ms || 0)).toISOString(), nowIso(), runId, nodeId,
+        nextOccurrenceAt(row), nowIso(), runId, nodeId,
       );
       return res.changes > 0;
+    },
+
+    // --- the Cloud library of distributed workflows ----------------------------------------
+    async listCloudWorkflows() {
+      return all('select * from cloud_workflows order by updated_at desc').map((r) => ({
+        ...r, nodes: jsonParse(r.nodes, []), edges: jsonParse(r.edges, []),
+      }));
+    },
+
+    /** Insert or replace by name; `created_at` survives a re-save, `updated_at` moves. */
+    async upsertCloudWorkflow({ name, description, nodes, edges, created_at, updated_at }) {
+      run(
+        `insert into cloud_workflows (name, description, nodes, edges, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?)
+         on conflict(name) do update set description = excluded.description, nodes = excluded.nodes,
+           edges = excluded.edges, updated_at = excluded.updated_at`,
+        name, description || '', JSON.stringify(nodes ?? []), JSON.stringify(edges ?? []),
+        created_at || nowIso(), updated_at || nowIso(),
+      );
     },
 
     // --- schedules -----------------------------------------------------------------------
@@ -760,41 +990,91 @@ function createSqliteStore(filePath) {
       return res.changes > 0;
     },
 
-    // --- device pairing ------------------------------------------------------------------
-    async createPairingCode({ code, deviceName, expiresAt }) {
+    // --- device pairing (src/lib/pairing.js) ----------------------------------------------
+    async createPairingRequest({ code, secretHash, requestedId, deviceName, instruments, expiresAt }) {
       run(
-        `insert into pairing_codes (code, device_name, status, created_at, expires_at)
-         values (?, ?, 'pending', ?, ?)`,
-        code, deviceName || '', nowIso(), expiresAt,
+        `insert into pairing_requests (code, secret_hash, requested_id, device_name, instruments, status, created_at, expires_at)
+         values (?, ?, ?, ?, ?, 'waiting', ?, ?)`,
+        code, secretHash, requestedId || null, deviceName || '', JSON.stringify(instruments || []), nowIso(), expiresAt,
       );
     },
 
-    async getPairingCode(code) {
-      return get('select * from pairing_codes where code = ?', code) || null;
+    // --- removed devices (never re-registered from a heartbeat until paired again) --------
+    async markDeviceRemoved(deviceId) {
+      run(
+        `insert into removed_devices (id, removed_at) values (?, ?)
+         on conflict(id) do update set removed_at = excluded.removed_at`,
+        deviceId, nowIso(),
+      );
     },
 
-    /** Claim atomically: only the first redeemer of an unexpired, unredeemed code wins. Doing
-     *  this as one conditional UPDATE rather than read-then-write is what stops two devices
-     *  racing the same code into two provisioned identities. */
-    async claimPairingCode(code, nowIsoStr) {
+    async clearDeviceRemoved(deviceId) {
+      run('delete from removed_devices where id = ?', deviceId);
+    },
+
+    async listRemovedDeviceIds() {
+      return all('select id from removed_devices').map((r) => r.id);
+    },
+
+    async isDeviceRemoved(deviceId) {
+      return !!get('select 1 as x from removed_devices where id = ?', deviceId);
+    },
+
+    async getPairingRequest(code) {
+      const row = get('select * from pairing_requests where code = ?', code);
+      return row ? { ...row, instruments: jsonParse(row.instruments, []) } : null;
+    },
+
+    async getPairingRequestBySecret(secretHash) {
+      const row = get('select * from pairing_requests where secret_hash = ?', secretHash);
+      return row ? { ...row, instruments: jsonParse(row.instruments, []) } : null;
+    },
+
+    /** waiting -> approved, only while unexpired. Approval restarts the clock, so a request
+     *  approved at 9:59 is not lost before the edge's next poll collects it. */
+    async approvePairingRequest(code, deviceName, nowIsoStr, expiresAt) {
       const res = run(
-        `update pairing_codes set status = 'redeeming', redeemed_at = ?
-         where code = ? and status = 'pending' and expires_at > ?`,
-        nowIso(), code, nowIsoStr,
+        `update pairing_requests set status = 'approved', device_name = ?, approved_at = ?, expires_at = ?
+         where code = ? and status = 'waiting' and expires_at > ?`,
+        deviceName, nowIso(), expiresAt, code, nowIsoStr,
       );
       return res.changes > 0;
     },
 
-    async finishPairingCode(code, deviceId, status) {
+    async denyPairingRequest(code, nowIsoStr) {
+      const res = run(
+        `update pairing_requests set status = 'denied'
+         where code = ? and status = 'waiting' and expires_at > ?`,
+        code, nowIsoStr,
+      );
+      return res.changes > 0;
+    },
+
+    /** approved -> provisioning, atomically: one conditional UPDATE, so two polls can never both
+     *  mint credentials (on AWS, two Things and two certificates) from one approval. */
+    async claimPairingRequest(secretHash, nowIsoStr) {
+      const res = run(
+        `update pairing_requests set status = 'provisioning'
+         where secret_hash = ? and status = 'approved' and expires_at > ?`,
+        secretHash, nowIsoStr,
+      );
+      return res.changes > 0;
+    },
+
+    async finishPairingRequest(code, deviceId, status) {
       run(
-        'update pairing_codes set status = ?, device_id = ? where code = ?',
-        status, deviceId || null, code,
+        'update pairing_requests set status = ?, device_id = ?, redeemed_at = ? where code = ?',
+        status, deviceId || null, status === 'redeemed' ? nowIso() : null, code,
       );
     },
 
-    async purgeExpiredPairingCodes(nowIsoStr) {
+    /** Requests nobody finished: expired while waiting or approved, and denied ones. A redeemed
+     *  request is kept as the record of which request became which device. */
+    async purgeExpiredPairingRequests(nowIsoStr) {
       const res = run(
-        "delete from pairing_codes where status = 'pending' and expires_at <= ?", nowIsoStr,
+        `delete from pairing_requests
+         where status in ('waiting', 'approved', 'denied') and expires_at <= ?`,
+        nowIsoStr,
       );
       return res.changes;
     },
@@ -826,10 +1106,91 @@ function createSqliteStore(filePath) {
       };
     },
 
+    // --- sessions (src/lib/auth.ts) ---------------------------------------------------------
+
+    async createSession(row) {
+      run(
+        `insert into sessions (id, user_id, email, name, access_token, refresh_token, token_expires_at,
+           workspace_id, workspaces, workspaces_checked_at, expires_at, last_seen)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        row.id, row.user_id, row.email ?? null, row.name ?? null, row.access_token ?? null, row.refresh_token ?? null,
+        Number(row.token_expires_at) || 0, row.workspace_id, JSON.stringify(row.workspaces || []),
+        row.workspaces_checked_at ?? null, row.expires_at, nowIso(),
+      );
+    },
+
+    async getSession(id) {
+      const row = get('select * from sessions where id = ?', id);
+      return row ? { ...row, workspaces: jsonParse(row.workspaces, []) } : null;
+    },
+
+    async updateSession(id, patch) {
+      const fields = { ...patch };
+      if (fields.workspaces) fields.workspaces = JSON.stringify(fields.workspaces);
+      const keys = Object.keys(fields).filter((k) => ['access_token', 'refresh_token', 'token_expires_at', 'workspace_id',
+        'workspaces', 'workspaces_checked_at', 'expires_at', 'last_seen', 'name', 'email'].includes(k));
+      if (!keys.length) return;
+      run(`update sessions set ${keys.map((k) => `${k} = ?`).join(', ')} where id = ?`, ...keys.map((k) => fields[k]), id);
+    },
+
+    async deleteSession(id) {
+      run('delete from sessions where id = ?', id);
+    },
+
+    async purgeExpiredSessions(nowIsoStr) {
+      run('delete from sessions where expires_at < ?', nowIsoStr);
+    },
+
+    // --- ownership (src/lib/workspace.ts) -----------------------------------------------------
+
+    async setOwner(kind, key, workspaceId) {
+      run(
+        `insert into ownership (kind, key, workspace_id) values (?, ?, ?)
+         on conflict(kind, key) do update set workspace_id = excluded.workspace_id`,
+        kind, String(key), workspaceId,
+      );
+    },
+
+    async getOwner(kind, key) {
+      const row = get('select workspace_id from ownership where kind = ? and key = ?', kind, String(key));
+      return row ? row.workspace_id : null;
+    },
+
+    async listOwned(kind, workspaceId) {
+      return all('select key from ownership where kind = ? and workspace_id = ?', kind, workspaceId).map((r) => r.key);
+    },
+
+    async listOwnedKeys(kind) {
+      return all('select key from ownership where kind = ?', kind).map((r) => r.key);
+    },
+
+    async deleteOwner(kind, key) {
+      run('delete from ownership where kind = ? and key = ?', kind, String(key));
+    },
+
+    // --- platforms: groups of edges ----------------------------------------------------------
+
+    async listPlatforms(workspaceId) {
+      return all('select * from edge_platforms where workspace_id = ? order by name collate nocase', workspaceId)
+        .map((r) => ({ ...r, device_ids: jsonParse(r.device_ids, []) }));
+    },
+
+    async upsertPlatform({ id, workspace_id, name, device_ids }) {
+      run(
+        `insert into edge_platforms (id, workspace_id, name, device_ids, updated_at) values (?, ?, ?, ?, ?)
+         on conflict(id) do update set name = excluded.name, device_ids = excluded.device_ids, updated_at = excluded.updated_at`,
+        id, workspace_id, name, JSON.stringify(device_ids || []), nowIso(),
+      );
+    },
+
+    async deletePlatform(id, workspaceId) {
+      run('delete from edge_platforms where id = ? and workspace_id = ?', id, workspaceId);
+    },
+
     close() {
       try { db.close(); } catch { /* already closed */ }
     },
   };
 }
 
-module.exports = { createSqliteStore };
+module.exports = { createSqliteStore, appendOccurrence, nextOccurrenceAt };

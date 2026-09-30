@@ -197,7 +197,12 @@ class LocalMQTTBroker(MessageBroker):
         self.client.disconnect()
 
     def publish(self, topic: str, payload: dict, retain: bool = False, qos: int = 0):
-        self.client.publish(topic, json.dumps(payload, default=str), qos=qos, retain=retain)
+        # Returns paho's MQTTMessageInfo, so a caller that must know it went out can wait on it.
+        return self.client.publish(topic, json.dumps(payload, default=str), qos=qos, retain=retain)
+
+    def clear_retained(self, topic: str):
+        """Delete a retained message: an empty retained payload is MQTT's tombstone."""
+        return self.client.publish(topic, b"", qos=1, retain=True)
 
     def subscribe(self, topic: str):
         if topic not in self._subscriptions:

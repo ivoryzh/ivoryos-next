@@ -4,7 +4,7 @@
     "prep": [
         {
             "id": 1,
-            "uuid": 555056634,
+            "uuid": 706483676,
             "instrument": "balance",
             "action": "tare",
             "args": {},
@@ -15,7 +15,7 @@
         },
         {
             "id": 2,
-            "uuid": 623801262,
+            "uuid": 672738650,
             "instrument": "uv_vis",
             "action": "blank",
             "args": {},
@@ -28,37 +28,7 @@
     "script": [
         {
             "id": 1,
-            "uuid": 538643512,
-            "instrument": "Flow_Control",
-            "action": "User_Input",
-            "args": {
-                "prompt": "Vial ID for this sample?",
-                "variable_name": "sample_id",
-                "input_type": "str"
-            },
-            "arg_types": {},
-            "return": "",
-            "batch_action": false,
-            "consolidate_batch_args": false
-        },
-        {
-            "id": 2,
-            "uuid": 647705744,
-            "instrument": "Flow_Control",
-            "action": "User_Input",
-            "args": {
-                "prompt": "Dilution factor used?",
-                "variable_name": "dilution",
-                "input_type": "float"
-            },
-            "arg_types": {},
-            "return": "",
-            "batch_action": false,
-            "consolidate_batch_args": false
-        },
-        {
-            "id": 3,
-            "uuid": 393654984,
+            "uuid": 600568668,
             "instrument": "reactor",
             "action": "load_vial",
             "args": {
@@ -72,8 +42,8 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 4,
-            "uuid": 845242866,
+            "id": 2,
+            "uuid": 282786913,
             "instrument": "reactor",
             "action": "stir_rate_(setter)",
             "args": {
@@ -87,8 +57,8 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 5,
-            "uuid": 786354449,
+            "id": 3,
+            "uuid": 858669381,
             "instrument": "reactor",
             "action": "set_temperature",
             "args": {
@@ -102,8 +72,8 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 6,
-            "uuid": 978489148,
+            "id": 4,
+            "uuid": 14677287,
             "instrument": "reactor",
             "action": "hold",
             "args": {
@@ -117,8 +87,8 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 7,
-            "uuid": 996948444,
+            "id": 5,
+            "uuid": 312908253,
             "instrument": "reactor",
             "action": "temperature",
             "args": {},
@@ -134,8 +104,8 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 8,
-            "uuid": 105078713,
+            "id": 6,
+            "uuid": 285031363,
             "instrument": "uv_vis",
             "action": "measure_absorbance",
             "args": {
@@ -157,8 +127,8 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 9,
-            "uuid": 911481572,
+            "id": 7,
+            "uuid": 152953682,
             "instrument": "balance",
             "action": "weigh",
             "args": {
@@ -178,34 +148,38 @@
             "consolidate_batch_args": false
         },
         {
-            "id": 10,
-            "uuid": 441899188,
+            "id": 8,
+            "uuid": 980643453,
             "instrument": "Flow_Control",
             "action": "If",
             "args": {
                 "condition": "absorbance > 1.5"
             },
-            "arg_types": {},
+            "arg_types": {
+                "condition": "str"
+            },
             "return": "",
             "batch_action": false,
             "consolidate_batch_args": false
         },
         {
-            "id": 11,
-            "uuid": 667884753,
+            "id": 9,
+            "uuid": 333208434,
             "instrument": "Flow_Control",
             "action": "Comment",
             "args": {
                 "message": "Absorbance #absorbance is above the linear range \u2014 dilute further."
             },
-            "arg_types": {},
+            "arg_types": {
+                "message": "str"
+            },
             "return": "",
             "batch_action": false,
             "consolidate_batch_args": false
         },
         {
-            "id": 12,
-            "uuid": 326180984,
+            "id": 10,
+            "uuid": 121666889,
             "instrument": "Flow_Control",
             "action": "End_If",
             "args": {},
@@ -218,7 +192,7 @@
     "cleanup": [
         {
             "id": 1,
-            "uuid": 121290522,
+            "uuid": 841074762,
             "instrument": "reactor",
             "action": "cool_down",
             "args": {
@@ -232,7 +206,8 @@
             "consolidate_batch_args": false
         }
     ],
-    "version": 1,
-    "body_hash": "cb83ad9ec0285df50ba96448b0ffa1e623a45631935783e39e296e6d50b1eb96",
-    "updated_at": 1789718833.89981
+    "version": 3,
+    "body_hash": "d13624fc85a7c03ed1cddbce66e7f20b37fb3074ec44032fcba2765c1b7de110",
+    "updated_at": 1790234195.3758335,
+    "deck_version": 1
 }

@@ -1,9 +1,36 @@
 "use client";
 import React, { useEffect, useState } from 'react';
 import { AlertTriangle, CalendarClock, CheckCircle2, Cloud, ExternalLink, Link2, Loader2, Network, Play, Table2, Workflow } from 'lucide-react';
-import { promptDialog } from '@ivoryos/shared-ui';
+import { chooseDialog, notify, promptDialog } from '@ivoryos/shared-ui';
 import type { CloudCheck, CloudLink, DesktopApi, Profile } from '@/desktop';
 import { Button, StatusDot, cardClass } from './ui';
+
+/**
+ * Connect a deck to Cloud in one step: start it if needed, have it start pairing, and approve the
+ * code with the app's own sign-in (desktop main.js `pairWithCloud`). Signed out, the deck's Cloud
+ * Connect page opens instead, showing the code to approve on Cloud.
+ */
+export async function connectDeck(api: DesktopApi, profile: Profile) {
+  if (profile.status.state !== 'running') await api.start(profile.id);
+  let result = await api.pairWithCloud(profile.id);
+  if (result.status === 'choose-workspace') {
+    const workspace = await chooseDialog({
+      title: `Connect ${profile.name} to Cloud`,
+      message: 'Which workspace should it join? Everyone in that workspace can see it and run workflows on it.',
+      actions: [...result.workspaces.map((w, i) => ({ id: w.id, label: w.name, kind: i === 0 ? 'primary' as const : undefined })),
+        { id: 'cancel', label: 'Cancel', kind: 'cancel' as const }],
+    });
+    if (!workspace || workspace === 'cancel') return;
+    result = await api.pairWithCloud(profile.id, { workspace });
+  }
+  if (result.status === 'sign-in-needed') {
+    await api.open(profile.id, '/cloud/');
+    return;
+  }
+  if (result.status === 'approved') {
+    await notify(`${result.name} is approved${result.workspace ? ` in ${result.workspace}` : ''} and connects within a few seconds.`, { title: 'Connected to Cloud' });
+  }
+}
 
 /**
  * Each running deck's Cloud link, read from its own `/api/cloud-settings` every few seconds.
@@ -40,9 +67,8 @@ const BENEFITS = [
 ];
 
 /**
- * The launcher's entry point to IvoryOS Cloud. Signing in happens on Cloud, in the browser: the
- * desktop app never asks for a password. A deck joins with a short pairing code made on Cloud and
- * typed into that deck's Cloud Connect page, which this page opens in the deck's tab.
+ * The launcher's entry point to IvoryOS Cloud. A deck joins in one click when the app is signed in
+ * (connectDeck); otherwise its Cloud Connect page shows a code to approve on Cloud.
  */
 export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
   api: DesktopApi;
@@ -65,22 +91,19 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
 
   const setAddress = async () => {
     const url = await promptDialog(
-      'The address of the IvoryOS Cloud your decks pair with. Change it only if your lab runs its own Cloud on its network. Each deck uses the new address from its next start.',
+      'The address of the Cloud your decks pair with. Change it only if your lab runs its own Cloud on its network. Each deck uses the new address from its next start.',
       { title: 'Cloud address', defaultValue: cloudUrl },
     );
     if (url !== null && url !== undefined) run(() => api.setCloudUrl(url.trim()));
   };
 
-  const connect = (p: Profile) => run(async () => {
-    if (p.status.state !== 'running') await api.start(p.id);
-    await api.open(p.id, '/cloud/');
-  });
+  const connect = (p: Profile) => run(() => links[p.id]?.paired ? api.open(p.id, '/cloud/') : connectDeck(api, p));
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
       <div className="rounded-2xl p-6 bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm">
         <div className="flex items-center gap-2 text-sm font-medium text-indigo-100">
-          <Cloud className="w-4 h-4" /> IvoryOS Cloud
+          <Cloud className="w-4 h-4" /> Cloud
           <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/15">Early access</span>
         </div>
         <h2 className="mt-2 text-2xl font-semibold">Manage every deck from one place</h2>
@@ -89,7 +112,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <button type="button" disabled={reach?.reachable === false} onClick={() => run(() => api.openCloud())} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-indigo-700 text-sm font-semibold hover:bg-indigo-50 disabled:opacity-60 disabled:cursor-not-allowed">
-            <Cloud className="w-3.5 h-3.5" /> Open IvoryOS Cloud
+            <Cloud className="w-3.5 h-3.5" /> Open Cloud
           </button>
           <button type="button" disabled={reach?.reachable === false} title="Open it in your web browser instead" onClick={() => run(() => api.openCloudInBrowser())} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 text-white text-sm font-medium hover:bg-white/25 disabled:opacity-60 disabled:cursor-not-allowed">
             <ExternalLink className="w-3.5 h-3.5" /> Browser
@@ -104,7 +127,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
         <div className="rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-900/10 p-4 flex gap-3 text-sm">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
           <div className="flex-1 space-y-1 text-amber-900 dark:text-amber-200">
-            <p className="font-medium">IvoryOS Cloud is not answering at {cloudUrl}.</p>
+            <p className="font-medium">Cloud is not answering at {cloudUrl}.</p>
             {reach.suggestion ? (
               <p className="text-amber-800/90 dark:text-amber-200/80">
                 Found one at <span className="font-mono">{reach.suggestion.url}</span>. {reach.suggestion.reason}
@@ -158,7 +181,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
           <div className="flex-1">
             <h3 className="text-sm font-semibold">Your decks</h3>
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              {connected} of {profiles.length} connected. To connect one, make a pairing code in Cloud’s Settings, then enter it on the deck’s Cloud Connect page.
+              {connected} of {profiles.length} connected. Signed in, Connect joins a deck in one step; otherwise the deck shows a code to approve on Cloud.
             </p>
           </div>
           <Button small tone="ghost" onClick={setAddress} title="Only for a Cloud your lab runs itself">{cloudUrl.replace(/^https?:\/\//, '')}</Button>
@@ -191,6 +214,8 @@ function LinkState({ running, link }: { running: boolean; link?: CloudLink }) {
   const base = 'inline-flex items-center gap-1.5 text-xs';
   if (!running) return <span className={`${base} text-gray-400`}>Start the deck to see its link</span>;
   if (!link) return <span className={`${base} text-gray-400`}><Loader2 className="w-3 h-3 animate-spin" /> Checking</span>;
+  if (link.paused) return <span className={`${base} text-indigo-600 dark:text-indigo-400`}>Paused</span>;
+  if (link.pairing?.state === 'waiting') return <span className={`${base} text-indigo-600 dark:text-indigo-400`}><Loader2 className="w-3 h-3 animate-spin" /> Waiting for approval · <span className="font-mono">{link.pairing.code}</span></span>;
   if (!link.paired) return <span className={`${base} text-gray-500 dark:text-gray-400`}>Not connected</span>;
   if (link.connection_state === 'connected') return <span className={`${base} text-green-700 dark:text-green-400`}><CheckCircle2 className="w-3.5 h-3.5" /> Connected{link.client_id ? ` as ${link.client_id}` : ''}</span>;
   if (link.connection_state === 'error') return <span title={link.connection_error || ''} className={`${base} text-red-600 dark:text-red-400`}><AlertTriangle className="w-3.5 h-3.5" /> Paired, cannot reach Cloud</span>;

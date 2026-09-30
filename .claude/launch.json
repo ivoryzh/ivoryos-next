@@ -15,6 +15,32 @@
       "autoPort": false
     },
     {
+      "name": "flow-pump-edge",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--project",
+        "edge_server",
+        "python",
+        "example/flow_lab/pump_edge.py"
+      ],
+      "port": 8081,
+      "autoPort": false
+    },
+    {
+      "name": "flow-collector-edge",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--project",
+        "edge_server",
+        "python",
+        "example/flow_lab/collector_edge.py"
+      ],
+      "port": 8082,
+      "autoPort": false
+    },
+    {
       "name": "core-frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": [

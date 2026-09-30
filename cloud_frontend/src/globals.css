@@ -18,6 +18,8 @@
     --glass-header-bg: rgba(255, 255, 255, 0.7);
     --input-bg: rgba(0, 0, 0, 0.05);
     --sidebar-hover-bg: rgba(0, 0, 0, 0.05);
+    /* An opaque panel, for menus that float over content (the glass panels are see-through). */
+    --panel-bg-solid: #ffffff;
     --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
   }
 
@@ -33,6 +35,11 @@
     --glass-header-bg: rgba(13, 15, 18, 0.7);
     --input-bg: rgba(0, 0, 0, 0.2);
     --sidebar-hover-bg: rgba(255, 255, 255, 0.05);
+    --panel-bg-solid: #16191f;
+  }
+
+  .hover-bg:hover {
+    background: var(--sidebar-hover-bg);
   }
 
   * {

@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import { ListTodo, Play, Pause, XCircle, Edit3, Check, X, ArrowUp, ArrowDown, Trash2, Cloud } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunProgress, { type RunStep } from '@/components/RunProgress';
-import { confirmDialog, notify } from '@ivoryos/shared-ui';
+import { confirmDialog, notify, useDocumentTheme } from '@ivoryos/shared-ui';
 
 // The edge server runs pending work in (queue_position, id) order — a run only has a
 // queue_position once someone has moved it — so the list has to sort the same way or the
@@ -86,7 +86,7 @@ const isLive = (run: QueueRun | null | undefined, activeId?: number | null) =>
   !!run && !!activeId && run.id === activeId;
 
 export default function QueuePage() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [activeWorkflowId, setActiveWorkflowId] = useState<number | null>(null);
   const [workflow, setWorkflow] = useState<any>(null);
   const [editingStep, setEditingStep] = useState<number | null>(null);
@@ -101,13 +101,6 @@ export default function QueuePage() {
   // the device is free -- so without this the bench could not tell that more was coming.
   const [cloudQueue, setCloudQueue] = useState<any>(null);
 
-  useEffect(() => {
-    // Theme init
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  }, []);
 
   const fetchQueue = async () => {
       try {
@@ -193,13 +186,6 @@ export default function QueuePage() {
     return () => clearTimeout(timer);
   }, [activeRun?.id, activeRun?.status, activeRun?.end_time]);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const handleRunControl = async (action: 'pause' | 'resume' | 'cancel', runId?: number) => {
     const targetId = runId || activeRun?.id;
@@ -413,7 +399,7 @@ export default function QueuePage() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       <div className="flex-1 flex flex-col relative z-0 min-w-0">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">

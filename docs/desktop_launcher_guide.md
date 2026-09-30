@@ -252,6 +252,31 @@ A driver's Hub entry decides which settings the launcher asks for. If it is miss
 error says `missing 1 required positional argument: 'port'`), add it on the instrument with
 **Edit → Add argument**, and consider fixing the entry on the Hub.
 
+"Add from Hub" offers four kinds of thing, each added to the deck it was opened from:
+
+| Kind | What adding it does |
+|---|---|
+| Instrument | installs the driver, adds one instrument with the settings you fill in |
+| Platform | a whole deck's worth: its drivers (each with its own name and settings), its plugins and its workflows. Goes **onto this deck**, or **into a new deck profile** of its own, on the next free port |
+| Plugin | installs the package and lists it in the deck's `plugins`. **Only v2 plugins** (an `ivoryos_edge.plugins.Plugin`): a v1 plugin is a Flask blueprint for the original IvoryOS, cannot run here, and is shown with the reason instead of an Add button (see `docs/plugins.md` to port one) |
+| Workflow template | saved into the deck's workflow library (through the edge's API while it runs, as a file it adopts otherwise), never replacing one: a name in use gets a number. A template that calls instruments this deck does not have is **still allowed**, after a warning; the Library marks its steps until they are pointed at this deck's instruments in the Designer |
+
+**Public and private hub.** The switch at the top lists public rows, or the private hub: what only
+you, or an organization you belong to, can see. It is a Pro feature and needs you signed in. The
+launcher reads the catalog straight from the Automation Hub's database with your session, and the
+database's row-level security decides which rows come back; the Hub website is not involved.
+Private repositories (GitHub/GitLab) sit on the private side too: connect them by signing in on
+GitHub or GitLab in your browser, or with a token.
+
+**The sidebar is the tab list.** Click a running deck to open its page; a stopped one opens its
+launcher page, where you can start it. The gear on each row always opens the launcher page
+(instruments, log, settings). Drag rows to reorder them. Ctrl+B (or the button at the top left)
+hides or shows the sidebar, from anywhere, including inside a deck's page. The reload button at
+the top reloads the page you are looking at, for when it did not pick up a change.
+
+**One theme.** Settings -> Appearance (System, Light, Dark) applies to the launcher, every deck's
+page and Cloud together.
+
 ## 10. Where things are on disk
 
 On macOS in `~/Library/Application Support/IvoryOS/` (Windows: `%APPDATA%\IvoryOS`, Linux:

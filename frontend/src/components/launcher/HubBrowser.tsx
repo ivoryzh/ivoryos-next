@@ -1,136 +1,283 @@
 "use client";
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Activity, ArrowLeft, Bot, Camera, CheckCircle2, Cpu, Droplets, ExternalLink, FlaskConical, FlaskRound, Gauge,
-  GraduationCap, LayoutGrid, Loader2, Lock, Microscope, Package, Scale, Search, Syringe, Thermometer, Wind, type LucideIcon,
+  Activity, ArrowLeft, Bot, Camera, CheckCircle2, Cpu, Droplets, ExternalLink, FileText, FlaskConical, FlaskRound, Gauge,
+  GitBranch, Globe, GraduationCap, Layers, Loader2, Lock, Microscope, Package, Puzzle, Scale, Search, Sparkles, Star, Syringe,
+  Thermometer, Wind, type LucideIcon,
 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
-import type { ArgDef, DesktopApi, HubModule } from '@/desktop';
-import { toForm, type FormValues } from '@/launcherArgs';
+import type { Deck, DesktopApi, HubModule, HubPlatform, HubPlugin, HubTemplate } from '@/desktop';
+import { emptyFields, toForm, type FormValues } from '@/launcherArgs';
+import { inScope, preferV2, type Scope } from '@/hubCatalog';
 import ArgsForm from './ArgsForm';
 import PrivateRepos, { type InstrumentSeed } from './PrivateRepos';
+import { PlatformCard, PlatformDetail } from './HubPlatforms';
+import { PluginCard, PluginDetail } from './HubPlugins';
+import { TemplateCard, TemplateDetail, templateTitle } from './HubTemplates';
+import { ErrorBox, Loading, VisibilityBadge } from './hubUi';
 import { Button, Field, Modal, inputClass, labelClass } from './ui';
 
+type Kind = 'starred' | 'instruments' | 'platforms' | 'plugins' | 'workflows' | 'repos';
+type ListKind = Exclude<Kind, 'repos' | 'starred'>;
+type Chosen =
+  | { kind: 'instrument'; module: HubModule }
+  | { kind: 'platform'; platform: HubPlatform }
+  | { kind: 'plugin'; plugin: HubPlugin }
+  | { kind: 'template'; template: HubTemplate };
+type Loaded<T> = { items: T[] | null; error: string | null };
+
+/** Load one catalog list once; `items` is null until it arrives, [] (with `error`) if it failed. */
+function useCatalog<T>(load: () => Promise<T[]>): Loaded<T> {
+  const [state, setState] = useState<Loaded<T>>({ items: null, error: null });
+  useEffect(() => {
+    let cancelled = false;
+    load().then(items => { if (!cancelled) setState({ items, error: null }); })
+      .catch(e => { if (!cancelled) setState({ items: [], error: e.message }); });
+    return () => { cancelled = true; };
+  }, [load]);
+  return state;
+}
+
+const KINDS: { kind: ListKind; label: string; icon: LucideIcon; noun: string }[] = [
+  { kind: 'instruments', label: 'Instruments', icon: Cpu, noun: 'driver' },
+  { kind: 'platforms', label: 'Platforms', icon: Layers, noun: 'platform' },
+  { kind: 'plugins', label: 'Plugins', icon: Puzzle, noun: 'plugin' },
+  { kind: 'workflows', label: 'Workflows', icon: FileText, noun: 'workflow' },
+];
+
 /**
- * Browse the Hub's drivers and add one to a deck: pick a category or search, pick a card, fill in
- * its settings (the Hub's own argument form), confirm, and the launcher installs the package and
- * restarts the deck. The Hub turns the choice into a deck entry (/api/catalog/deck-entry), so a
- * driver added here is the same entry the Hub's "Open in IvoryOS" button would send.
+ * The Hub, from a deck: its instrument drivers, platforms (a whole deck's worth of drivers,
+ * plugins and workflows), plugins and workflow templates, each added to this deck in one step.
+ * A driver becomes the same deck entry the Hub's "Open in IvoryOS" button would send
+ * (/api/catalog/deck-entry); a platform can instead become a new deck of its own.
  *
- * The whole catalog arrives in one request (/api/catalog/browse, ~100KB) and is filtered here, so
- * switching category or typing answers instantly. Only a few devices have a photo on the Hub;
- * every other card shows its category's picture instead, so the grid never reads as a list of
- * blank boxes.
+ * Public and private hub are the same browser over different rows. The Hub decides which rows a
+ * signed-in person may see (row-level security: their own, and their organizations'); the switch
+ * here only chooses which of those to list, and the private side is a Pro feature. Private
+ * repositories (GitHub/GitLab, imported by this app, never on the Hub) sit on the private side.
+ *
+ * Each list arrives in one request and is filtered here, so switching and typing answer
+ * instantly. Only a few devices have a photo on the Hub; every other driver card shows its
+ * category's picture, so the grid never reads as a list of blank boxes.
  */
-export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded }: {
+export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded, onOpenProfile }: {
   api: DesktopApi;
   profileId: string;
   profileName: string;
   hubUrl: string;
-  /** Private repositories are a Pro feature (preview plans, desktop/src/account.js). */
+  /** The private hub and private repositories are Pro features (preview plans, desktop/src/account.js). */
   pro: boolean;
   onUpgrade: () => void;
   /** A class picked from an imported private repository: open the instrument form with it. */
   onPrivatePicked: (seed: InstrumentSeed) => void;
   onClose: () => void;
   onAdded: () => void;
+  /** A platform installed as a new deck: show that deck. */
+  onOpenProfile: (id: string) => void;
 }) {
-  const [all, setAll] = useState<HubModule[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [scope, setScope] = useState<Scope>('public');
+  const [kind, setKind] = useState<Kind>('instruments');
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null>(null);
   const [testedOnly, setTestedOnly] = useState(false);
-  const [chosen, setChosen] = useState<HubModule | null>(null);
-
+  const [chosen, setChosen] = useState<Chosen | null>(null);
+  const [deck, setDeck] = useState<Deck | null>(null);
+  // Starred for quick access (kept per account by the app): 'module:12', 'platform:4', ...
+  // The browser opens on them when there are any, so the whole catalog is one click away, not
+  // the first thing to scroll through.
+  const [stars, setStars] = useState<string[] | null>(null);
   useEffect(() => {
     let cancelled = false;
-    api.hubBrowse()
-      .then(r => { if (!cancelled) setAll(r.modules); })
-      .catch(e => { if (!cancelled) { setError(e.message); setAll([]); } });
+    api.hubStarred()
+      .then(list => { if (!cancelled) { setStars(list); if (list.length) setKind('starred'); } })
+      .catch(() => { if (!cancelled) setStars([]); });
     return () => { cancelled = true; };
   }, [api]);
+  const starred = useMemo(() => new Set(stars || []), [stars]);
+  const toggleStar = (key: string) => {
+    const on = !starred.has(key);
+    setStars(list => (on ? [...(list || []), key] : (list || []).filter(k => k !== key)));
+    api.hubStar(key, on).catch(e => notify(e.message, { tone: 'error' }));
+  };
+  // A one-cell grid, so the card fills the wrapper: a <button> in plain block flow shrinks to its
+  // content, which left every card a different width and height inside the grid.
+  const withStar = (key: string, card: React.ReactNode) => (
+    <div key={key} className="relative group/star grid">
+      {card}
+      <StarButton on={starred.has(key)} onClick={() => toggleStar(key)} />
+    </div>
+  );
 
-  // Search and "tested" narrow everything; the category then picks within that, so each
-  // category's count says how many matches it holds.
-  const matching = useMemo(() => {
-    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-    return (all || []).filter(m => (!testedOnly || m.is_tested_with_ivoryos) && words.every(w => haystack(m).includes(w)));
-  }, [all, query, testedOnly]);
+  const modules = useCatalog(useCallback(() => api.hubBrowse().then(r => r.modules), [api]));
+  const platforms = useCatalog(useCallback(() => api.hubPlatforms().then(r => r.platforms), [api]));
+  const plugins = useCatalog(useCallback(() => api.hubPlugins().then(r => r.plugins), [api]));
+  const templates = useCatalog(useCallback(() => api.hubTemplates().then(r => r.templates), [api]));
+
+  // The deck the browser adds to: templates are checked against it, and platform drivers are
+  // named clear of what is already on it.
+  const refreshDeck = useCallback(() => { api.deck(profileId).then(setDeck).catch(() => setDeck(null)); }, [api, profileId]);
+  useEffect(refreshDeck, [refreshDeck]);
+
+  const words = useMemo(() => query.toLowerCase().split(/\s+/).filter(Boolean), [query]);
+  const locked = scope === 'private' && !pro;
+
+  const lists = useMemo(() => {
+    const match = (text: string) => words.every(w => text.includes(w));
+    return {
+      instruments: (modules.items || []).filter(m => inScope(m, scope) && (!testedOnly || m.is_tested_with_ivoryos) && match(haystack(m))),
+      platforms: (platforms.items || []).filter(p => inScope(p, scope) && match([p.name, p.description].join(' ').toLowerCase())),
+      plugins: preferV2((plugins.items || []).filter(p => inScope(p, scope) && match([p.name, p.description, p.pip_name].join(' ').toLowerCase()))),
+      workflows: (templates.items || []).filter(t => inScope(t, scope) && match([templateTitle(t), t.description, ...t.instruments].join(' ').toLowerCase())),
+    };
+  }, [modules.items, platforms.items, plugins.items, templates.items, scope, testedOnly, words]);
+
+  const loaded: Record<ListKind, Loaded<unknown>> = { instruments: modules, platforms, plugins, workflows: templates };
+
+  // The starred view: every starred item the searched words match, whichever hub it is on.
+  const starredLists = useMemo(() => {
+    const match = (text: string) => words.every(w => text.includes(w));
+    return {
+      instruments: (modules.items || []).filter(m => starred.has(`module:${m.id}`) && match(haystack(m))),
+      platforms: (platforms.items || []).filter(p => starred.has(`platform:${p.id}`) && match([p.name, p.description].join(' ').toLowerCase())),
+      plugins: (plugins.items || []).filter(p => starred.has(`plugin:${p.id}`) && match([p.name, p.description, p.pip_name].join(' ').toLowerCase())),
+      workflows: (templates.items || []).filter(t => starred.has(`template:${t.id}`) && match([templateTitle(t), t.description, ...t.instruments].join(' ').toLowerCase())),
+    };
+  }, [modules.items, platforms.items, plugins.items, templates.items, starred, words]);
+  const starredCount = Object.values(starredLists).reduce((n, l) => n + l.length, 0);
+  const cards = {
+    instruments: (m: HubModule) => withStar(`module:${m.id}`, <ModuleCard module={m} onPick={() => setChosen({ kind: 'instrument', module: m })} />),
+    platforms: (p: HubPlatform) => withStar(`platform:${p.id}`, <PlatformCard platform={p} onPick={() => setChosen({ kind: 'platform', platform: p })} />),
+    plugins: (p: HubPlugin) => withStar(`plugin:${p.id}`, <PluginCard plugin={p} onPick={() => setChosen({ kind: 'plugin', plugin: p })} />),
+    workflows: (t: HubTemplate) => withStar(`template:${t.id}`, <TemplateCard template={t} deck={deck} onPick={() => setChosen({ kind: 'template', template: t })} />),
+  };
 
   const categories = useMemo(() => {
     const counts = new Map<string, number>();
-    matching.forEach(m => counts.set(categoryOf(m), (counts.get(categoryOf(m)) || 0) + 1));
+    lists.instruments.forEach(m => counts.set(categoryOf(m), (counts.get(categoryOf(m)) || 0) + 1));
     return [...counts.entries()].sort((a, b) => (a[0] === OTHER) !== (b[0] === OTHER) ? (a[0] === OTHER ? 1 : -1) : b[1] - a[1]);
-  }, [matching]);
+  }, [lists.instruments]);
+  const shownInstruments = category ? lists.instruments.filter(m => categoryOf(m) === category) : lists.instruments;
 
-  const shown = category ? matching.filter(m => categoryOf(m) === category) : matching;
+  const finish = () => { onAdded(); onClose(); };
+  const title = !chosen ? `Add to ${profileName} from the Hub`
+    : chosen.kind === 'instrument' ? `Add ${chosen.module.name} to ${profileName}`
+      : chosen.kind === 'platform' ? `Install ${chosen.platform.name}`
+        : chosen.kind === 'plugin' ? `Add ${chosen.plugin.name.trim()} to ${profileName}`
+          : `Add ${templateTitle(chosen.template)} to ${profileName}`;
 
   return (
     <Modal wide="browser" onClose={onClose} title={chosen
-      ? <span className="flex items-center gap-2"><button type="button" onClick={() => setChosen(null)} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"><ArrowLeft className="w-4 h-4" /></button>Add {chosen.name} to {profileName}</span>
-      : `Add an instrument to ${profileName}`}
+      ? <span className="flex items-center gap-2"><button type="button" onClick={() => setChosen(null)} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"><ArrowLeft className="w-4 h-4" /></button>{title}</span>
+      : title}
     >
       {chosen ? (
         <div className="flex-1 overflow-y-auto p-5">
-          <Configure api={api} profileId={profileId} summary={chosen} onDone={() => { onAdded(); onClose(); }} />
+          {chosen.kind === 'instrument' && <Configure api={api} profileId={profileId} summary={chosen.module} onDone={finish} />}
+          {chosen.kind === 'platform' && (
+            <PlatformDetail api={api} profileId={profileId} profileName={profileName} deck={deck} platformId={chosen.platform.id}
+              onDone={newId => { finish(); if (newId) onOpenProfile(newId); }} />
+          )}
+          {chosen.kind === 'plugin' && <PluginDetail api={api} profileId={profileId} profileName={profileName} deck={deck} plugin={chosen.plugin} onDone={finish} />}
+          {chosen.kind === 'template' && (
+            // A workflow does not restart the deck, so stay in the browser to add more.
+            <TemplateDetail api={api} profileId={profileId} profileName={profileName} deck={deck} template={chosen.template}
+              onDone={() => { onAdded(); setChosen(null); }} />
+          )}
         </div>
       ) : (
         <>
           <aside className="w-64 shrink-0 border-r border-gray-100 dark:border-white/10 overflow-y-auto p-2 space-y-0.5">
-            <CategoryButton label="All drivers" icon={LayoutGrid} count={matching.length} active={category === null} onClick={() => setCategory(null)} />
-            <div className="pt-2 pb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Categories</div>
-            {categories.map(([name, count]) => (
-              <CategoryButton key={name} label={name} icon={look(name).icon} tint={look(name).tile} count={count} active={category === name} onClick={() => setCategory(name)} />
+            <div className="grid grid-cols-2 gap-1 p-1 mb-2 rounded-lg bg-gray-100 dark:bg-white/5">
+              {(['public', 'private'] as const).map(s => (
+                <button key={s} type="button" onClick={() => { setScope(s); setCategory(null); if (s === 'public' && kind === 'repos') setKind('instruments'); }}
+                  className={`flex items-center justify-center gap-1.5 rounded-md py-1 text-xs font-medium ${scope === s ? 'bg-white text-gray-900 shadow-sm dark:bg-white/15 dark:text-white' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}>
+                  {s === 'public' ? <Globe className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                  {s === 'public' ? 'Public' : 'Private'}
+                  {s === 'private' && !pro && <span className="text-[9px] font-bold uppercase tracking-wider text-violet-500">Pro</span>}
+                </button>
+              ))}
+            </div>
+            <CategoryButton label="Starred" icon={Star} tint="from-amber-50 to-amber-100 text-amber-500 dark:from-amber-500/10 dark:to-amber-500/20 dark:text-amber-300"
+              count={stars === null ? '…' : stars.length} active={kind === 'starred'} onClick={() => { setKind('starred'); setCategory(null); }} />
+            <div className="h-1" />
+            {KINDS.map(k => (
+              <CategoryButton key={k.kind} label={k.label} icon={k.icon} count={locked ? null : loaded[k.kind].items === null ? '…' : lists[k.kind].length}
+                active={kind === k.kind && (k.kind !== 'instruments' || category === null)} onClick={() => { setKind(k.kind); setCategory(null); }} />
             ))}
-            <div className="pt-3 pb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Private</div>
-            <CategoryButton label="Private repositories" icon={Lock} count={pro ? null : <span className="text-[9px] font-bold uppercase tracking-wider text-violet-500">Pro</span>} active={category === PRIVATE} onClick={() => setCategory(PRIVATE)} />
-            {category && category !== PRIVATE && !categories.some(([n]) => n === category) && (
-              <CategoryButton label={category} icon={look(category).icon} tint={look(category).tile} count={0} active onClick={() => {}} />
+            {/* Below the kinds, not between them: the Hub has many categories, and listing them under
+                Instruments pushed Platforms, Plugins and Workflows out of sight. */}
+            {kind === 'instruments' && !locked && categories.length > 1 && (
+              <>
+                <div className="pt-3 pb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Instrument categories</div>
+                {categories.map(([name, count]) => (
+                  <CategoryButton key={name} label={name} icon={look(name).icon} tint={look(name).tile} count={count} active={category === name} onClick={() => setCategory(name)} />
+                ))}
+              </>
+            )}
+            {scope === 'private' && (
+              <>
+                <div className="pt-3 pb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Your code</div>
+                <CategoryButton label="Private repositories" icon={GitBranch} count={pro ? null : <span className="text-[9px] font-bold uppercase tracking-wider text-violet-500">Pro</span>} active={kind === 'repos'} onClick={() => setKind('repos')} />
+              </>
             )}
           </aside>
 
-          {category === PRIVATE ? (
+          {kind === 'repos' ? (
             <div className="flex-1 min-w-0 overflow-y-auto p-4">
               <PrivateRepos api={api} profileId={profileId} pro={pro} onUpgrade={onUpgrade} onPicked={seed => { onClose(); onPrivatePicked(seed); }} />
             </div>
+          ) : locked && kind !== 'starred' ? (
+            <ProGate onUpgrade={onUpgrade} />
           ) : (
-          <div className="flex-1 min-w-0 flex flex-col">
-            <div className="px-4 py-3 flex items-center gap-3 border-b border-gray-100 dark:border-white/10">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
-                <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Search by instrument, vendor or package: pump, balance, Keithley…" className={`${inputClass} !pl-9 !py-2`} />
+            <div className="flex-1 min-w-0 flex flex-col">
+              <div className="px-4 py-3 flex items-center gap-3 border-b border-gray-100 dark:border-white/10">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+                  <input autoFocus value={query} onChange={e => setQuery(e.target.value)}
+                    placeholder={kind === 'instruments' ? 'Search by instrument, vendor or package: pump, balance, Keithley…' : kind === 'starred' ? 'Search starred…' : `Search ${kind}…`}
+                    className={`${inputClass} !pl-9 !py-2`} />
+                </div>
+                {kind === 'instruments' && (
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 whitespace-nowrap">
+                    <input type="checkbox" checked={testedOnly} onChange={e => setTestedOnly(e.target.checked)} className="accent-indigo-600" />
+                    Tested with IvoryOS
+                  </label>
+                )}
               </div>
-              <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                <input type="checkbox" checked={testedOnly} onChange={e => setTestedOnly(e.target.checked)} className="accent-indigo-600" />
-                Tested with IvoryOS
-              </label>
-            </div>
 
-            <div className="flex-1 overflow-y-auto p-4">
-              {error && (
-                <div className="mb-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/10 rounded-lg p-3">
-                  {error} <span className="text-gray-500 dark:text-gray-400">Hub: {hubUrl}</span>
-                </div>
-              )}
-              {all === null ? (
-                <div className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Loading the Hub catalog…</div>
-              ) : shown.length === 0 && !error ? (
-                <div className="text-sm text-gray-500 dark:text-gray-400 space-y-2">
-                  <p>No drivers match{query ? <> “{query}”</> : ''}{category ? <> in {category}</> : ''}.</p>
-                  <a href={`${hubUrl}/hub/devices`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline">
-                    Can’t find your instrument? Request or contribute a driver on the Hub <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-              ) : (
-                <>
-                  <div className="mb-3 text-xs text-gray-500 dark:text-gray-400">{shown.length} driver{shown.length === 1 ? '' : 's'}{category ? ` in ${category}` : ''}</div>
-                  <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-                    {shown.map(m => <ModuleCard key={m.id} module={m} onPick={() => setChosen(m)} />)}
-                  </div>
-                </>
-              )}
+              <div className="flex-1 overflow-y-auto p-4">
+                {kind === 'starred' ? (
+                  starredCount === 0 ? (
+                    <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1">
+                      <p>{query ? <>Nothing starred matches &ldquo;{query}&rdquo;.</> : 'Nothing starred yet.'}</p>
+                      {!query && <p className="flex items-center gap-1">Star the drivers, platforms, plugins and workflows you use, with <Star className="w-3.5 h-3.5" /> on their card, and they wait here.</p>}
+                    </div>
+                  ) : (
+                    <div className="space-y-5">
+                      {KINDS.filter(k => starredLists[k.kind].length > 0).map(k => (
+                        <section key={k.kind}>
+                          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{k.label}</div>
+                          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                            {k.kind === 'instruments' && starredLists.instruments.map(cards.instruments)}
+                            {k.kind === 'platforms' && starredLists.platforms.map(cards.platforms)}
+                            {k.kind === 'plugins' && starredLists.plugins.map(cards.plugins)}
+                            {k.kind === 'workflows' && starredLists.workflows.map(cards.workflows)}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  )
+                ) : (
+                  <KindList kind={kind} scope={scope} query={query} category={category} hubUrl={hubUrl} loaded={loaded[kind]}
+                    count={kind === 'instruments' ? shownInstruments.length : lists[kind].length}>
+                    {kind === 'instruments' && shownInstruments.map(cards.instruments)}
+                    {kind === 'platforms' && lists.platforms.map(cards.platforms)}
+                    {kind === 'plugins' && lists.plugins.map(cards.plugins)}
+                    {kind === 'workflows' && lists.workflows.map(cards.workflows)}
+                  </KindList>
+                )}
+              </div>
             </div>
-          </div>
           )}
         </>
       )}
@@ -138,11 +285,71 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
   );
 }
 
+/** A list's loading and error states, its count, and what to say when it is empty. */
+function KindList({ kind, scope, query, category, hubUrl, loaded, count, children }: {
+  kind: ListKind; scope: Scope; query: string; category: string | null; hubUrl: string;
+  loaded: Loaded<unknown>; count: number; children: React.ReactNode;
+}) {
+  const noun = KINDS.find(k => k.kind === kind)!.noun;
+  if (loaded.items === null) return <Loading what={`${noun}s from the Hub`} />;
+  return (
+    <>
+      {loaded.error && <div className="mb-3"><ErrorBox>{loaded.error}</ErrorBox></div>}
+      {count === 0 && !loaded.error && (
+        <div className="text-sm text-gray-500 dark:text-gray-400 space-y-2">
+          {scope === 'private' && !query
+            ? <p>No private {noun}s yet. What you, or an organization you belong to, keep private on the Hub appears here, and only here.</p>
+            : <p>No {noun}s match{query ? <> &ldquo;{query}&rdquo;</> : ''}{category ? <> in {category}</> : ''}.</p>}
+          {kind === 'instruments' && scope === 'public' && (
+            <a href={`${hubUrl}/hub/devices`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline">
+              Can&apos;t find your instrument? Request or contribute a driver on the Hub <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          )}
+        </div>
+      )}
+      {count > 0 && (
+        <>
+          <div className="mb-3 text-xs text-gray-500 dark:text-gray-400">{count} {noun}{count === 1 ? '' : 's'}{category ? ` in ${category}` : ''}</div>
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">{children}</div>
+        </>
+      )}
+    </>
+  );
+}
+
+/** The star on a card: always shown once on, otherwise on hover, so the grid stays quiet. */
+function StarButton({ on, onClick }: { on: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={e => { e.stopPropagation(); onClick(); }}
+      title={on ? 'Unstar' : 'Star for quick access'}
+      className={`absolute top-2 left-2 p-1 rounded-full bg-white/90 dark:bg-black/60 shadow-sm transition-opacity ${on ? 'opacity-100 text-amber-500' : 'opacity-0 group-hover/star:opacity-100 focus:opacity-100 text-gray-400 hover:text-amber-500'}`}
+    >
+      <Star className="w-3.5 h-3.5" fill={on ? 'currentColor' : 'none'} />
+    </button>
+  );
+}
+
+function ProGate({ onUpgrade }: { onUpgrade: () => void }) {
+  return (
+    <div className="flex-1 min-w-0 flex items-center justify-center p-8">
+      <div className="max-w-md text-center space-y-3">
+        <div className="mx-auto w-12 h-12 rounded-2xl bg-violet-50 text-violet-600 dark:bg-violet-500/10 dark:text-violet-300 flex items-center justify-center"><Lock className="w-6 h-6" /></div>
+        <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">The private hub is part of IvoryOS Pro</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          Drivers, platforms, plugins and workflows that only you, or your organization, can see: kept on the Hub, and
+          installed from here like anything public.
+        </p>
+        <Button tone="primary" onClick={onUpgrade}><Sparkles className="w-4 h-4" /> See Pro</Button>
+      </div>
+    </div>
+  );
+}
+
 // --- categories and their pictures ------------------------------------------------------------------
 
 const OTHER = 'Other';
-/** The sidebar entry for private repositories, kept apart from the Hub's own categories. */
-const PRIVATE = '@private';
 
 function categoryOf(m: HubModule): string {
   return m.devices?.category?.trim() || OTHER;
@@ -234,7 +441,10 @@ function ModuleCard({ module: m, onPick }: { module: HubModule; onPick: () => vo
         )}
       </div>
       <div className="p-3 flex-1 flex flex-col gap-1 min-w-0">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-indigo-700 dark:group-hover:text-indigo-300">{m.name}</div>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-indigo-700 dark:group-hover:text-indigo-300">{m.name}</span>
+          <VisibilityBadge row={m} />
+        </div>
         <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{[m.devices?.vendor?.trim(), device].filter(Boolean).join(' · ') || m.pip_name}</div>
         {m.description && <div className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">{m.description}</div>}
         {!!m.connection?.length && (
@@ -248,16 +458,6 @@ function ModuleCard({ module: m, onPick }: { module: HubModule; onPick: () => vo
 }
 
 // --- the chosen driver's settings -------------------------------------------------------------------
-
-/** Text settings left empty, by dotted name: they are left out of the constructor call. */
-function emptyFields(defs: ArgDef[], values: FormValues, prefix = ''): string[] {
-  return defs.flatMap(def => {
-    const v = values[def.name];
-    if (def.type === 'object') return emptyFields(def.args || [], (v as FormValues) || {}, `${prefix}${def.name}.`);
-    if (def.type === 'bool') return [];
-    return v === undefined || v === null || String(v).trim() === '' ? [`${prefix}${def.name}`] : [];
-  });
-}
 
 /** The browse card has no argument form; read the full entry once a driver is picked. */
 function Configure({ api, profileId, summary, onDone }: { api: DesktopApi; profileId: string; summary: HubModule; onDone: () => void }) {

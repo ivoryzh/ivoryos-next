@@ -1,42 +1,23 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { Sun, Moon, Cloud, Menu, Settings2, Book, LayoutTemplate, Server, ChevronDown, ChevronRight, CalendarClock, Table2, MonitorCheck } from 'lucide-react';
+import { Cloud, Menu, Settings2, Book, LayoutTemplate, Server, ChevronDown, ChevronRight, CalendarClock, Table2, MonitorCheck } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import WorkspaceSwitcher from './WorkspaceSwitcher';
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
-  const [isExpanded, setIsExpanded] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('ivoryos_cloud_sidebar_expanded');
-      if (saved !== null) return saved === 'true';
-    }
-    return true;
-  });
-
-
+  // A fixed default, corrected after mount (AGENTS.md section 11). Reading localStorage in the
+  // initializer made the first client render disagree with the server's whenever the sidebar had
+  // been collapsed, which React reports as a hydration failure and re-renders the whole tree.
+  const [isExpanded, setIsExpanded] = useState(true);
   useEffect(() => {
-    const stored = localStorage.getItem('theme');
-    if (stored === 'light' || stored === 'dark') {
-      setTheme(stored);
-    }
+    const saved = localStorage.getItem('ivoryos_cloud_sidebar_expanded');
+    if (saved !== null) setIsExpanded(saved === 'true');
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    
-    if (newTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-      document.documentElement.classList.remove('light');
-    } else {
-      document.documentElement.classList.add('light');
-      document.documentElement.classList.remove('dark');
-    }
-  };
+
 
   const [devices, setDevices] = useState<any[]>([]);
   const [edgeSeqExpanded, setEdgeSeqExpanded] = useState(false);
@@ -106,6 +87,8 @@ export default function Sidebar() {
         )}
       </div>
 
+      <WorkspaceSwitcher expanded={isExpanded} />
+
       <nav className="flex-1 space-y-2 w-full overflow-y-auto">
         {navItem('/library', 'Library', <Book className="w-5 h-5 shrink-0" />)}
         {navItem('/', 'Orchestrator', <Cloud className="w-5 h-5 shrink-0" />)}
@@ -156,15 +139,6 @@ export default function Sidebar() {
 
       <div className="flex flex-col space-y-2 w-full">
         {navItem('/settings', 'Cloud Settings', <Settings2 className="w-5 h-5 shrink-0" />)}
-        <button
-          onClick={toggleTheme}
-          className="flex items-center mx-3 py-3 rounded-lg transition-colors overflow-hidden toolbox-item"
-        >
-          <div className="w-5 h-5 flex justify-center shrink-0 ml-3">
-            {theme === 'light' ? <Moon className="w-5 h-5 shrink-0" /> : <Sun className="w-5 h-5 shrink-0" />}
-          </div>
-          {isExpanded && <span className="ml-4 text-sm font-medium whitespace-nowrap">{theme === 'light' ? 'Dark Mode' : 'Light Mode'}</span>}
-        </button>
       </div>
     </aside>
   );

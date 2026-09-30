@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, RefreshCw, Table2, AlertTriangle } from 'lucide-react';
-import { formatRun, datasheetCsv, RunDataTable, SectionTitle, cellText, parseServerTime } from '@ivoryos/shared-ui';
+import { formatRun, datasheetCsv, RunDataTable, SectionTitle, cellText, parseServerTime, issuesLabel } from '@ivoryos/shared-ui';
 
 /**
  * One record per experiment. A Cloud run is a whole experiment however many devices it spans, so
@@ -32,10 +32,39 @@ type TaskRecord = {
   dispatchedAt: string | null;
   updatedAt: string | null;
   result: any | null;
+  /** Every occurrence's record, oldest first: a step set to repeat ran once per entry. */
+  results: any[];
 };
+
+/** Summed over a step's occurrences: how it got to "completed" when that took retries or skips. */
+const issuesOf = (results: any[]) => results.reduce((acc: Record<string, number>, r: any) => {
+  for (const [k, v] of Object.entries(r?.parameters?._issues || {})) acc[k] = (acc[k] || 0) + Number(v || 0);
+  return acc;
+}, {});
+
+/** A step's status as shown: "completed" only when nothing failed on the way there. */
+const outcomeOf = (t: TaskRecord) => t.status === 'completed' && issuesLabel(issuesOf(t.results)) ? 'completed with issues' : t.status;
+
+/**
+ * One sheet for a step however many times it ran: each occurrence's rows in turn, with a leading
+ * `run` column when there was more than one, so a repeated step's data is one table to export.
+ */
+function sheetOf(results: any[]) {
+  const runs = results.map((r) => formatRun({ id: r.edgeRunId, ...r }));
+  if (runs.length <= 1) return runs[0];
+  const base = runs[0];
+  if (!runs.some((r) => r.variables.length)) return { ...base, variables: [], rows: [] };
+  let n = 0;
+  return {
+    ...base,
+    variables: ['run', ...base.variables],
+    rows: runs.flatMap((run, k) => run.rows.map((row) => ({ ...row, row: ++n, values: [k + 1, ...(row.values || [])] }))),
+  };
+}
 
 const tone = (s?: string | null) =>
   s === 'completed' ? 'text-green-600 dark:text-green-400'
+    : s === 'completed with issues' ? 'text-amber-600 dark:text-amber-400'
     : s === 'error' ? 'text-red-600 dark:text-red-400'
       : 'text-gray-500';
 
@@ -46,6 +75,10 @@ const seconds = (ms: number) => (ms < 10_000 ? `${(ms / 1000).toFixed(1)} s` : m
 
 /** How many times a step ran its workflow: samples, trials or iterations. */
 const timesOf = (sheet: any) => (sheet?.rows?.length || 1);
+
+// One colour per device lane, so two instruments' timelines read apart at a glance. Red, amber
+// and yellow are kept out: they mean error, completed-with-issues and still-running on any lane.
+const LANE_COLORS = ['bg-indigo-500', 'bg-teal-500', 'bg-violet-500', 'bg-sky-500', 'bg-fuchsia-500', 'bg-emerald-600'];
 
 const download = (csv: string, name: string) => {
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
@@ -109,25 +142,35 @@ export default function ResultsPage() {
   }, [record, focusNode]);
 
   const tasks = record?.tasks || [];
-  const withResults = tasks.filter((t) => t.result);
+  const withResults = tasks.filter((t) => t.results?.length);
   const sheets = useMemo(
-    () => withResults.map((t) => ({ task: t, run: formatRun({ id: t.result.edgeRunId, ...t.result }) })),
+    () => withResults.map((t) => ({ task: t, run: sheetOf(t.results) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [record],
   );
 
-  // --- timeline geometry: one clock for every lane ---
-  const spans = tasks.map((t) => {
-    const start = toMs(t.result?.start_time) || toMs(t.dispatchedAt);
-    const end = toMs(t.result?.end_time) || (t.status === 'running' || t.status === 'queued' ? Date.now() : toMs(t.updatedAt));
-    return { task: t, start, end };
+  // --- timeline geometry: one clock for every lane, one bar per time a step ran ---
+  const spans = tasks.flatMap((t) => {
+    const active = t.status === 'running' || t.status === 'queued';
+    const done = (t.results || []).map((r, k) => ({
+      key: `${t.nodeId}:${k}`, task: t, n: k + 1, record: r,
+      start: toMs(r?.start_time), end: toMs(r?.end_time),
+    }));
+    // The occurrence in flight now, or a step that finished without sending its record.
+    const extra = active || !done.length ? [{
+      key: `${t.nodeId}:${done.length}`, task: t, n: done.length + 1, record: null,
+      start: toMs(t.dispatchedAt), end: active ? Date.now() : toMs(t.updatedAt),
+    }] : [];
+    const all = [...done, ...extra];
+    return all.map((s) => ({ ...s, of: all.length }));
   }).filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end >= s.start);
   const t0 = spans.length ? Math.min(...spans.map((s) => s.start)) : 0;
   const t1 = spans.length ? Math.max(...spans.map((s) => s.end)) : 0;
   const total = Math.max(1, t1 - t0);
   const lanes = [...new Set(tasks.map((t) => t.deviceId))];
+  const laneColor = (device: string) => LANE_COLORS[Math.max(0, lanes.indexOf(device)) % LANE_COLORS.length];
   const pos = (ms: number) => `${((ms - t0) / total) * 100}%`;
-  const hoveredSpan = spans.find((s) => s.task.nodeId === hovered);
+  const hoveredSpan = spans.find((s) => s.key === hovered);
 
   // --- combined sheet (opt-in): each step's columns side by side, rows by position ---
   const combined = useMemo(() => {
@@ -141,7 +184,11 @@ export default function ResultsPage() {
     return { variables, rows };
   }, [sheets]);
 
-  const status = record ? (tasks.some((t) => t.status === 'error') ? 'error' : record.run.status) : '';
+  const allIssues = issuesLabel(issuesOf(tasks.flatMap((t) => t.results || [])));
+  const status = record
+    ? tasks.some((t) => t.status === 'error') ? 'error'
+      : record.run.status === 'completed' && allIssues ? 'completed with issues' : record.run.status
+    : '';
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
@@ -194,7 +241,7 @@ export default function ResultsPage() {
                     {spans.length ? ` · ${new Date(t0).toLocaleString()} · ${seconds(total)}` : ''}
                   </p>
                 </div>
-                <span className={`shrink-0 text-sm font-bold ${tone(status)}`}>{status}</span>
+                <span className={`shrink-0 text-sm font-bold ${tone(status)}`} title={allIssues ? `Completed, but ${allIssues}` : undefined}>{status}</span>
               </div>
 
               {/* timeline: a lane per device, all on one clock */}
@@ -204,7 +251,7 @@ export default function ResultsPage() {
                     aside={
                       <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-secondary)' }}>
                         {hoveredSpan
-                          ? `${hoveredSpan.task.label}${timesOf(sheets.find((x) => x.task.nodeId === hoveredSpan.task.nodeId)?.run) > 1 ? ` ×${timesOf(sheets.find((x) => x.task.nodeId === hoveredSpan.task.nodeId)?.run)}` : ''} · ${hoveredSpan.task.deviceId} · ${seconds(hoveredSpan.end - hoveredSpan.start)} · +${seconds(hoveredSpan.start - t0)}`
+                          ? `${hoveredSpan.task.label}${hoveredSpan.of > 1 ? ` · run ${hoveredSpan.n} of ${hoveredSpan.of}` : ''} · ${hoveredSpan.task.deviceId} · ${seconds(hoveredSpan.end - hoveredSpan.start)} · +${seconds(hoveredSpan.start - t0)}`
                           : 'hover a step'}
                       </span>
                     }
@@ -216,27 +263,33 @@ export default function ResultsPage() {
                   <div className="min-w-[560px] rounded-xl border p-3 space-y-2" style={{ borderColor: 'var(--panel-border)' }}>
                     {lanes.map((device) => (
                       <div key={device} className="flex items-center gap-3">
-                        <span className="w-28 shrink-0 truncate text-xs font-semibold" title={device}>{device}</span>
+                        <span className="w-28 shrink-0 flex items-center gap-1.5 text-xs font-semibold min-w-0" title={device}>
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${laneColor(device)}`} />
+                          <span className="truncate">{device}</span>
+                        </span>
                         <div className="relative h-8 flex-1 rounded-md bg-gray-100/70 dark:bg-white/5">
                           {[25, 50, 75].map((p) => (
                             <span key={p} className="absolute top-0 bottom-0 w-px bg-gray-200 dark:bg-white/10" style={{ left: `${p}%` }} />
                           ))}
                           {spans.filter((s) => s.task.deviceId === device).map((s) => {
-                            const times = timesOf(sheets.find((x) => x.task.nodeId === s.task.nodeId)?.run);
-                            const color = s.task.status === 'error' ? 'bg-red-500' : s.task.status === 'completed' ? 'bg-indigo-500' : 'bg-yellow-400';
+                            const times = s.record ? timesOf(formatRun({ id: s.record.edgeRunId, ...s.record })) : 1;
+                            const state = s.record ? s.record.status : s.task.status;
+                            const color = state === 'error' ? 'bg-red-500'
+                              : state === 'completed' ? (s.record?.parameters?._issues ? 'bg-amber-500' : laneColor(device))
+                                : 'bg-yellow-400';
                             return (
                               <button
-                                key={s.task.nodeId}
-                                onMouseEnter={() => setHovered(s.task.nodeId)}
+                                key={s.key}
+                                onMouseEnter={() => setHovered(s.key)}
                                 onMouseLeave={() => setHovered(null)}
                                 onClick={() => document.getElementById(`data-${s.task.nodeId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                                className={`absolute top-1 bottom-1 min-w-[3px] overflow-hidden rounded ${color} ${hovered === s.task.nodeId ? 'ring-2 ring-offset-1 ring-indigo-300' : ''}`}
+                                className={`absolute top-1 bottom-1 min-w-[3px] overflow-hidden rounded ${color} ${hovered === s.key ? 'ring-2 ring-offset-1 ring-indigo-300' : ''}`}
                                 style={{ left: pos(s.start), width: `${Math.max(((s.end - s.start) / total) * 100, 0.4)}%` }}
                               >
                                 {/* One bar per step execution: which step, when, how many times.
                                     What happened inside is the device's Data History's job. */}
                                 <span className="relative px-1.5 text-[11px] font-semibold text-white truncate block leading-6">
-                                  {s.task.label}{times > 1 ? ` ×${times}` : ''}
+                                  {s.task.label}{s.of > 1 ? ` #${s.n}` : ''}{times > 1 ? ` ×${times}` : ''}
                                 </span>
                               </button>
                             );
@@ -292,11 +345,13 @@ export default function ResultsPage() {
                       <div key={task.nodeId} id={`data-${task.nodeId}`} className="scroll-mt-4">
                         <div className="flex items-baseline justify-between gap-3 mb-1">
                           <span className={`text-sm font-semibold ${focusNode === task.nodeId ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
-                            {task.label} <span className="font-normal text-xs" style={{ color: 'var(--text-secondary)' }}>· {task.deviceId} · edge run #{task.result.edgeRunId}</span>
+                            {task.label} <span className="font-normal text-xs" style={{ color: 'var(--text-secondary)' }}>· {task.deviceId} · {task.results.length > 1
+                              ? `${task.results.length} runs (edge #${task.results[0].edgeRunId}–#${task.results[task.results.length - 1].edgeRunId})`
+                              : `edge run #${task.results[0].edgeRunId}`}</span>
                           </span>
                           {run.variables.length > 0 && (
                             <button
-                              onClick={() => download(datasheetCsv(run), `ivoryos_${task.deviceId}_run${task.result.edgeRunId}.csv`)}
+                              onClick={() => download(datasheetCsv(run), `ivoryos_${task.deviceId}_run${task.results.map((r) => r.edgeRunId).join('-')}.csv`)}
                               className="flex items-center gap-1 text-xs hover:underline" style={{ color: 'var(--text-secondary)' }}
                             >
                               <Download className="h-3.5 w-3.5" /> export
@@ -310,11 +365,11 @@ export default function ResultsPage() {
                             Saved no named values. Give a step a “save output” name to see it here.
                           </p>
                         )}
-                        {task.result.truncated && (
-                          <p className="mt-1 text-xs text-amber-600">
-                            Too large to send in full; the complete record is on {task.deviceId}, run #{task.result.edgeRunId}.
+                        {task.results.filter((r) => r.truncated).map((r) => (
+                          <p key={r.edgeRunId} className="mt-1 text-xs text-amber-600">
+                            Too large to send in full; the complete record is on {task.deviceId}, run #{r.edgeRunId}.
                           </p>
-                        )}
+                        ))}
                       </div>
                     ))}
                   </div>
@@ -326,40 +381,63 @@ export default function ResultsPage() {
                 <SectionTitle>steps</SectionTitle>
                 <div className="rounded-xl border divide-y" style={{ borderColor: 'var(--panel-border)' }}>
                   {tasks.map((t) => {
-                    const steps: any[] = t.result?.steps || [];
+                    const results: any[] = t.results || [];
+                    // Every call across every occurrence, tagged with which run it was in.
+                    const steps: any[] = results.flatMap((r, k) => (r.steps || []).map((s: any) => ({ ...s, _run: k + 1 })));
                     const sheet = sheets.find((s) => s.task.nodeId === t.nodeId)?.run;
-                    const failed = steps.filter((s) => s.status === 'error');
-                    const span = spans.find((s) => s.task.nodeId === t.nodeId);
+                    const rowCount = results.length > 1 ? 0 : sheet?.rows.length || 0;
+                    // A call that failed outright, or failed before being retried or skipped.
+                    const troubled = steps.filter((s) => s.status === 'error' || s.outputs?.attempts?.length);
+                    const taskSpans = spans.filter((s) => s.task.nodeId === t.nodeId);
+                    const busy = taskSpans.reduce((ms, s) => ms + (s.end - s.start), 0);
+                    const outcome = outcomeOf(t);
+                    const skipped = steps.filter((s) => s.status === 'skipped' && s.error).length;
                     return (
                       <div key={t.nodeId} className="px-3 py-2 text-xs" style={{ borderColor: 'var(--panel-border)' }}>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                           <span className="font-semibold text-sm">{t.label}</span>
                           <span style={{ color: 'var(--text-secondary)' }}>{t.deviceId}</span>
-                          <span className={`font-semibold ${tone(t.status)}`}>{t.status}</span>
-                          {sheet && sheet.rows.length > 1 && (
-                            <span className="font-semibold" title={`${sheet.rows.filter((r) => r.status === 'completed').length} of ${sheet.rows.length} completed`}>
-                              ×{sheet.rows.length}
+                          <span className={`font-semibold ${tone(outcome)}`} title={outcome === 'completed with issues' ? `Completed, but ${issuesLabel(issuesOf(results))}` : undefined}>{outcome}</span>
+                          {results.length > 1 && (
+                            <span className="font-semibold" title={`${results.filter((r) => r.status === 'completed').length} of ${results.length} runs completed`}>
+                              {results.length} runs
+                            </span>
+                          )}
+                          {rowCount > 1 && (
+                            <span className="font-semibold" title={`${sheet!.rows.filter((r) => r.status === 'completed').length} of ${rowCount} completed`}>
+                              ×{rowCount}
                             </span>
                           )}
                           {steps.length > 0 && (
                             <span style={{ color: 'var(--text-secondary)' }}>
-                              {steps.filter((s) => s.status === 'completed' || s.status === 'skipped').length}/{steps.length} calls
+                              {steps.filter((s) => s.status === 'completed').length}/{steps.length} calls{skipped ? ` · ${skipped} skipped after failing` : ''}
                             </span>
                           )}
-                          {span && <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>{seconds(span.end - span.start)}</span>}
+                          {taskSpans.length > 0 && <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>{seconds(busy)}</span>}
                         </div>
-                        {failed.map((s) => (
-                          <div key={s.id} className="mt-1.5 flex items-start gap-1.5 text-red-600 dark:text-red-400">
-                            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                            <span className="min-w-0 break-words">
-                              <span className="font-semibold">
-                                {s.instrument}.{s.method}{typeof s.parameters?._row === 'number' ? ` (row ${s.parameters._row + 1})` : ''}:
-                              </span>{' '}
-                              {cellText(s.error) || 'failed'}
-                            </span>
-                          </div>
-                        ))}
-                        {!t.result && (
+                        {troubled.map((s) => {
+                          const attempts: any[] = s.outputs?.attempts || [];
+                          const how = s.status === 'error' ? 'failed'
+                            : s.status === 'skipped' ? `failed${attempts.length > 1 ? ` ${attempts.length}×` : ''}, skipped`
+                              : `failed ${attempts.length}×, retried, then completed`;
+                          const detail = attempts.map((a: any, n: number) => `Attempt ${n + 1}${a.resolution ? ` (${a.resolution})` : ''}: ${a.error}`).join('\n');
+                          return (
+                            <div
+                              key={`${s._run}:${s.id}`}
+                              className={`mt-1.5 flex items-start gap-1.5 ${s.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}
+                              title={detail || undefined}
+                            >
+                              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                              <span className="min-w-0 break-words">
+                                <span className="font-semibold">
+                                  {results.length > 1 ? `run ${s._run} · ` : ''}{s.instrument}.{s.method}{typeof s.parameters?._row === 'number' ? ` (row ${s.parameters._row + 1})` : ''}
+                                </span>{' '}
+                                {how}: {s.status === 'error' ? cellText(s.error).split('\n')[0] || 'failed' : attempts[attempts.length - 1]?.error}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {!results.length && (
                           <p className="mt-1" style={{ color: 'var(--text-secondary)' }}>
                             {['completed', 'error'].includes(t.status) ? 'Finished before its device could send results.' : 'No results yet.'}
                           </p>

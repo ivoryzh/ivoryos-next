@@ -14,7 +14,7 @@ const FREE = [
   'Every public driver on the Hub',
 ];
 const PRO = [
-  { icon: Cloud, text: 'IvoryOS Cloud: see and run every deck from anywhere' },
+  { icon: Cloud, text: 'Cloud: see and run every deck from anywhere' },
   { icon: Lock, text: 'Private Hub: drivers only your lab can see' },
   { icon: GitBranch, text: 'Import private repositories from GitHub or GitLab' },
 ];
@@ -46,7 +46,7 @@ export default function UpgradeDialog({ api, account, reason, onClose, onSignIn 
     }
   };
 
-  const lead = reason === 'cloud' ? 'IvoryOS Cloud is part of Pro.'
+  const lead = reason === 'cloud' ? 'Cloud is part of Pro.'
     : reason === 'private' ? 'Private drivers and repositories are part of Pro.'
       : pro ? 'You are on Pro.' : 'Do more with IvoryOS Pro.';
 

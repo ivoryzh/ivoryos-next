@@ -141,7 +141,7 @@ function SignedIn({ api, account, onUpgrade }: { api: DesktopApi; account: Accou
 
   const save = async () => {
     setSaving(true);
-    try { await api.updateProfile({ full_name: name, lab_info: lab }); } catch (e: any) { notify(e.message, { title: 'Could not save', tone: 'error' }); } finally { setSaving(false); }
+    try { await api.updateAccount({ full_name: name, lab_info: lab }); } catch (e: any) { notify(e.message, { title: 'Could not save', tone: 'error' }); } finally { setSaving(false); }
   };
 
   return (
@@ -206,7 +206,24 @@ export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: 
   const [host, setHost] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Signing in from the browser (device flow): the code to show while the person approves it.
+  const [signIn, setSignIn] = useState<{ provider: GitProvider; userCode: string; verificationUri: string } | null>(null);
+  const [useToken, setUseToken] = useState(false);
   useEffect(() => { api.gitList().then(setList).catch(() => setList([])); }, [api]);
+
+  const startSignIn = async (provider: GitProvider) => {
+    setError(null); setBusy(true);
+    try {
+      const flow = await api.gitSignInStart(provider, host || undefined);
+      setSignIn({ provider, ...flow });
+      setList(await api.gitSignInFinish(provider));
+      setAdding(null); setHost('');
+    } catch (e: any) {
+      if (!/cancelled/i.test(e.message)) setError(e.message);
+    } finally {
+      setSignIn(null); setBusy(false);
+    }
+  };
 
   const connect = async () => {
     if (!adding) return;
@@ -235,13 +252,41 @@ export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: 
               ) : adding === c.provider ? null : (
                 <>
                   <span className="flex-1 text-gray-400">Not connected</span>
-                  <Button small onClick={() => { setAdding(c.provider); setError(null); }}>Connect</Button>
+                  <Button small onClick={() => { setAdding(c.provider); setUseToken(!c.oauth); setError(null); }}>Connect</Button>
                 </>
               )}
             </div>
           ))}
           {adding && (() => {
             const c = list!.find(x => x.provider === adding)!;
+            if (!useToken && c.oauth) {
+              return (
+                <div className="mt-2 rounded-lg border border-gray-200 dark:border-white/10 p-3 space-y-2">
+                  {signIn?.provider === c.provider ? (
+                    <div className="space-y-2 text-sm">
+                      <div className="text-gray-600 dark:text-gray-300">
+                        Approve IvoryOS on the {c.label} page that opened in your browser, entering this code if it asks:
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-3 py-1.5 rounded-lg bg-gray-100 dark:bg-white/10 font-mono text-lg tracking-widest">{signIn.userCode}</span>
+                        <Button small tone="ghost" onClick={() => api.copy(signIn.userCode)}>Copy</Button>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Waiting for {c.label}…</div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      Sign in on {c.label} in your browser and approve read access to your repositories. Nothing to copy or paste.
+                    </div>
+                  )}
+                  {error && <div className="text-sm text-red-600 dark:text-red-400">{error}</div>}
+                  <div className="flex items-center justify-end gap-2">
+                    <button type="button" className="mr-auto text-xs text-indigo-600 dark:text-indigo-400 hover:underline" onClick={() => { if (signIn) api.gitSignInCancel(c.provider); setUseToken(true); }}>Use a token instead</button>
+                    <Button small tone="ghost" onClick={() => { if (signIn) api.gitSignInCancel(c.provider); setAdding(null); setError(null); }}>Cancel</Button>
+                    {!signIn && <Button small tone="primary" disabled={busy} onClick={() => startSignIn(c.provider)}>Sign in with {c.label}</Button>}
+                  </div>
+                </div>
+              );
+            }
             return (
               <div className="mt-2 rounded-lg border border-gray-200 dark:border-white/10 p-3 space-y-2">
                 <div className="text-xs text-gray-500 dark:text-gray-400">

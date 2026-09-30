@@ -1,13 +1,20 @@
 import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
+import { authorize } from '@/lib/auth';
+import { isOwned } from '@/lib/workspace';
 import { CLOUD_DEVICE_ID } from '@/lib/dag';
 
 // Answers a Cloud User_Input step -- the human in the loop of a distributed run. This only records
 // the answer; daemon.js completes the step on its next sweep (about a second), so the daemon stays
 // the one process that advances a run and nothing here needs to know the graph.
 export async function POST(req: Request) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
+
   try {
     const { runId, nodeId, value } = await req.json();
+    if (runId && !(await isOwned('run', String(runId), ws))) return NextResponse.json({ error: 'No such run.' }, { status: 404 });
     if (!runId || !nodeId) {
       return NextResponse.json({ error: 'runId and nodeId are required.' }, { status: 400 });
     }

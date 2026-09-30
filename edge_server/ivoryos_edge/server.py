@@ -4,7 +4,6 @@ import inspect
 import sys
 import time
 import uuid
-import httpx
 import base64
 import json
 from typing import Dict, Any, Optional
@@ -27,20 +26,29 @@ from . import workflows as wf
 from .workflows import WorkflowError, expand_workflow_blocks
 
 from .paths import ENV_PATH, CERTS_DIR, WORKFLOWS_DIR, SCHEMA_DUMP_PATH
+from . import cloud_pairing
+from .origin_guard import CORS_ORIGIN_REGEX, OriginGuard
 load_dotenv(ENV_PATH)
 
 app = FastAPI(title="IvoryOS Edge Server")
 queue_manager = WorkflowQueueManager(app)
 
+# Other websites may neither read from nor drive this edge (origin_guard.py). CORS only lets the
+# desktop launcher and pages on this computer read cross-origin; the guard, added last so it runs
+# first, refuses changes and WebSockets from other sites and names that are not this machine's.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(OriginGuard)
 
 CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
+# Paired, but paused by a person: keep the pairing, stay off Cloud until resumed. In .env, so a
+# restart does not quietly reconnect a device someone took offline on purpose.
+CLOUD_PAUSED = os.getenv("CLOUD_PAUSED", "") == "1"
 global_broker = None
 global_topic_prefix = None
 global_client_id = None
@@ -56,14 +64,16 @@ cloud_broker_url = None
 class CloudSettingsRequest(BaseModel):
     token: str
 
-# The Cloud URL only has to be supplied on a LAN, where Cloud lives at some arbitrary local
-# address. A hosted deployment is at a fixed, known URL, so the device ships with it and the
-# person types only the pairing code. IVORYOS_CLOUD_URL overrides it for staging or self-hosting.
-DEFAULT_CLOUD_URL = os.getenv("IVORYOS_CLOUD_URL", "https://cloud.ivoryos.app")
-
 class CloudPairRequest(BaseModel):
-    code: str
+    # Only needed for a lab's own Cloud; the hosted one is cloud_pairing.DEFAULT_CLOUD_URL.
     cloud_url: str = ""
+    # How the device is listed on Cloud; the person approving it can change it.
+    name: str = ""
+
+# The pairing in progress, if any (cloud_pairing.Pairing), and the task waiting on it.
+cloud_pairing_session = None
+_cloud_pairing_task = None
+
 
 @app.get("/api/cloud-settings")
 def get_cloud_settings():
@@ -104,68 +114,89 @@ def get_cloud_settings():
         # Where the pairing is kept. Every copy of an edge started with this folder shares it,
         # which is what makes two copies one identity. The path, never the token.
         "pairing_file": ENV_PATH,
+        # A pairing in progress (the code to approve on Cloud), or the last one's outcome.
+        "pairing": cloud_pairing_session.describe() if cloud_pairing_session else None,
+        # Paired but paused on purpose (POST .../pause), and this device's lasting Cloud identity.
+        "paused": bool(CLOUD_TOKEN) and CLOUD_PAUSED,
+        "device_id": global_client_id or cloud_pairing.read_env(ENV_PATH).get("CLOUD_DEVICE_ID"),
     }
 
-@app.post("/api/cloud-settings/pair")
-async def pair_with_cloud(req: CloudPairRequest):
-    """Exchange a pairing code for this device's connection token, then connect.
 
-    Redemption happens here, server-side, rather than from the browser: it keeps the token (which
-    on AWS contains this device's private key) out of the page and off any clipboard, and avoids
-    needing CORS on Cloud. What replaced carrying a base64 blob between two machines by hand is
-    one short code typed into this form.
-    """
-    cloud_url = (req.cloud_url or DEFAULT_CLOUD_URL).strip().rstrip("/")
-    if not cloud_url:
-        return JSONResponse(status_code=400, content={"error": "A Cloud URL is required."})
-    if not req.code.strip():
-        return JSONResponse(status_code=400, content={"error": "A pairing code is required."})
+def _deck_instrument_names() -> list:
+    return sorted(getattr(app.state, "instrument_schemas", {}) or {})
 
+
+async def _finish_pairing(pairing):
+    """Wait for approval on Cloud, then connect with the token through the one connect path."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{cloud_url}/api/pair/redeem", json={"code": req.code})
-        data = resp.json()
+        token = await cloud_pairing.wait_for_token(pairing)
+        if not token:
+            return
+        await update_cloud_settings(CloudSettingsRequest(token=token))
+        if cloud_connection_state == "connected":
+            pairing.state, pairing.error = "connected", None
+        else:
+            pairing.state = "error"
+            pairing.error = cloud_connection_error or "Paired, but the connection to Cloud failed."
+    except asyncio.CancelledError:
+        pairing.state = "cancelled"
+        raise
     except Exception as e:
-        # Reaching Cloud over HTTP is the one new prerequisite pairing introduces, and on a LAN a
-        # wrong address is the likeliest mistake — so say which address failed.
-        return JSONResponse(
-            status_code=502,
-            content={"error": f"Could not reach Cloud at {cloud_url}: {e}"},
-        )
+        pairing.state, pairing.error = "error", str(e)
 
-    if resp.status_code != 200 or not data.get("token"):
-        return JSONResponse(
-            status_code=resp.status_code if resp.status_code != 200 else 502,
-            content={"error": data.get("error") or "Pairing failed."},
-        )
 
-    # Reuse the existing token path verbatim — pairing only changes how the token is *obtained*,
-    # never what it is or how it is applied, so there is one code path for connecting.
-    return await update_cloud_settings(CloudSettingsRequest(token=data["token"]))
+@app.post("/api/cloud-settings/pair")
+async def start_cloud_pairing(req: CloudPairRequest):
+    """Start pairing: get a code from Cloud to show, then wait in the background for a person to
+    approve it there. Answers at once with the code; GET /api/cloud-settings follows the outcome.
+
+    The token never passes through a page: this process asks Cloud for it with a secret only it
+    holds (cloud_pairing.py), and on AWS it carries this device's private key. Another website
+    cannot start this (origin_guard.py): it would point the edge at a Cloud of its choosing.
+    """
+    global cloud_pairing_session, _cloud_pairing_task
+    if _cloud_pairing_task and not _cloud_pairing_task.done():
+        _cloud_pairing_task.cancel()
+
+    import socket
+    name = (req.name or "").strip() or socket.gethostname()
+    # The same id every time this edge pairs, so Cloud reattaches it rather than meeting a stranger
+    # with a familiar name (cloud_pairing.ensure_device_id).
+    device_id = cloud_pairing.ensure_device_id(ENV_PATH, name)
+    try:
+        pairing = await cloud_pairing.start(req.cloud_url, name, _deck_instrument_names(), device_id=device_id)
+    except cloud_pairing.PairingError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    cloud_pairing_session = pairing
+    _cloud_pairing_task = asyncio.create_task(_finish_pairing(pairing))
+    return pairing.describe()
+
+
+@app.delete("/api/cloud-settings/pair")
+async def cancel_cloud_pairing():
+    global cloud_pairing_session
+    if _cloud_pairing_task and not _cloud_pairing_task.done():
+        _cloud_pairing_task.cancel()
+    if cloud_pairing_session and cloud_pairing_session.state == "waiting":
+        cloud_pairing_session.state = "cancelled"
+    cloud_pairing_session = None
+    return {"status": "cancelled"}
 
 
 @app.post("/api/cloud-settings")
+async def set_cloud_token(req: CloudSettingsRequest):
+    """Set (or, with an empty token, clear) this device's Cloud token by hand. Pairing is the
+    normal way to get one; CLOUD_TOKEN in .env is the headless one."""
+    return await update_cloud_settings(req)
+
+
 async def update_cloud_settings(req: CloudSettingsRequest):
-    global CLOUD_TOKEN
+    global CLOUD_TOKEN, CLOUD_PAUSED
     CLOUD_TOKEN = req.token
-
-    # Save to .env
-    env_lines = []
-    if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r") as f:
-            env_lines = f.readlines()
-
-    token_found = False
-    for i, line in enumerate(env_lines):
-        if line.startswith("CLOUD_TOKEN="):
-            env_lines[i] = f"CLOUD_TOKEN={CLOUD_TOKEN}\n"
-            token_found = True
-
-    if not token_found:
-        env_lines.append(f"CLOUD_TOKEN={CLOUD_TOKEN}\n")
-
-    with open(ENV_PATH, "w") as f:
-        f.writelines(env_lines)
+    # A new pairing is meant to connect; a pause belonged to the old one.
+    CLOUD_PAUSED = False
+    # Readable by this user only: on AWS the token carries this device's private key.
+    cloud_pairing.set_env(ENV_PATH, CLOUD_TOKEN=CLOUD_TOKEN, CLOUD_PAUSED=None)
 
     # Awaited (not fire-and-forget) so this response IS the validation result — the frontend
     # doesn't need a separate poll loop to find out whether the token actually works.
@@ -181,6 +212,149 @@ async def update_cloud_settings(req: CloudSettingsRequest):
     }
 
 from .broker import LocalMQTTBroker, AWSIoTBroker
+
+
+# --- pause, resume, remove ------------------------------------------------------------------------
+#
+# Two ways off Cloud, as with Bluetooth's "disconnect" and "forget this device":
+#   pause   keep the pairing, stop connecting; Cloud shows the device as paused. Resume reconnects
+#           at once, no pairing needed.
+#   remove  leave Cloud for good: Cloud forgets the device (and on AWS revokes its certificate),
+#           and this edge forgets its credentials, free to pair with any Cloud. Its id is kept:
+#           it is this device's identity, not the pairing's.
+
+def _wait_sent(info, seconds: float = 3.0):
+    """Block until a QoS 1 publish is acknowledged (or give up quietly)."""
+    try:
+        info.wait_for_publish(seconds)
+    except Exception:
+        pass
+
+
+def _detach(broker):
+    """Stop treating `broker` as the edge's connection, so its status loop ends, without closing it."""
+    global global_broker
+    if broker is not None and global_broker is broker:
+        global_broker = None
+
+
+async def _drop_connection():
+    """Disconnect on purpose. Detached before disconnecting, so the status loop stops first."""
+    broker = global_broker
+    _detach(broker)
+    if broker:
+        try:
+            broker.disconnect()
+        except Exception:
+            pass
+
+
+async def _forget_pairing(message: Optional[str]):
+    """Forget the Cloud pairing on this edge: credentials, certificates, pause. Not the device id."""
+    global CLOUD_TOKEN, CLOUD_PAUSED, global_client_id, global_topic_prefix, cloud_broker_url
+    global cloud_connection_state, cloud_connection_error, cloud_pairing_session
+    if _cloud_pairing_task and not _cloud_pairing_task.done():
+        _cloud_pairing_task.cancel()
+    cloud_pairing_session = None
+    await _drop_connection()
+    CLOUD_TOKEN, CLOUD_PAUSED = "", False
+    cloud_pairing.set_env(ENV_PATH, CLOUD_TOKEN=None, CLOUD_PAUSED=None)
+    cloud_pairing.remove_aws_certificates(CERTS_DIR)
+    global_client_id = global_topic_prefix = cloud_broker_url = None
+    cloud_connection_state, cloud_connection_error = "disconnected", message
+
+
+@app.post("/api/cloud-settings/pause")
+async def pause_cloud():
+    """Stay paired but stop talking to Cloud, until resumed. Survives a restart."""
+    global CLOUD_PAUSED, cloud_connection_state, cloud_connection_error
+    if not CLOUD_TOKEN:
+        return JSONResponse(status_code=409, content={"error": "This edge is not paired with Cloud."})
+    CLOUD_PAUSED = True
+    cloud_pairing.set_env(ENV_PATH, CLOUD_PAUSED="1")
+    broker, prefix, client_id = global_broker, global_topic_prefix, global_client_id
+    if broker and prefix and client_id:
+        # Stop the heartbeat first, then say "paused" (retained, so Cloud shows it rather than
+        # guessing "offline" from silence), then hang up.
+        _detach(broker)
+        try:
+            info = broker.publish(f"{prefix}/{client_id}/status", {"online": False, "paused": True, "ts": time.time()},
+                                  retain=True, qos=1)
+            await asyncio.to_thread(_wait_sent, info)
+        except Exception as e:
+            print(f"Could not tell Cloud this edge is pausing: {e}")
+        try:
+            broker.disconnect()
+        except Exception:
+            pass
+    cloud_connection_state, cloud_connection_error = "paused", None
+    return get_cloud_settings()
+
+
+@app.post("/api/cloud-settings/resume")
+async def resume_cloud():
+    """Reconnect a paused edge with the pairing it kept."""
+    global CLOUD_PAUSED
+    if not CLOUD_TOKEN:
+        return JSONResponse(status_code=409, content={"error": "This edge is not paired with Cloud."})
+    CLOUD_PAUSED = False
+    cloud_pairing.set_env(ENV_PATH, CLOUD_PAUSED=None)
+    await setup_broker()
+    return get_cloud_settings()
+
+
+async def _say_goodbye() -> bool:
+    """Tell Cloud this device is leaving, and clear what it keeps retained on the broker.
+
+    Uses the live connection, or connects just for this when paused or down. Returns whether
+    Cloud was told: False means it could not be reached, and its Devices page can remove the
+    device instead.
+    """
+    broker, prefix, client_id = global_broker, global_topic_prefix, global_client_id
+    # The connection used to say goodbye, closed at the end whichever it was. Detaching the live
+    # one without closing it left it running under this device's id, fighting every later
+    # connection for it ("another edge is connecting as this device").
+    goodbye = None
+    try:
+        if not (broker and broker.client.is_connected()):
+            goodbye, prefix, client_id, _url = _broker_from_token(CLOUD_TOKEN)
+            goodbye.connect()
+            await _wait_connected(goodbye)
+            broker = goodbye
+        else:
+            goodbye = broker
+            _detach(broker)  # no heartbeat may follow the goodbye
+        base = f"{prefix}/{client_id}"
+        # What this device left retained (heartbeat, schema, identity, workflows), cleared so a
+        # Cloud starting up later does not find the device again in what the broker replays.
+        topics = [f"{base}/status", f"{base}/schema", f"{base}/presence"]
+        topics += [f"{base}/sequences/{name}" for name in wf.list_workflow_names(WORKFLOWS_DIR)]
+        for topic in topics:
+            broker.clear_retained(topic)
+        info = broker.publish(f"{base}/leave", {"ts": time.time()}, qos=1)
+        await asyncio.to_thread(_wait_sent, info, 5.0)
+        return bool(info.is_published())
+    except Exception as e:
+        print(f"Could not tell Cloud this edge is leaving: {e}")
+        return False
+    finally:
+        if goodbye:
+            try:
+                goodbye.disconnect()
+            except Exception:
+                pass
+
+
+@app.post("/api/cloud-settings/remove")
+async def remove_from_cloud():
+    """Leave Cloud for good: Cloud forgets this device, and this edge forgets its pairing.
+
+    If Cloud cannot be reached the pairing is forgotten here anyway (the person asked to leave),
+    and the answer says Cloud was not told, so they can remove the device on its Devices page.
+    """
+    told = await _say_goodbye() if CLOUD_TOKEN else False
+    await _forget_pairing(None)
+    return {**get_cloud_settings(), "told_cloud": told}
 
 
 # What each workflow's runtime was when last published, so a finished run only re-sends the
@@ -284,7 +458,7 @@ async def handle_sequence_push(payload: dict):
 
 
 def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, error: str = None,
-                        progress: dict = None):
+                        progress: dict = None, reliable: bool = False, issues: dict = None):
     """Report a cloud-originated task's state back to Cloud.
 
     A dedicated topic, NOT .../status — that one is the plain {online, ts} device heartbeat
@@ -299,12 +473,16 @@ def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, erro
         payload["error"] = error
     if progress:
         payload["progress"] = progress
+    if issues:
+        # A finished run that got there through retries or skips (queue.run_issues).
+        payload["issues"] = issues
     try:
         global_broker.publish(
             f"{global_topic_prefix}/{global_broker.client_id}/task-status", payload,
             # A progress update is superseded by the next one, so it need not be redelivered;
-            # a status change (running/completed/error) must arrive.
-            qos=0 if progress else 1,
+            # a status change (running/completed/error) must arrive, and so must a progress
+            # update saying the run has stopped for a person (`reliable`).
+            qos=0 if progress and not reliable else 1,
         )
     except Exception as e:
         print(f"Failed to emit cloud '{status}' status for {cloud_node_id}: {e}")
@@ -402,6 +580,21 @@ async def handle_broker_message(topic: str, payload: dict):
         queue_manager.cloud_queue = payload if isinstance(payload, dict) else None
         await queue_manager.broadcast_global_queue()
         return
+    if topic.rsplit("/", 1)[-1] == "task-control":
+        # Someone in Cloud answered a question or decided about an error (see
+        # WorkflowQueueManager.apply_cloud_control).
+        outcome = await queue_manager.apply_cloud_control(
+            payload.get("runId"), payload.get("nodeId"), payload.get("pause"),
+            payload.get("action"), payload.get("value"),
+        )
+        print(f"Cloud '{payload.get('action')}' for {payload.get('nodeId')}: {outcome}")
+        return
+    if topic.rsplit("/", 1)[-1] == "removed":
+        # Cloud's Devices page removed this device. Cloud already forgot it (and on AWS revoked its
+        # certificate), so there is no one to tell: just stop and forget the pairing here.
+        print("Cloud removed this device; forgetting the pairing.")
+        await _forget_pairing("Cloud removed this device. Connect again to pair it anew.")
+        return
 
     print(f"Received cloud task from topic {topic}: {payload}")
     await handle_cloud_task(payload)
@@ -419,6 +612,18 @@ def _safe_optimizer_catalog():
     except Exception as e:
         print(f"Could not include optimizers in the published schema: {e}")
         return {}
+
+
+def host_info():
+    """Which computer this edge runs on, for Cloud's device list: a device is named at pairing,
+    and "pump" says nothing about which bench PC to walk over to when it goes offline."""
+    import platform
+    import socket
+    try:
+        computer = socket.gethostname()
+    except OSError:
+        computer = platform.node()
+    return {"computer": computer or None, "os": f"{platform.system()} {platform.release()}".strip()}
 
 
 def publish_schema(broker, topic_prefix, client_id):
@@ -447,6 +652,9 @@ def publish_schema(broker, topic_prefix, client_id):
         # Which recorded shape of this deck the schema above is -- see deck.py. Lets Cloud tell a
         # device whose drivers changed apart from one that merely reconnected.
         "deck_version": deck.current_version(),
+        # The computer this edge runs on. Here rather than in the 5-second heartbeat: it cannot
+        # change without a restart, and the heartbeat is kept tiny on purpose (AWS IoT metering).
+        "host": host_info(),
     }
     broker.publish(f"{topic_prefix}/{client_id}/schema", schema, retain=True, qos=1)
 
@@ -564,11 +772,16 @@ async def status_loop(broker, topic_prefix, client_id):
     # connect. A set, not a modulus, is what makes this terminate.
     RESYNC_TICKS = {1, 2, 4, 8, 16, 32}
     tick = 0
-    while True:
+    # Ends when this connection is replaced or dropped on purpose (re-pair, pause, remove). It used
+    # to run forever, so every reconnect left one more loop publishing into a closed connection.
+    while broker is global_broker:
         try:
+            busy = await device_busy()
+            if broker is not global_broker:
+                break  # detached while asking (pause, remove): an "online" now would undo it
             broker.publish(
                 f"{topic_prefix}/{client_id}/status",
-                {"online": True, "busy": await device_busy(), "ts": time.time(), "session": global_session},
+                {"online": True, "busy": busy, "ts": time.time(), "session": global_session},
                 retain=True, qos=0,
             )
             if tick in RESYNC_TICKS:
@@ -585,6 +798,51 @@ async def status_loop(broker, topic_prefix, client_id):
         tick += 1
         await asyncio.sleep(5)
 
+def _broker_from_token(token: str):
+    """The broker a Cloud token describes, not yet connected: (broker, topic_prefix, client_id, url)."""
+    # Standardize token decoding: support raw JSON fallback if user didn't base64 encode
+    try:
+        token_data = json.loads(base64.b64decode(token).decode('utf-8'))
+    except Exception:
+        token_data = json.loads(token)
+
+    protocol = token_data.get("protocol")
+    endpoint = token_data.get("endpoint", "")
+    if ":" in endpoint:
+        endpoint = endpoint.split(":")[0]
+    if endpoint == "localhost":
+        endpoint = "127.0.0.1"
+    port = token_data.get("port", 1883 if protocol == "mqtt" else 8883)
+    client_id = token_data.get("client_id", str(uuid.uuid4()))
+    topic_prefix = token_data.get("topic_prefix", "ivoryos/edge")
+    url = f"{'mqtts' if protocol == 'aws_iot' else 'mqtt'}://{endpoint}:{port}"
+
+    if protocol == "mqtt":
+        broker = LocalMQTTBroker(client_id, endpoint, port)
+    elif protocol == "aws_iot":
+        # Written exactly as issued and readable by this user only (cloud_pairing.py); an
+        # incomplete token is refused here with a message rather than as a TLS error later.
+        ca_cert_path, cert_path, key_path = cloud_pairing.write_aws_certificates(
+            token_data.get("certs") or {}, CERTS_DIR)
+        broker = AWSIoTBroker(client_id, endpoint, ca_cert_path, cert_path, key_path)
+    else:
+        raise ValueError(f"Unknown broker protocol in the Cloud token: {protocol!r}")
+    return broker, topic_prefix, client_id, url
+
+
+async def _wait_connected(broker, seconds: float = 5.0):
+    """connect() only starts the handshake — paho reports the real CONNACK result asynchronously
+    via the on_connect callback, on a background thread. Poll briefly for that instead of
+    reporting "success" the instant the socket call returns, so a bad cert or unreachable
+    endpoint actually surfaces as a failure here rather than a false-positive "connected" that
+    only reveals itself later as silence."""
+    for _ in range(int(seconds * 10)):
+        if broker.client.is_connected():
+            return
+        await asyncio.sleep(0.1)
+    raise TimeoutError("Timed out waiting to connect — check the endpoint and, for AWS IoT, that the certificate is registered and its policy allows this Thing to connect.")
+
+
 async def setup_broker():
     global global_broker, cloud_connection_state, cloud_connection_error, cloud_broker_url
     if global_broker:
@@ -597,52 +855,21 @@ async def setup_broker():
         cloud_broker_url = None
         return
 
+    if CLOUD_PAUSED:
+        # Paired, and deliberately not connecting until resumed (POST /api/cloud-settings/resume).
+        cloud_connection_state = "paused"
+        cloud_connection_error = None
+        return
+
     cloud_connection_state = "connecting"
     cloud_connection_error = None
 
     try:
-        # Standardize token decoding: support raw JSON fallback if user didn't base64 encode
-        try:
-            token_data = json.loads(base64.b64decode(CLOUD_TOKEN).decode('utf-8'))
-        except:
-            token_data = json.loads(CLOUD_TOKEN)
-            
-        protocol = token_data.get("protocol")
-        endpoint = token_data.get("endpoint", "")
-        if ":" in endpoint:
-            endpoint = endpoint.split(":")[0]
-        if endpoint == "localhost":
-            endpoint = "127.0.0.1"
-        port = token_data.get("port", 1883 if protocol == "mqtt" else 8883)
-        client_id = token_data.get("client_id", str(uuid.uuid4()))
-        topic_prefix = token_data.get("topic_prefix", "ivoryos/edge")
-        
         global global_topic_prefix, global_client_id
+        global_broker, topic_prefix, client_id, cloud_broker_url = _broker_from_token(CLOUD_TOKEN)
         global_topic_prefix = topic_prefix
         global_client_id = client_id
 
-        cloud_broker_url = f"{'mqtts' if protocol == 'aws_iot' else 'mqtt'}://{endpoint}:{port}"
-
-        if protocol == "mqtt":
-            global_broker = LocalMQTTBroker(client_id, endpoint, port)
-        elif protocol == "aws_iot":
-            certs = token_data.get("certs", {})
-            cert_dir = CERTS_DIR
-            os.makedirs(cert_dir, exist_ok=True)
-            
-            ca_cert_path = os.path.join(cert_dir, "root-CA.crt")
-            cert_path = os.path.join(cert_dir, "device.cert.pem")
-            key_path = os.path.join(cert_dir, "device.private.key")
-            
-            with open(ca_cert_path, "w") as f:
-                f.write(certs.get("root_ca", ""))
-            with open(cert_path, "w") as f:
-                f.write(certs.get("cert_pem", ""))
-            with open(key_path, "w") as f:
-                f.write(certs.get("private_key", ""))
-                
-            global_broker = AWSIoTBroker(client_id, endpoint, ca_cert_path, cert_path, key_path)
-            
         if global_broker:
             global_broker.set_callback(handle_broker_message)
             # If we drop off ungracefully (crash, network loss), the broker publishes this on our
@@ -652,18 +879,7 @@ async def setup_broker():
             # daemon.js's staleness sweep is what catches everyone else.
             global_broker.set_will(f"{topic_prefix}/{client_id}/status", {"online": False, "ts": time.time()}, retain=False)
             global_broker.connect()
-
-            # connect() only starts the handshake — paho reports the real CONNACK result
-            # asynchronously via the on_connect callback, on a background thread. Poll briefly for
-            # that instead of reporting "success" the instant the socket call returns, so a bad
-            # cert or unreachable endpoint actually surfaces as a failure here rather than a
-            # false-positive "connected" that only reveals itself later as silence.
-            for _ in range(50):  # up to ~5s
-                if global_broker.client.is_connected():
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                raise TimeoutError("Timed out waiting to connect — check the endpoint and, for AWS IoT, that the certificate is registered and its policy allows this Thing to connect.")
+            await _wait_connected(global_broker)
 
             global global_session
             global_session = uuid.uuid4().hex[:8]
@@ -681,6 +897,10 @@ async def setup_broker():
             global_broker.subscribe(f"{topic_prefix}/{client_id}/cloud-queue")
             # Another process connecting under this identity: a second copy of this edge.
             global_broker.watch_identity(f"{topic_prefix}/{client_id}/presence", global_session)
+            # Answers and error decisions for a Cloud task stopped here for a person.
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/task-control")
+            # Cloud removed this device (its Devices page): forget the pairing here too.
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/removed")
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the

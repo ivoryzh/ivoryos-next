@@ -98,3 +98,7 @@ desktop/dist/
 
 # One edge per data folder (edge_server/ivoryos_edge/instance_lock.py)
 .ivoryos_edge.lock
+
+# Per-edge state for the flow-lab example (example/flow_lab/): each edge's database, workflows
+# and .env -- which holds its Cloud pairing token -- live here at runtime (IVORYOS_EDGE_HOME).
+example/flow_lab/.edges/

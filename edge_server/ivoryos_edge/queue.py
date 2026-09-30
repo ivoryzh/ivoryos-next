@@ -156,6 +156,36 @@ def condition_record(condition: str, result: Any, context: Dict[str, Any], previ
 # arrival; a long step in between still gets its update, via the trailing send below.
 PROGRESS_MIN_INTERVAL_S = 2.0
 _DONE_STEP_STATUSES = ("completed", "skipped")
+# A prompt or error shown on a Cloud card, not a log: the device keeps the full traceback.
+PAUSE_TEXT_MAX = 300
+
+
+def pause_summary(run: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    """What a run stopped for, when it stopped for a person: a question, or an error to decide on.
+
+    `pause` names this one stop: the step and when it started, so a While loop asking the same
+    question again, or a retried step failing again, is a different pause. A decision sent from
+    Cloud carries it back and is applied only while it still matches (see apply_cloud_control),
+    which is what makes it safe for Cloud to re-send a decision it never saw take effect.
+
+    An error only counts while the run is still waiting on it. Once someone has chosen to stop,
+    the run has an end_time and the error is the outcome, not a question.
+    """
+    state = run.get("status")
+    if state == "waiting_input" and current.get("status") == "waiting_input":
+        out = current.get("outputs") or {}
+        return {
+            "prompt": str(out.get("prompt") or "")[:PAUSE_TEXT_MAX],
+            "input_type": out.get("input_type") or "str",
+            "pause": f"input:{current.get('id')}:{current.get('start_time')}",
+        }
+    if state == "error" and current.get("status") == "error" and not run.get("end_time"):
+        message = str(current.get("error") or "").strip().split("\n", 1)[0]
+        return {
+            "error": message[:PAUSE_TEXT_MAX] or "The step failed.",
+            "pause": f"error:{current.get('id')}:{current.get('start_time')}",
+        }
+    return {}
 
 
 def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
@@ -182,6 +212,7 @@ def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
         row = (current.get("parameters") or {}).get("_row")
         if isinstance(row, int):
             summary["row"] = row + 1
+        summary.update(pause_summary(run, current))
 
     if params.get("type") == "Optimization":
         # Trial steps are generated an iteration at a time, so the plan comes from the template.
@@ -238,7 +269,55 @@ def build_cloud_result(run: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
-def report_run_finished(run) -> None:
+def record_failed_attempt(outputs: Optional[dict], error: str, start, end) -> dict:
+    """A step's outputs with one more failed attempt on its record.
+
+    Kept in `outputs` (no schema change) under `attempts`, and carried across a retry: a step that
+    failed twice and then worked is not the same outcome as one that just worked, and without this
+    a retry erased the failure entirely -- the run read "completed" as though nothing happened.
+    """
+    kept = dict(outputs or {})
+    kept["attempts"] = list(kept.get("attempts") or []) + [{
+        "error": str(error or "").strip().split("\n", 1)[0][:PAUSE_TEXT_MAX],
+        "start_time": start.isoformat() if start else None,
+        "end_time": end.isoformat() if end else None,
+    }]
+    return kept
+
+
+def resolve_last_attempt(outputs: Optional[dict], resolution: str) -> dict:
+    """Note what was decided about the latest failed attempt: retry, skip or stop."""
+    kept = dict(outputs or {})
+    attempts = [dict(a) for a in kept.get("attempts") or []]
+    if attempts:
+        attempts[-1]["resolution"] = resolution
+    kept["attempts"] = attempts
+    return kept
+
+
+def with_attempts(outputs: dict, previous: Optional[dict]) -> dict:
+    """New outputs for a step, keeping the failed attempts recorded before it succeeded."""
+    attempts = (previous or {}).get("attempts")
+    return {**outputs, "attempts": attempts} if attempts else outputs
+
+
+def run_issues(steps: List[Dict[str, Any]]) -> Dict[str, int]:
+    """What went wrong on the way to a run's outcome, even when the outcome is "completed".
+
+    `retried`: failed attempts someone chose to retry; `skipped`: steps that failed and were
+    skipped. Empty when nothing did. An If/While branch skip has no error and is not counted.
+    Stored on the run when it finishes (parameters._issues) so every view -- the bench's Data
+    History, Cloud's Results and canvas -- reads one verdict instead of recomputing it.
+    """
+    attempts = [a for s in steps for a in ((s.get("outputs") or {}).get("attempts") or [])]
+    issues = {
+        "retried": sum(1 for a in attempts if a.get("resolution") == "retry"),
+        "skipped": sum(1 for s in steps if s.get("status") == "skipped" and s.get("error")),
+    }
+    return {k: v for k, v in issues.items() if v}
+
+
+def report_run_finished(run, issues: Optional[Dict[str, int]] = None) -> None:
     """Everything that has to happen once a run reaches its final status, for every kind of run.
 
     Called from both the plain and the optimization paths. It used to live inline in the plain
@@ -250,7 +329,7 @@ def report_run_finished(run) -> None:
     # Imported lazily: server.py imports this module at load time.
     from ivoryos_edge.server import notify_status_changed, publish_task_status, republish_changed_runtimes
     if params.get("cloud_run_id"):
-        publish_task_status(params["cloud_run_id"], params.get("cloud_node_id"), run.status)
+        publish_task_status(params["cloud_run_id"], params.get("cloud_node_id"), run.status, issues=issues or None)
     # Possibly free now, so a task Cloud is holding for this device can go without waiting.
     notify_status_changed()
     if run.status == "completed":
@@ -506,6 +585,7 @@ class WorkflowQueueManager:
                 "variable_count": len(variables),
                 "row_count": len(params.get("rows") or []) if variables else None,
                 "instruments": sorted(instruments.get(r.id, [])),
+                "issues": params.get("_issues") or None,
             })
         return {"runs": summaries, "total": total}
 
@@ -599,6 +679,42 @@ class WorkflowQueueManager:
         event = self.pending_input_event.get(run_id)
         if event:
             event.set()
+
+    async def apply_cloud_control(self, cloud_run_id: str, cloud_node_id: str, pause: str,
+                                  action: str, value: Any = None) -> str:
+        """Carry out a decision made in Cloud about a run stopped for a person.
+
+        The same three answers the bench has -- an input value, or retry/skip/stop on an error --
+        applied only while `pause` still names the stop the decision was made about. Cloud re-sends
+        a decision it has not seen take effect, and the bench may have answered first; without this
+        check a late "retry" would land on whatever error happens next. A stale decision is dropped
+        and the current state re-sent, so Cloud stops showing a question that has gone.
+
+        Stop differs from the bench's abort in one way: it resumes the queue. The bench leaves the
+        queue paused after an abort for the operator standing there; a remote stop would leave the
+        device holding every later Cloud task behind a pause nobody at the bench knows about.
+        """
+        run_id = self.active_run_id
+        run = await self.get_run_status(run_id) if run_id is not None else None
+        params = (run or {}).get("parameters") or {}
+        if not run or params.get("cloud_run_id") != cloud_run_id or params.get("cloud_node_id") != cloud_node_id:
+            return "not running here"
+        if not pause or run_progress_summary(run).get("pause") != pause:
+            await self.report_cloud_progress(run_id, force=True)
+            return "stale"
+        if action == "input" and pause.startswith("input:"):
+            self.submit_input(run_id, value)
+        elif action in ("retry", "skip") and pause.startswith("error:"):
+            self.error_action = action
+        elif action == "stop" and pause.startswith("error:"):
+            self.error_action = "abort"
+            self.resume()
+        elif action == "stop":
+            self.cancel()
+        else:
+            return "not applicable"
+        return "applied"
+
     async def subscribe(self, run_id: int, websocket: Any):
         if run_id not in self.active_connections:
             self.active_connections[run_id] = []
@@ -701,7 +817,7 @@ class WorkflowQueueManager:
         except Exception as e:
             print(f"[Run {run_id}] Could not send results to Cloud: {e}")
 
-    async def report_cloud_progress(self, run_id: int) -> None:
+    async def report_cloud_progress(self, run_id: int, force: bool = False) -> None:
         """Tell Cloud how far a Cloud-dispatched run has got (see run_progress_summary).
 
         Throttled to one message per PROGRESS_MIN_INTERVAL_S per run, with a trailing send so the
@@ -733,11 +849,14 @@ class WorkflowQueueManager:
             return
 
         summary = run_progress_summary(run)
-        if summary == state["sent"]:
+        if summary == state["sent"] and not force:
             return
         loop = asyncio.get_running_loop()
         wait = state["sent_at"] + PROGRESS_MIN_INTERVAL_S - loop.time()
-        if wait > 0:
+        # A run that has just stopped for a person is sent at once rather than after the throttle:
+        # it is the one update someone is waiting to be told about.
+        newly_paused = bool(summary.get("pause")) and summary.get("pause") != (state["sent"] or {}).get("pause")
+        if wait > 0 and not (force or newly_paused):
             if not state["timer"]:
                 def flush():
                     state["timer"] = None
@@ -746,7 +865,10 @@ class WorkflowQueueManager:
             return
 
         from ivoryos_edge.server import publish_task_status
-        publish_task_status(params["cloud_run_id"], params.get("cloud_node_id"), "running", progress=summary)
+        # A paused summary goes at QoS 1: nothing later supersedes it until someone answers, so a
+        # lost copy would leave Cloud never knowing the run is waiting.
+        publish_task_status(params["cloud_run_id"], params.get("cloud_node_id"), "running", progress=summary,
+                            reliable=bool(summary.get("pause")))
         state["sent_at"] = loop.time()
         state["sent"] = summary
 
@@ -1083,7 +1205,7 @@ class WorkflowQueueManager:
                                 
                             serialized_res = serialize_result(result)
                             step.status = "completed"
-                            step.outputs = {"result": serialized_res}
+                            step.outputs = with_attempts({"result": serialized_res}, step.outputs)
                             
                             if step.parameters and (step.parameters.get("_return_bindings") or step.parameters.get("_return_var")):
                                 bind_values(workflow_context, row_contexts, step, extract_return_values(
@@ -1112,10 +1234,11 @@ class WorkflowQueueManager:
                             step.status = "error"
                             step.error = str(e) + "\n" + traceback.format_exc()
                             step.end_time = datetime.utcnow()
-                            
+                            step.outputs = record_failed_attempt(step.outputs, str(e), step.start_time, step.end_time)
+
                             run.status = "error"
                             await session.commit()
-                            
+
                             self.pause()
                             self.error_action = None
                             
@@ -1130,18 +1253,22 @@ class WorkflowQueueManager:
                             if self.error_action == "retry":
                                 step.status = "pending"
                                 step.error = None
+                                step.outputs = resolve_last_attempt(step.outputs, "retry")
                                 await session.commit()
                                 self.error_action = None
                                 self.resume()
                                 continue
                             elif self.error_action == "skip":
                                 step.status = "skipped"
+                                step.outputs = resolve_last_attempt(step.outputs, "skip")
                                 await session.commit()
                                 index += 1
                                 self.error_action = None
                                 self.resume()
                                 continue
                             else:
+                                step.outputs = resolve_last_attempt(step.outputs, "stop")
+                                await session.commit()
                                 break # Unknown action or cancel
                     
                     # Update run status
@@ -1152,10 +1279,13 @@ class WorkflowQueueManager:
                         run.status = "error"
                     else:
                         run.status = "completed"
+                    issues = run_issues([s.as_dict() for s in steps])
+                    if issues:
+                        run.parameters = {**(run.parameters or {}), "_issues": issues}
                     run.end_time = datetime.utcnow()
                     await session.commit()
                     await self.publish_cloud_result(run.id)
-                    report_run_finished(run)
+                    report_run_finished(run, issues)
                     
                     if not self.cancelled:
                         await self.pause_event.wait()

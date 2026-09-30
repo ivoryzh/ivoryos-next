@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Inter } from 'next/font/google';
 import "../globals.css";
 import "../xyflow.css";
-import Script from "next/script";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import { ThemeSync } from "@ivoryos/shared-ui";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,32 +24,24 @@ export const metadata: Metadata = {
   description: "Distributed edge workflow orchestrator.",
 };
 
-export default function RootLayout({
+/**
+ * The theme is set on <html> by the server, from the `theme` cookie that ThemeSync keeps equal to
+ * the one IvoryOS theme (shared-ui theme.tsx; inside the desktop app, the app sets it too).
+ * It used to be a pre-paint <script>, which React 19 reports as an error ("Encountered a script
+ * tag while rendering React component") in every form tried -- raw, and via next/script both
+ * inline and as a `src`. A class chosen on the server needs no script and cannot flash.
+ */
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const theme = (await cookies()).get('theme')?.value === 'light' ? 'light' : 'dark';
   return (
-    <html lang="en" suppressHydrationWarning className={`dark ${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" suppressHydrationWarning className={`${theme} ${geistSans.variable} ${geistMono.variable}`}>
       <body className={inter.className}>
-        {/* Applies a saved light theme before first paint. `next/script` rather than a raw
-            <script>: React renders a raw one on the client as inert markup and warns about it
-            ("Encountered a script tag while rendering React component"), whereas
-            beforeInteractive is injected into the server HTML by Next itself. */}
-        <Script id="theme-init" strategy="beforeInteractive">{`
-          try {
-            if (localStorage.theme === 'light') {
-              document.documentElement.classList.remove('dark');
-              document.documentElement.classList.add('light');
-            }
-          } catch (_) {}
-        `}</Script>
-        <div className="flex h-screen w-full overflow-hidden">
-          <Sidebar />
-          <main className="flex-1 overflow-hidden relative">
-            {children}
-          </main>
-        </div>
+        <ThemeSync cookie="theme" />
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

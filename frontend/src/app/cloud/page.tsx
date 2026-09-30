@@ -1,237 +1,220 @@
 "use client";
+import { confirmDialog, notify, useDocumentTheme } from '@ivoryos/shared-ui';
 import { API_BASE } from '@/config';
 
-import { useState, useEffect } from 'react';
-import { Cloud, Save, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { CheckCircle2, AlertTriangle, ExternalLink, Loader2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 
+type Pairing = {
+  state: 'waiting' | 'approved' | 'connected' | 'denied' | 'expired' | 'error' | 'cancelled';
+  code: string;
+  approve_url: string;
+  cloud_url: string;
+  expires_at: string | null;
+  error: string | null;
+};
+
+type Settings = {
+  paired: boolean;
+  client_id: string | null;
+  broker: string | null;
+  connection_state: string;
+  connection_error: string | null;
+  pairing: Pairing | null;
+  paused?: boolean;
+  device_id?: string | null;
+};
+
+/**
+ * Pair this edge with Cloud: it shows a code, and a person approves it on Cloud. Nothing is typed
+ * here from Cloud, and the credentials never pass through this page: the edge collects them itself
+ * with a secret it keeps (ivoryos_edge/cloud_pairing.py).
+ */
 export default function CloudSettingsPage() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const [paired, setPaired] = useState(false);
-  const [pairedAs, setPairedAs] = useState<{ clientId: string; broker: string } | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState('');
-  // Pairing replaces carrying the token here by hand. On a LAN the Cloud URL must be supplied
-  // (Cloud sits at an arbitrary local address); a hosted deployment is at a fixed URL this device
-  // already knows, so there the code is the only input. The token field below stays as a manual
-  // fallback for a device that can reach the broker but not Cloud's HTTP port.
-  const [pairCode, setPairCode] = useState('');
+  const theme = useDocumentTheme();
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [name, setName] = useState('');
   const [cloudUrl, setCloudUrl] = useState('');
-  const [isPairing, setIsPairing] = useState(false);
-  // 'idle' means "not attempted this session" — distinct from 'disconnected', which means the
-  // edge server itself confirmed there's no active broker connection (e.g. token was cleared).
-  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected' | 'error' | 'disconnected'>('idle');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-
-    // Fetch current settings
+  const load = useCallback(() => {
     fetch(`${API_BASE}/api/cloud-settings`)
       .then(res => res.json())
-      .then(data => {
-        setPaired(!!data.paired);
-        setPairedAs(data.client_id ? { clientId: data.client_id, broker: data.broker || '' } : null);
-        if (data.connection_state) setConnectionState(data.connection_state);
-        if (data.connection_error) setError(data.connection_error);
-      })
-      .catch(err => {
-        console.error("Failed to fetch cloud settings", err);
-        setError('Failed to connect to local edge server to read settings.');
-      });
+      .then(setSettings)
+      .catch(() => setError('Could not read this edge’s Cloud settings.'));
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
+  useEffect(() => { load(); }, [load]);
 
-  // Validate: the POST below blocks on the edge server actually attempting the connection (up to
-  // ~5s — see setup_broker's is_connected() poll) and its response IS the real outcome, so there's
-  // no separate "click save, then hope" step — a bad cert or wrong endpoint comes back as an
-  // explicit error here, not silence.
-  const pairWithCode = async () => {
-    setError('');
-    setIsPairing(true);
-    setConnectionState('connecting');
+  const pairing = settings?.pairing;
+  const pending = pairing?.state === 'waiting' || pairing?.state === 'approved';
+  // Follow a pairing in progress, and tick the countdown.
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => { load(); setNow(Date.now()); }, 2000);
+    return () => clearInterval(t);
+  }, [pending, load]);
+
+  const secondsLeft = pairing?.expires_at ? Math.max(0, Math.round((new Date(pairing.expires_at).getTime() - now) / 1000)) : null;
+
+  const call = async (method: string, path: string, body?: object): Promise<any> => {
+    setError(''); setBusy(true);
     try {
-      const res = await fetch(`${API_BASE}/api/cloud-settings/pair`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: pairCode, cloud_url: cloudUrl }),
+      const res = await fetch(`${API_BASE}${path}`, {
+        method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
       });
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || 'Pairing failed.');
-
-      // The edge server applies the redeemed token through the same path a pasted one uses, so
-      // the result it reports back is the real broker connection state, not just "code accepted".
-      setPaired(true);
-      setPairedAs(data.client_id ? { clientId: data.client_id, broker: data.broker || '' } : null);
-      setConnectionState(data.connection_state || 'connected');
-      if (data.connection_state === 'error') {
-        setError(data.connection_error || 'Paired, but the broker connection failed.');
-      } else {
-        setPairCode('');
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error || 'That did not work.');
+      return data;
     } catch (e: any) {
-      setConnectionState('error');
       setError(e.message);
+      return null;
     } finally {
-      setIsPairing(false);
+      setBusy(false);
+      load();
     }
   };
 
-  const disconnectCloud = async () => {
-    setIsSaving(true);
-    setError('');
-
-    try {
-      const res = await fetch(`${API_BASE}/api/cloud-settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: "" })
-      });
-
-      if (res.ok) {
-        setPaired(false);
-        setPairedAs(null);
-        setConnectionState('disconnected');
-      } else {
-        const data = await res.json();
-        setError(data.error || 'Failed to disconnect.');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Network error.');
-    } finally {
-      setIsSaving(false);
+  const startPairing = () => call('POST', '/api/cloud-settings/pair', { name, cloud_url: cloudUrl });
+  const cancelPairing = () => call('DELETE', '/api/cloud-settings/pair');
+  // Pause: stay paired, stop connecting (Cloud shows it paused). Resume: reconnect, no pairing.
+  const pause = () => call('POST', '/api/cloud-settings/pause');
+  const resume = () => call('POST', '/api/cloud-settings/resume');
+  // Remove: leave Cloud for good. Cloud forgets this device; it keeps its id, so pairing again
+  // later reconnects the same device.
+  const remove = async () => {
+    const ok = await confirmDialog(
+      'Remove this edge from Cloud? Cloud forgets it and it stops syncing; its past runs stay on Cloud. '
+      + 'This edge forgets its credentials, so it can pair with any Cloud. To step away for a while instead, use Pause.',
+      { title: 'Remove from Cloud?', confirmLabel: 'Remove', tone: 'danger' },
+    );
+    if (!ok) return;
+    const result = await call('POST', '/api/cloud-settings/remove');
+    if (result && !result.told_cloud) {
+      await notify('Cloud could not be reached, so it was not told. This edge has forgotten its pairing; remove the device on Cloud’s Devices page too.', { title: 'Removed here only' });
     }
   };
+
+  const state = settings?.connection_state || 'disconnected';
+  const dot = settings?.paused ? 'bg-indigo-400' : state === 'connected' ? 'bg-green-500' : state === 'connecting' || state === 'reconnecting' ? 'bg-amber-500 animate-pulse'
+    : state === 'error' || state === 'conflict' ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600';
+  const label = !settings?.paired ? 'Not paired' : settings.paused ? 'Paused' : state === 'connected' ? 'Connected' : state === 'connecting' ? 'Connecting…'
+    : state === 'reconnecting' ? 'Reconnecting…' : state === 'conflict' ? 'Identity in use elsewhere' : state === 'error' ? 'Connection failed' : 'Disconnected';
+  const problem = error || (pairing && ['denied', 'expired', 'error'].includes(pairing.state) ? pairing.error : '') || settings?.connection_error || '';
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       <main className="flex-1 flex flex-col h-full w-full overflow-y-auto">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-8 bg-white dark:bg-black/20 z-10">
           <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Cloud Connect</h2>
         </header>
 
-        <div className="p-8 max-w-4xl mx-auto w-full">
-          <div className="bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-2xl p-8 shadow-sm">
-            <div className="mb-8">
-              <h2 className="text-xl font-semibold mb-2">Edge-to-Cloud Registration</h2>
+        <div className="p-8 max-w-3xl mx-auto w-full space-y-6">
+          <div className="bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-2xl p-8 shadow-sm space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold mb-2">Connect this edge to Cloud</h2>
               <p className="text-gray-500 dark:text-gray-400 text-sm">
-                Configure your edge device to connect to a centralized IvoryOS SaaS Cloud Orchestrator.
-                When connected, this device publishes its status, schema, and saved workflows to the cloud over MQTT.
+                Once connected, this edge shares its status, instruments and saved workflows with IvoryOS Cloud, and can run
+                workflows sent from there. It keeps working on its own if the connection drops.
               </p>
             </div>
 
-            <div className="mb-6 flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full shrink-0 ${
-                connectionState === 'connected' ? 'bg-green-500' :
-                connectionState === 'connecting' ? 'bg-amber-500 animate-pulse' :
-                connectionState === 'error' ? 'bg-red-500' :
-                'bg-gray-300 dark:bg-gray-600'
-              }`} />
-              <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
-                {connectionState === 'connected' ? 'Connected' :
-                 connectionState === 'connecting' ? 'Connecting…' :
-                 connectionState === 'error' ? 'Connection failed' :
-                 connectionState === 'disconnected' ? 'Disconnected' :
-                 'Not configured'}
-              </span>
+            <div className="flex items-center gap-2 text-sm">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+              <span className="font-medium text-gray-700 dark:text-gray-300">{label}</span>
+              {settings?.paired && settings.client_id && (
+                <span className="text-gray-500 dark:text-gray-400">as <span className="font-mono">{settings.client_id}</span>
+                  {settings.broker && <> via <span className="font-mono">{settings.broker}</span></>}</span>
+              )}
             </div>
 
-            {error && (
-              <div className="mb-6 p-4 rounded-lg bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-500/30 flex items-start space-x-3 text-red-700 dark:text-red-400">
+            {problem && (
+              <div className="p-4 rounded-lg bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-500/30 flex items-start gap-3 text-red-700 dark:text-red-400">
                 <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
-                <span className="text-sm font-medium">{error}</span>
+                <span className="text-sm font-medium">{problem}</span>
               </div>
             )}
 
-            <div className="space-y-6">
-              <div className="p-5 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-500/30">
-                <label className="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-300">
-                  Pair with Cloud
-                </label>
-                <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
-                  Generate a code in Cloud under <strong>Settings &rarr; Pair a Device</strong>, then enter it here.
-                  This device fetches its own credentials — nothing needs to be copied between machines.
+            {pending && pairing ? (
+              <div className="p-6 rounded-xl bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-500/30 flex flex-col items-center gap-3 text-center">
+                <span className="text-xs font-semibold uppercase tracking-wider text-indigo-700 dark:text-indigo-300">Pairing code</span>
+                <span className="text-4xl font-mono font-bold tracking-[0.25em] text-indigo-700 dark:text-indigo-300">{pairing.code}</span>
+                <p className="text-sm text-gray-600 dark:text-gray-300 max-w-md">
+                  On Cloud, open <strong>Pair a device</strong> and enter this code, or follow the link. Approve it there, and this edge connects on its own.
                 </p>
-                <div className="grid grid-cols-3 gap-3">
-                  <input
-                    value={pairCode}
-                    onChange={e => setPairCode(e.target.value)}
-                    placeholder="7K4M-9QX2"
-                    className="px-4 py-2.5 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono tracking-widest uppercase"
-                  />
-                  <input
-                    value={cloudUrl}
-                    onChange={e => setCloudUrl(e.target.value)}
-                    placeholder="Cloud URL (LAN only)"
-                    className="col-span-2 px-4 py-2.5 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                  />
+                <a href={pairing.approve_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:underline">
+                  Approve on Cloud <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+                <span className="inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {pairing.state === 'approved' ? 'Approved. Connecting…'
+                    : secondsLeft !== null ? `Waiting for approval · expires in ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`
+                    : 'Waiting for approval'}
+                </span>
+                <button onClick={cancelPairing} disabled={busy} className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">Cancel</button>
+              </div>
+            ) : !settings?.paired && (
+              <div className="p-5 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 space-y-3">
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <label className="text-sm">
+                    <span className="block font-medium mb-1 text-gray-700 dark:text-gray-300">Device name</span>
+                    <input value={name} onChange={e => setName(e.target.value)} placeholder="This computer's name"
+                      className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                  </label>
+                  <label className="text-sm">
+                    <span className="block font-medium mb-1 text-gray-700 dark:text-gray-300">Cloud address</span>
+                    <input value={cloudUrl} onChange={e => setCloudUrl(e.target.value)} placeholder="Hosted Cloud (leave blank)"
+                      className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                  </label>
                 </div>
-                <button
-                  onClick={pairWithCode}
-                  disabled={isPairing || !pairCode.trim()}
-                  className="mt-3 px-6 py-2.5 rounded-lg font-bold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors disabled:opacity-50"
-                >
-                  {isPairing ? 'Pairing…' : 'Pair'}
-                </button>
-                <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
-                  Leave the URL blank on a hosted Cloud — this device already knows it. On a LAN, use the address Cloud shows beside the code.
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Fill in the address only for a Cloud your lab runs itself; its Settings page shows it. The name can be changed when you approve.
                 </p>
+                <button onClick={startPairing} disabled={busy}
+                  className="px-5 py-2.5 rounded-lg font-semibold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors disabled:opacity-50">
+                  {busy ? 'Starting…' : 'Connect to Cloud'}
+                </button>
+                {settings?.device_id && (
+                  <p className="text-xs text-gray-400">This edge is <span className="font-mono">{settings.device_id}</span> on Cloud; pairing it again reconnects the same device.</p>
+                )}
               </div>
+            )}
 
-              {/* No token field. It used to both accept and *display* CLOUD_TOKEN, which on AWS
-                  wraps this device's private key — so opening this page put a private key in the
-                  DOM. Pairing replaces the paste path, and CLOUD_TOKEN in .env remains the
-                  headless route for image- or config-managed deployments. */}
-              <div className="p-4 rounded-lg bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10">
-                {paired && pairedAs ? (
-                  <div className="text-sm">
-                    <span className="text-gray-500 dark:text-gray-400">Paired as </span>
-                    <span className="font-mono font-semibold text-gray-800 dark:text-gray-200">{pairedAs.clientId}</span>
-                    {pairedAs.broker && (
-                      <>
-                        <span className="text-gray-500 dark:text-gray-400"> via </span>
-                        <span className="font-mono text-gray-700 dark:text-gray-300">{pairedAs.broker}</span>
-                      </>
-                    )}
-                  </div>
+            {pairing?.state === 'connected' && (
+              <p className="flex items-center gap-1.5 text-sm font-medium text-green-600 dark:text-green-400">
+                <CheckCircle2 className="w-4 h-4" /> Paired and connected.
+              </p>
+            )}
+
+            {settings?.paired && (
+              <div className="pt-4 border-t border-gray-200 dark:border-white/10 flex flex-wrap items-center gap-3">
+                <p className="text-xs text-gray-500 dark:text-gray-400 flex-1 min-w-[16rem]">
+                  {settings.paused
+                    ? 'Paused: still paired, not connected. Cloud shows this edge as paused and sends it nothing.'
+                    : 'Pause to step away from Cloud for a while and keep the pairing. Remove to leave it for good.'}
+                </p>
+                {settings.paused ? (
+                  <button onClick={resume} disabled={busy}
+                    className="px-5 py-2 rounded-lg font-semibold text-sm bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50">
+                    Resume
+                  </button>
                 ) : (
-                  <div className="text-sm text-gray-500 dark:text-gray-400">
-                    Not paired with any Cloud yet.
-                  </div>
+                  <button onClick={pause} disabled={busy}
+                    className="px-5 py-2 rounded-lg font-semibold text-sm bg-gray-100 dark:bg-white/10 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-white/15 disabled:opacity-50">
+                    Pause
+                  </button>
                 )}
-              </div>
-            </div>
-
-            <div className="mt-8 pt-6 border-t border-gray-200 dark:border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                {connectionState === 'connected' && !isSaving && (
-                  <span className="flex items-center space-x-1.5 text-sm font-medium text-green-600 dark:text-green-400">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Validated — broker connection confirmed</span>
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center space-x-3">
-                <button 
-                  onClick={disconnectCloud}
-                  disabled={isSaving || !paired}
-                  className="flex items-center space-x-2 px-6 py-2.5 rounded-lg font-bold text-sm bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors disabled:opacity-50"
-                >
-                  <span>Disconnect</span>
+                <button onClick={remove} disabled={busy}
+                  className="px-5 py-2 rounded-lg font-semibold text-sm bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 disabled:opacity-50">
+                  Remove from Cloud
                 </button>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </main>

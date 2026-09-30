@@ -10,6 +10,8 @@
 
 const DECK_FORMAT = 'ivoryos-deck/1';
 const NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+// A deck's `plugins` entry: "package.module:attribute" (ivoryos_edge.plugins.load_plugin_refs).
+const PLUGIN_REF_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(:[A-Za-z_][A-Za-z0-9_]*)?$/;
 const PY_KEYWORDS = new Set(['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break',
     'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if',
     'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while',
@@ -66,10 +68,17 @@ function validateManifest(raw, { allowPaths = false } = {}) {
 
     const packages = manifest.packages || [];
     const instruments = manifest.instruments || [];
+    const plugins = manifest.plugins || [];
     if (!Array.isArray(packages) || packages.some((p) => typeof p !== 'string' || !p.trim())) {
         throw new ManifestError("'packages' must be a list of pip requirements");
     }
     if (!Array.isArray(instruments)) throw new ManifestError("'instruments' must be a list");
+    if (!Array.isArray(plugins)) throw new ManifestError("'plugins' must be a list");
+    for (const ref of plugins) {
+        if (typeof ref !== 'string' || !PLUGIN_REF_RE.test(ref.trim())) {
+            throw new ManifestError(`'${ref}' is not a plugin reference: expected "package.module:attribute"`);
+        }
+    }
     // A pip option smuggled in as a "requirement" (`--index-url evil`, `-e /path`) changes what
     // everything else installs from. A manifest names packages; it does not configure pip.
     const option = packages.find((p) => p.trim().startsWith('-'));
@@ -109,8 +118,8 @@ function validateManifest(raw, { allowPaths = false } = {}) {
 
 /**
  * The deck after installing a manifest into it. Instruments are matched by name (the manifest's
- * version wins) and packages by `packageKey`; everything else in the deck is kept. Returns
- * {deck, added, replaced} so the confirmation can say what will change.
+ * version wins), packages by `packageKey` and plugins by reference; everything else in the deck is
+ * kept. Returns {deck, added, replaced, pluginsAdded} so the confirmation can say what will change.
  */
 function mergeIntoDeck(deck, manifest) {
     const base = deck && typeof deck === 'object' ? deck : {};
@@ -132,6 +141,13 @@ function mergeIntoDeck(deck, manifest) {
     const paths = [...(base.paths || [])];
     for (const p of manifest.paths || []) if (!paths.includes(p)) paths.push(p);
 
+    const plugins = [...(base.plugins || [])];
+    const pluginsAdded = [];
+    for (const ref of manifest.plugins || []) {
+        const clean = ref.trim();
+        if (!plugins.includes(clean)) { plugins.push(clean); pluginsAdded.push(clean); }
+    }
+
     return {
         deck: {
             format: DECK_FORMAT,
@@ -140,18 +156,21 @@ function mergeIntoDeck(deck, manifest) {
             packages,
             ...(paths.length ? { paths } : {}),
             instruments,
+            ...(plugins.length ? { plugins } : {}),
         },
         added,
         replaced,
+        pluginsAdded,
     };
 }
 
 /** Human-readable summary lines for a confirmation dialog. */
-function describeInstall(manifest, { added, replaced }) {
+function describeInstall(manifest, { added, replaced, pluginsAdded = [] }) {
     const lines = [];
     if ((manifest.packages || []).length) lines.push(`Install: ${manifest.packages.join(', ')}`);
     if (added.length) lines.push(`Add to the deck: ${added.join(', ')}`);
     if (replaced.length) lines.push(`Replace on the deck: ${replaced.join(', ')}`);
+    if (pluginsAdded.length) lines.push(`Add plugins: ${pluginsAdded.join(', ')}`);
     if (!lines.length) lines.push('Nothing to install or add.');
     return lines;
 }

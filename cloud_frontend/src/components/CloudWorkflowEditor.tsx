@@ -7,16 +7,18 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
-  ChevronDown, ChevronUp, ChevronRight, Table2, PanelRightOpen, Hourglass, MessageSquareText,
+  ChevronDown, ChevronUp, ChevronRight, PanelRightOpen, Hourglass, MessageSquareText,
   GitBranch, AlertTriangle, AlertCircle, CheckCircle2, LayoutGrid, X, EyeOff, GripVertical, Workflow, Wrench,
 } from 'lucide-react';
-import { LIBRARY_INSTRUMENT } from '@ivoryos/shared-ui';
+import { LIBRARY_INSTRUMENT, issuesLabel } from '@ivoryos/shared-ui';
 import {
   CLOUD_LOGIC as CLOUD_LOGIC_SCHEMAS, IF_OPERATORS, isCloudLogicNode, isDeviceNode, isStartNode, blankParamsOf,
   logicProblemsOf, buildGraph,
 } from '@/lib/dag';
 import { parallelOnSameDevice } from '@/lib/canvasChecks';
 import { useDocumentTheme } from '@/lib/useDocumentTheme';
+import DeviceAvatar from './DeviceAvatar';
+import PauseActions from './PauseActions';
 import { GRID, freeHandleOf, isIfNode, pickAutoSource, slotBelow, tidyLayout } from '@/lib/canvasLayout';
 
 interface CloudWorkflowEditorProps {
@@ -230,6 +232,23 @@ const AnswerBox = ({ taskStatus }: { taskStatus: any }) => {
   );
 };
 
+/**
+ * Where a repeating or paced node is between firings: "row 3 of 6 · next in 4 min 10 s". `done`
+ * counts firings already started before this one (the store bumps it as each next one is
+ * scheduled), so while one runs it is that firing's own index minus one.
+ */
+const RepeatLine = ({ repeat, status, unit }: { repeat: { done: number; total: number; nextAt: string | null }; status: string; unit: string }) => {
+  const waiting = status === 'pending' && !!repeat.nextAt;
+  const now = useNow(waiting);
+  const n = Math.min(repeat.done + 1, repeat.total);
+  let text = `${unit} ${n} of ${repeat.total}`;
+  if (waiting) {
+    const left = Math.max(0, Math.round((Date.parse(repeat.nextAt!) - now) / 1000));
+    text = `${unit} ${repeat.done} of ${repeat.total} done · ${unit} ${n} in ${left >= 60 ? `${Math.floor(left / 60)} min ${left % 60} s` : `${left} s`}`;
+  }
+  return <div className="w-[226px] mt-2 text-[11px] text-gray-400 truncate" title={text}>{text}</div>;
+};
+
 /** What a running or finished Cloud Logic step is doing, in one line. */
 const LogicStatus = ({ block, taskStatus }: { block: any; taskStatus: any }) => {
   const pr = taskStatus?.progress || {};
@@ -282,13 +301,20 @@ const CustomCloudNode = ({ data, id }: any) => {
 
   const status = taskStatus?.status;
   const waitingOnPerson = status === 'running' && taskStatus?.progress?.state === 'waiting_input';
+  // A device stopped on a failed step, waiting for retry / skip / stop (see taskCommands.js).
+  const stoppedOnError = status === 'running' && String(taskStatus?.progress?.pause || '').startsWith('error:');
+  const recoveredFrom = status === 'completed' ? issuesLabel(taskStatus?.progress?.issues) : '';
   let borderClass = 'border-blue-500';
   if (isLogic) borderClass = 'border-slate-400 dark:border-slate-500';
   // A steady ring, not a pulse: the card holds a text box someone is about to type into.
-  if (status === 'running') borderClass = waitingOnPerson
+  if (status === 'running') borderClass = stoppedOnError
+    ? 'border-red-500 ring-4 ring-red-400/30 shadow-[0_0_18px_rgba(239,68,68,0.7)]'
+    : waitingOnPerson
     ? 'border-amber-500 ring-4 ring-amber-400/30 shadow-[0_0_18px_rgba(245,158,11,0.7)]'
     : 'border-yellow-400 shadow-[0_0_15px_rgba(250,204,21,0.6)]';
-  else if (status === 'completed') borderClass = 'border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.6)]';
+  else if (status === 'completed') borderClass = recoveredFrom
+    ? 'border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.6)]'
+    : 'border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.6)]';
   else if (status === 'error') borderClass = 'border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.6)]';
   else if (status === 'skipped' || status === 'cancelled') borderClass = 'border-gray-300 dark:border-white/20 opacity-60';
   else if (!status && !isLogic) {
@@ -325,7 +351,8 @@ const CustomCloudNode = ({ data, id }: any) => {
   const inner = 'calc(0.75rem - 2px)';
   const Meta = isLogic ? LOGIC_META[block.method] : null;
   const isDevice = !isLogic && !isStart;
-  const deviceOnline = !!targetDeviceId && !!cloudDevices?.find((d: any) => d.id === targetDeviceId)?.status?.includes('online');
+  const targetDevice = targetDeviceId ? cloudDevices?.find((d: any) => d.id === targetDeviceId) : null;
+  const deviceOnline = !!targetDevice?.status?.includes('online');
 
   return (
     <div
@@ -384,10 +411,23 @@ const CustomCloudNode = ({ data, id }: any) => {
             {isDevice && (
               <div className="w-full mt-2 flex items-center space-x-1.5">
                 <div className={`w-1.5 h-1.5 rounded-full ${deviceOnline ? 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.8)]' : 'bg-red-500 shadow-[0_0_5px_rgba(239,68,68,0.8)]'}`}></div>
+                {targetDevice?.image_version && <DeviceAvatar id={targetDeviceId} version={targetDevice.image_version} size={14} className="rounded" />}
                 <span className={`text-[10px] font-bold ${deviceOnline ? 'text-gray-400' : 'text-red-400'}`}>
                   {targetDeviceId ? targetDeviceId : 'Unassigned'}
                   {targetDeviceId && !deviceOnline && ' (Offline)'}
                 </span>
+              </div>
+            )}
+            {isDevice && taskStatus?.repeat && ['pending', 'queued', 'running'].includes(status) && (
+              <RepeatLine
+                repeat={taskStatus.repeat}
+                status={status}
+                unit={data.runConfig?.mode !== 'spreadsheet' ? 'run' : (parseInt(String(data.runConfig?.spreadsheet?.batchSize || ''), 10) || 1) > 1 ? 'batch' : 'row'}
+              />
+            )}
+            {isDevice && status === 'blocked' && taskStatus?.runQueued && (
+              <div className="w-[226px] mt-2 text-[11px] text-gray-400" title="This run was queued to start once the work already on its devices is done">
+                queued · starts after current work
               </div>
             )}
             {/* Live progress from the device while this node's task runs (edge queue.py's
@@ -418,14 +458,37 @@ const CustomCloudNode = ({ data, id }: any) => {
                 </div>
               );
             })()}
+            {/* The device stopped for a person: the question or the error, and what to do about
+                it -- the same controls as the attention panel, here in context. On a merged chain
+                every member reports the same task, so only its head carries them. */}
+            {isDevice && status === 'running' && taskStatus.progress?.pause
+              && (!taskStatus.mergedInto || String(taskStatus.mergedInto) === String(id)) && (() => {
+              const pr = taskStatus.progress;
+              const isError = String(pr.pause).startsWith('error:');
+              const text = isError ? pr.error : pr.prompt || 'Continue?';
+              return (
+                <div className={`w-[226px] mt-2 rounded-lg border p-2 ${isError
+                  ? 'border-red-300 bg-red-50 dark:border-red-500/40 dark:bg-red-500/10'
+                  : 'border-amber-300 bg-amber-50 dark:border-amber-500/40 dark:bg-amber-500/10'}`}>
+                  <div className={`mb-1.5 text-xs font-medium line-clamp-2 ${isError ? 'text-red-700 dark:text-red-300' : 'text-amber-900 dark:text-amber-200'}`} title={text}>{text}</div>
+                  <PauseActions key={pr.pause} item={{
+                    runId: taskStatus.runId,
+                    // The task's own id: a merged chain's members all report under its head.
+                    nodeId: taskStatus.mergedInto || taskStatus.nodeId,
+                    kind: isError ? 'error' : 'input',
+                    pause: pr.pause, prompt: pr.prompt, inputType: pr.input_type, error: pr.error,
+                    sent: taskStatus.sent || null,
+                  }} />
+                </div>
+              );
+            })()}
             {isLogic && <LogicStatus block={block} taskStatus={taskStatus} />}
-            {taskStatus?.hasResult && ['completed', 'error'].includes(status) && (
-              <a
-                href={`/results?runId=${encodeURIComponent(taskStatus.runId)}&nodeId=${encodeURIComponent(taskStatus.nodeId)}`}
-                className="nodrag mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
-              >
-                <Table2 className="w-3 h-3" /> view data
-              </a>
+            {/* Finished, but through failures someone retried or skipped: said on the card, since
+                the green of a clean finish would claim otherwise. Data is on the Results page. */}
+            {status === 'completed' && recoveredFrom && (
+              <div className="w-[226px] mt-2 flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400" title={`Completed, but ${recoveredFrom}`}>
+                <AlertTriangle className="w-3 h-3 shrink-0" /><span className="truncate">{recoveredFrom}</span>
+              </div>
             )}
             {collapsed && inputSummary && (
               // Fixed width: the node sizes to its content, so an unconstrained one-liner would
@@ -1024,6 +1087,7 @@ export default function CloudWorkflowEditor({
                       <div className={`w-2 h-2 shrink-0 rounded-full ${isOnline
                         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]'
                         : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
+                      {device.image_version && <DeviceAvatar id={deviceId} version={device.image_version} size={18} />}
                       <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{deviceId}</h3>
                       {device.schema?.deck_version != null && (
                         <span className="text-[10px] font-medium text-gray-400 shrink-0" title="Version of this device's instrument schema; it changes when its drivers change">

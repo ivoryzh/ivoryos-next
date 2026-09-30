@@ -282,3 +282,18 @@ export const datasheetCsv = (run: { variables: string[]; rows: { values?: unknow
   run.variables.map(csvField).join(','),
   ...run.rows.map((r) => run.variables.map((_: string, i: number) => csvField(r.values?.[i])).join(',')),
 ].join('\n');
+
+/**
+ * How a run that got there through failures describes itself: `parameters._issues` as the edge
+ * recorded it when the run finished (queue.py run_issues) -- `{retried, skipped}` counts, absent
+ * when nothing failed. Words only; the counting happens once, on the edge, for every view.
+ */
+export type RunIssues = { retried?: number; skipped?: number };
+
+export function issuesLabel(issues?: RunIssues | null): string {
+  if (!issues) return '';
+  const parts: string[] = [];
+  if (issues.retried) parts.push(`${issues.retried} failed attempt${issues.retried === 1 ? '' : 's'} retried`);
+  if (issues.skipped) parts.push(`${issues.skipped} failed step${issues.skipped === 1 ? '' : 's'} skipped`);
+  return parts.join(', ');
+}

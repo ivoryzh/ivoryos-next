@@ -91,7 +91,7 @@ export async function GET() {
     health.devices.online = devices.filter((d: any) => String(d.status) === 'online').length;
 
     // Paired, but never once seen. Pairing and running are two different connections to two
-    // different ports: redeeming a code only proves the device reached this app over HTTP, while
+    // different ports: pairing only proves the device reached this app over HTTP, while
     // everything afterwards rides MQTT. When just the first half succeeds the device registers
     // and then never appears again — and with no check for it, that read as a healthy backend
     // beside an idle lab, which is the single thing it was definitely not. A device that has ever

@@ -7,7 +7,7 @@ import {
   Download, Workflow, Library, Gauge, ListTodo, ArrowRight,
 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { notify, serverDate } from '@ivoryos/shared-ui';
+import { notify, serverDate, useDocumentTheme } from '@ivoryos/shared-ui';
 
 /**
  * The page someone lands on. It answers "what state is this bench in, and where do I go next":
@@ -42,13 +42,9 @@ export default function Home() {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [runs, setRuns] = useState<any[] | null>(null);
   const [workflows, setWorkflows] = useState<any[] | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
     const load = () => {
       fetch(`${API_BASE}/api/status`).then(r => r.json()).then(setEdgeStatus).catch(() => setEdgeStatus(null));
@@ -61,13 +57,6 @@ export default function Home() {
     return () => clearInterval(timer);
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const downloadSchema = async () => {
     // Straight from the server rather than the Designer's localStorage cache, which only existed
@@ -120,7 +109,7 @@ export default function Home() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-100 dark:bg-transparent">
         <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">

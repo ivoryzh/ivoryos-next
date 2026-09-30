@@ -243,6 +243,11 @@ class PluginFiles:
         return _NoCache(directory=directory, html=True)
 
 
+def _is_flask_blueprint(obj) -> bool:
+    """By class, without importing flask (which a v2 deck need not have installed)."""
+    return any(c.__name__ == "Blueprint" and c.__module__.startswith("flask") for c in type(obj).__mro__)
+
+
 def load_plugin_refs(refs: Iterable[str]) -> tuple[list[Plugin], list[dict]]:
     """Import the plugins a deck file lists, as "package.module:attribute" (attribute defaults
     to `plugin`). One that fails is reported, never fatal, the same rule as instruments."""
@@ -252,6 +257,13 @@ def load_plugin_refs(refs: Iterable[str]) -> tuple[list[Plugin], list[dict]]:
         try:
             obj = getattr(importlib.import_module(module_name), attr or "plugin")
             if not isinstance(obj, Plugin):
+                if _is_flask_blueprint(obj):
+                    # A v1 plugin: the original IvoryOS's plugin form, which this edge cannot run.
+                    # Say what it is and where the port is described, not just the type name.
+                    raise TypeError(
+                        f"{ref} is a v1 plugin (a Flask Blueprint for the original IvoryOS). This IvoryOS "
+                        "runs only v2 plugins (ivoryos_edge.plugins.Plugin); see 'Moving a Flask blueprint "
+                        "plugin over' in docs/plugins.md")
                 raise TypeError(f"{ref} is a {type(obj).__name__}, not an ivoryos_edge.plugins.Plugin")
             plugins.append(obj)
         except Exception as e:

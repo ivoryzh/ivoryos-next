@@ -1,8 +1,8 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ChevronRight, Cloud, Copy, Download, ExternalLink, FileCode2, FolderOpen, LayoutGrid, Layers, Loader2, Lock, Play, Plus,
-  RotateCw, Settings, Sparkles, Square, X,
+  AlertTriangle, ChevronRight, Cloud, Copy, Download, ExternalLink, FileCode2, FolderOpen, LayoutGrid, Layers, Loader2, Lock,
+  PanelLeftClose, PanelLeftOpen, Play, Plus, RotateCw, Settings, Sparkles, Square, Store, X,
 } from 'lucide-react';
 import { notify, promptDialog } from '@ivoryos/shared-ui';
 import { CLOUD_TAB, desktopApi, type AccountInfo, type CloudLink, type DesktopApi, type Profile, type Snapshot, type Tabs, type UpdateStatus } from '@/desktop';
@@ -16,6 +16,10 @@ import UpgradeDialog, { type UpgradeReason } from '@/components/launcher/Upgrade
 import { Button, STATE_LABEL, StatusDot, cardClass } from '@/components/launcher/ui';
 
 type View = 'profile' | 'cloud' | 'settings' | 'account';
+
+// Electron's window-dragging regions: the title bar drags the window, its buttons stay clickable.
+const DRAG = { WebkitAppRegion: 'drag' } as React.CSSProperties;
+const NO_DRAG = { WebkitAppRegion: 'no-drag' } as React.CSSProperties;
 
 /**
  * The IvoryOS desktop launcher: every saved way of starting an edge (a deck, or a Python script
@@ -35,21 +39,32 @@ export default function LauncherPage() {
   const [upgrade, setUpgrade] = useState<UpgradeReason | undefined>(undefined);
   const [tab, setTab] = useState<'main' | 'log' | 'settings'>('main');
   const [logs, setLogs] = useState<Record<string, string[]>>({});
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [tabs, setTabs] = useState<Tabs>({ open: [], active: null });
+  // The sidebar can be hidden to give the page the whole window. Remembered per browser, and read
+  // after hydration like the theme (AGENTS.md section 11), never in the initializer.
+  const [navHidden, setNavHidden] = useState(false);
+  // The Hub browser, owned here so the sidebar's Hub button can open it on a deck.
+  const [hubOpen, setHubOpen] = useState(false);
+  // The row being dragged and the row it is over, for reordering the sidebar.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropOn, setDropOn] = useState<string | null>(null);
   const barRef = useRef<HTMLElement>(null);
+  const navRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
-    const saved = (localStorage.getItem('theme') as 'light' | 'dark') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    setTheme(saved);
-    document.documentElement.classList.toggle('dark', saved === 'dark');
+    setNavHidden(localStorage.getItem('launcher.navHidden') === '1');
     setApi(desktopApi());
   }, []);
-  const chooseTheme = (next: 'light' | 'dark') => {
-    setTheme(next);
-    localStorage.setItem('theme', next);
-    document.documentElement.classList.toggle('dark', next === 'dark');
-  };
+  const toggleNav = useCallback(() => setNavHidden(hidden => {
+    try { localStorage.setItem('launcher.navHidden', hidden ? '0' : '1'); } catch { /* not remembered */ }
+    return !hidden;
+  }), []);
+  useEffect(() => {
+    // Ctrl+B / Cmd+B, as in most editors.
+    const onKey = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleNav(); } };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggleNav]);
 
   const reload = useCallback(() => {
     api?.snapshot().then(s => { setSnap(s); if (s.tabs) setTabs(s.tabs); }).catch(() => {});
@@ -67,6 +82,19 @@ export default function LauncherPage() {
     ro.observe(el);
     return () => ro.disconnect();
   }, [api, snap !== null]);
+  // Likewise the sidebar's width, so an edge or Cloud tab is laid out beside it rather than over
+  // it, and the decks stay one click away from inside any of them.
+  useEffect(() => {
+    if (!api) return;
+    const el = navRef.current;
+    if (!el || navHidden) { api.setSidebarWidth(0).catch(() => {}); return; }
+    const report = () => api.setSidebarWidth(el.getBoundingClientRect().width).catch(() => {});
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [api, navHidden, snap !== null]);
+  useEffect(() => (api ? api.onToggleSidebar(toggleNav) : undefined), [api, toggleNav]);
   useEffect(() => {
     if (!api) return;
     reload();
@@ -123,49 +151,78 @@ export default function LauncherPage() {
   const pro = account.plan === 'pro';
   const openAuth = (mode: AuthMode) => { setAuthMode(mode); setView('account'); api.showTab(null); };
   // Cloud is a Pro feature in the preview plans; without it the button offers the upgrade.
-  const openCloud = () => (pro ? setView('cloud') : setUpgrade('cloud'));
+  // The sidebar is the tab list: a running deck opens its own page, a stopped one its launcher page
+  // (to start it). The gear on each row is always the launcher page: instruments, log, settings.
+  const showProfilePage = (id: string) => { setSelected(id); setView('profile'); api.showTab(null); };
+  const openProfile = (p: Profile) => {
+    setSelected(p.id);
+    if (p.status.state === 'running') run(() => api.open(p.id));
+    else showProfilePage(p.id);
+  };
+  // Cloud likewise: straight to Cloud when it answers, its launcher page (status, address) when not.
+  const showCloudPage = () => { api.showTab(null); if (pro) setView('cloud'); else setUpgrade('cloud'); };
+  const openCloud = async () => {
+    if (!pro) { setUpgrade('cloud'); return; }
+    if (tabs.open.includes(CLOUD_TAB)) { api.showTab(CLOUD_TAB); return; }
+    const check = await api.checkCloud().catch(() => null);
+    if (check?.reachable && check.isCloud) run(() => api.openCloud());
+    else showCloudPage();
+  };
+
+  // Dragging a row onto another puts it there; the order is kept in profiles.json.
+  const moveProfile = (from: string, to: string) => {
+    const ids = profiles.map(p => p.id);
+    const at = ids.indexOf(from);
+    const target = ids.indexOf(to);
+    if (at === -1 || target === -1 || at === target) return;
+    ids.splice(at, 1);
+    ids.splice(target, 0, from);
+    setSnap(prev => (prev ? { ...prev, profiles: ids.map(id => prev.profiles.find(p => p.id === id)!).filter(Boolean) } : prev));
+    run(() => api.reorderProfiles(ids));
+  };
+  const activeProfile = tabs.active && tabs.active !== CLOUD_TAB ? profiles.find(p => p.id === tabs.active) || null : null;
+  // The Hub adds to a deck: the selected one, or the first deck when a script is selected.
+  const hubDeck = profile?.kind === 'deck' ? profile : profiles.find(p => p.kind === 'deck') || null;
+  const openHub = () => {
+    if (!hubDeck) return;
+    setSelected(hubDeck.id); setView('profile'); setTab('main'); api.showTab(null); setHubOpen(true);
+  };
 
   const rt = snap?.runtime;
   return (
-    <div className={`h-screen flex flex-col bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white ${theme}`}>
-      {/* The window's one bar: the launcher, then a tab per open edge. An edge's own UI is drawn
-          by the app over everything below this bar, so the launcher and every running deck live in
-          one window instead of a window each. */}
-      <header ref={barRef} className="h-11 shrink-0 flex items-stretch gap-1 pl-3 pr-2 border-b border-gray-200 dark:border-white/10 bg-white dark:bg-[#111]">
+    <div className="h-screen flex flex-col bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white">
+      {/* The window's title bar (desktop/src/main.js hides the system one): drag it to move the
+          window; the system's window buttons are drawn over its right end (left on macOS), hence
+          the padding. The sidebar is the tab list and says which page is showing, so the bar holds
+          only the sidebar toggle and, while a deck's or Cloud's page shows, reload and close. That
+          page is drawn by the app below this bar and right of the sidebar. */}
+      <header
+        ref={barRef}
+        style={DRAG}
+        className={`h-9 shrink-0 flex items-center gap-1 border-b border-gray-200 dark:border-white/10 bg-white dark:bg-[#111] ${snap?.platform === 'darwin' ? 'pl-20 pr-2' : 'pl-2 pr-36'}`}
+      >
         <button
           type="button"
-          onClick={() => api.showTab(null)}
-          className={`flex items-center gap-2 px-3 text-sm border-b-2 ${tabs.active === null ? 'border-indigo-500 text-gray-900 dark:text-white font-semibold' : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+          onClick={toggleNav}
+          style={NO_DRAG}
+          title={navHidden ? 'Show the sidebar (Ctrl+B)' : 'Hide the sidebar (Ctrl+B)'}
+          className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10"
         >
-          <LayoutGrid className="w-4 h-4" /> Launcher
+          {navHidden ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
         </button>
-        {tabs.open.map(id => {
-          const active = tabs.active === id;
-          if (id === CLOUD_TAB) {
-            return (
-              <div key={id} className={`group flex items-center gap-2 pl-3 pr-1 text-sm border-b-2 ${active ? 'border-indigo-500 text-gray-900 dark:text-white font-medium' : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}>
-                <button type="button" onClick={() => api.showTab(id)} className="flex items-center gap-2"><Cloud className="w-3.5 h-3.5 text-indigo-500" /> IvoryOS Cloud</button>
-                <button type="button" title="Close the tab" onClick={() => api.closeTab(id)} className="p-0.5 rounded text-gray-400 opacity-60 group-hover:opacity-100 hover:bg-gray-100 dark:hover:bg-white/10">
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            );
-          }
-          const p = profiles.find(x => x.id === id);
-          if (!p) return null;
-          return (
-            <div key={id} className={`group flex items-center gap-2 pl-3 pr-1 text-sm border-b-2 ${active ? 'border-indigo-500 text-gray-900 dark:text-white font-medium' : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}>
-              <button type="button" onClick={() => api.showTab(id)} className="flex items-center gap-2 max-w-[14rem]">
-                <StatusDot status={p.status} />
-                <span className="truncate">{p.name}</span>
-              </button>
-              <button type="button" title="Close the tab (the edge keeps running)" onClick={() => api.closeTab(id)} className="p-0.5 rounded text-gray-400 opacity-60 group-hover:opacity-100 hover:bg-gray-100 dark:hover:bg-white/10">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          );
-        })}
-        <div className="ml-auto flex items-center gap-1">
+        {tabs.active !== null && (
+          <>
+            <button type="button" style={NO_DRAG} title="Reload this page (Ctrl+R)" onClick={() => run(() => api.reloadTab())}
+              className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10">
+              <RotateCw className="w-3.5 h-3.5" />
+            </button>
+            <button type="button" style={NO_DRAG} title={activeProfile ? 'Close this page (the deck keeps running)' : 'Close Cloud'} onClick={() => run(() => api.closeTab(tabs.active!))}
+              className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </>
+        )}
+        <div className="ml-auto flex items-center gap-1" style={NO_DRAG}>
           {rt && rt.state !== 'idle' && rt.state !== 'ready' && (
             <span title={rt.hint || rt.message} className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${rt.state === 'error' ? 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300' : 'bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300'}`}>
               {rt.state === 'preparing' && <Loader2 className="w-3 h-3 animate-spin" />}
@@ -178,49 +235,94 @@ export default function LauncherPage() {
       </header>
 
       <div className="flex-1 min-h-0 flex">
-        <nav className="w-72 shrink-0 border-r border-gray-200 dark:border-white/10 flex flex-col bg-white/60 dark:bg-white/[0.02]">
+        {!navHidden && <nav ref={navRef} className="w-72 shrink-0 border-r border-gray-200 dark:border-white/10 flex flex-col bg-white/60 dark:bg-white/[0.02]">
           <div className="flex-1 overflow-y-auto p-3 space-y-1">
-            {profiles.map(p => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => { setSelected(p.id); setView('profile'); setTab('main'); }}
-                className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${view === 'profile' && profile?.id === p.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5'}`}
-              >
-                <div className="flex items-center gap-2">
-                  <StatusDot status={p.status} />
-                  <span className="text-sm font-medium truncate flex-1">{p.name}</span>
-                  <span
-                    title={p.status.portNote ? `Started on ${p.status.portNote.actual}, not the profile's ${p.status.portNote.requested}` : undefined}
-                    className={`text-[11px] font-mono ${p.status.portNote ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}
+            {profiles.map(p => {
+              const active = tabs.active !== null ? tabs.active === p.id : view === 'profile' && profile?.id === p.id;
+              const onPage = tabs.active === null && view === 'profile' && profile?.id === p.id;
+              return (
+                <div
+                  key={p.id}
+                  draggable
+                  onDragStart={e => { setDragId(p.id); e.dataTransfer.effectAllowed = 'move'; }}
+                  onDragOver={e => { if (dragId && dragId !== p.id) { e.preventDefault(); setDropOn(p.id); } }}
+                  onDragLeave={() => setDropOn(on => (on === p.id ? null : on))}
+                  onDrop={e => { e.preventDefault(); if (dragId) moveProfile(dragId, p.id); setDragId(null); setDropOn(null); }}
+                  onDragEnd={() => { setDragId(null); setDropOn(null); }}
+                  className={`group flex items-stretch rounded-lg border transition-colors ${active ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5'} ${dropOn === p.id ? '!border-indigo-400 border-dashed' : ''} ${dragId === p.id ? 'opacity-40' : ''}`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => openProfile(p)}
+                    title={p.status.state === 'running' ? `Open ${p.name}` : `${p.name}: ${STATE_LABEL[p.status.state].toLowerCase()}`}
+                    className="flex-1 min-w-0 text-left pl-3 py-2.5"
                   >
-                    {p.status.portNote && <AlertTriangle className="inline w-3 h-3 mr-0.5 -mt-0.5" />}:{p.status.port}
-                  </span>
+                    <div className="flex items-center gap-2">
+                      <StatusDot status={p.status} />
+                      <span className={`text-sm truncate flex-1 ${active ? 'font-semibold' : 'font-medium'}`}>{p.name}</span>
+                      <span
+                        title={p.status.portNote ? `Started on ${p.status.portNote.actual}, not the profile's ${p.status.portNote.requested}` : undefined}
+                        className={`text-[11px] font-mono ${p.status.portNote ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}
+                      >
+                        {p.status.portNote && <AlertTriangle className="inline w-3 h-3 mr-0.5 -mt-0.5" />}:{p.status.port}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 pl-4 flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      {p.kind === 'deck' ? <Layers className="w-3 h-3" /> : <FileCode2 className="w-3 h-3" />}
+                      <span className="truncate">{p.kind === 'deck' ? 'Deck' : (p.script || '').split(/[\\/]/).pop()}</span>
+                      <span className="text-gray-300 dark:text-gray-600">·</span>
+                      <span className="truncate">{STATE_LABEL[p.status.state]}</span>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    title={`${p.name}: instruments, log and settings`}
+                    onClick={() => showProfilePage(p.id)}
+                    className={`self-center mx-1.5 p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-white dark:hover:text-gray-200 dark:hover:bg-white/10 ${onPage ? 'text-indigo-500 dark:text-indigo-300' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'}`}
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                  </button>
                 </div>
-                <div className="mt-0.5 pl-4 flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-                  {p.kind === 'deck' ? <Layers className="w-3 h-3" /> : <FileCode2 className="w-3 h-3" />}
-                  <span className="truncate">{p.kind === 'deck' ? 'Deck' : (p.script || '').split(/[\\/]/).pop()}</span>
-                  <span className="text-gray-300 dark:text-gray-600">·</span>
-                  <span className="truncate">{STATE_LABEL[p.status.state]}</span>
-                </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
-          {/* Cloud is an addition, never a gate: everything above works without it. */}
-          <div className="px-3 pt-3">
+          {/* Cloud and the Hub are additions, never gates: everything above works without them. */}
+          <div className="px-3 pt-3 space-y-0.5">
+            <div className={`group flex items-center rounded-lg transition-colors ${(tabs.active !== null ? tabs.active === CLOUD_TAB : view === 'cloud') ? 'bg-indigo-50 dark:bg-indigo-500/10' : 'hover:bg-gray-100 dark:hover:bg-white/5'}`}>
             <button
               type="button"
               onClick={openCloud}
-              className={`w-full text-left px-3 py-2.5 rounded-xl border flex items-center gap-3 transition-colors ${view === 'cloud' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30' : 'border-gray-200 dark:border-white/10 hover:bg-gray-100 dark:hover:bg-white/5'}`}
+              className="flex-1 min-w-0 text-left pl-3 py-2 flex items-center gap-3"
             >
-              <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 text-white flex items-center justify-center"><Cloud className="w-4 h-4" /></span>
+              <Cloud className="w-4 h-4 shrink-0 text-indigo-500 dark:text-indigo-400" />
               <span className="flex-1 min-w-0">
-                <span className="flex items-center gap-1.5 text-sm font-medium">IvoryOS Cloud{!pro && <span className="text-[9px] font-bold uppercase tracking-wider px-1 rounded bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">Pro</span>}</span>
+                <span className="flex items-center gap-1.5 text-sm font-medium">Cloud{!pro && <span className="text-[9px] font-bold uppercase tracking-wider px-1 rounded bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">Pro</span>}</span>
                 <span className="block text-xs text-gray-500 dark:text-gray-400 truncate">
                   {cloudConnected ? `${cloudConnected} deck${cloudConnected === 1 ? '' : 's'} connected` : 'Manage decks from anywhere'}
                 </span>
               </span>
-              {pro ? <ChevronRight className="w-4 h-4 text-gray-400" /> : <Lock className="w-3.5 h-3.5 text-gray-400" />}
+              {!pro && <Lock className="w-3.5 h-3.5 text-gray-400" />}
+            </button>
+            {pro && (
+              <button type="button" title="Cloud: connection and address" onClick={showCloudPage}
+                className={`mx-1.5 p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-white dark:hover:text-gray-200 dark:hover:bg-white/10 ${tabs.active === null && view === 'cloud' ? 'text-indigo-500 dark:text-indigo-300' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'}`}>
+                <Settings className="w-3.5 h-3.5" />
+              </button>
+            )}
+            </div>
+            <button
+              type="button"
+              onClick={openHub}
+              disabled={!hubDeck}
+              title={hubDeck ? `Add instruments, platforms, plugins or workflows to ${hubDeck.name}` : 'Create a deck first: the Hub adds to a deck'}
+              className="w-full text-left px-3 py-2 rounded-lg flex items-center gap-3 transition-colors hover:bg-gray-100 dark:hover:bg-white/5 disabled:opacity-50 disabled:hover:bg-transparent"
+            >
+              <Store className="w-4 h-4 shrink-0 text-indigo-500 dark:text-indigo-400" />
+              <span className="flex-1 min-w-0">
+                <span className="block text-sm font-medium">Automation Hub</span>
+                <span className="block text-xs text-gray-500 dark:text-gray-400 truncate">{hubDeck ? `Add to ${hubDeck.name}` : 'Drivers, platforms, plugins'}</span>
+              </span>
+              <ChevronRight className="w-4 h-4 text-gray-400" />
             </button>
           </div>
           <div className="p-3 border-t border-gray-200 dark:border-white/10 mt-3 grid grid-cols-2 gap-2">
@@ -236,11 +338,11 @@ export default function LauncherPage() {
             onAuth={openAuth}
             onUpgrade={() => setUpgrade(null)}
           />
-        </nav>
+        </nav>}
 
         <main className="flex-1 min-w-0 overflow-y-auto">
           {view === 'settings' && snap ? (
-            <SettingsPanel api={api} snap={snap} theme={theme} setTheme={chooseTheme} />
+            <SettingsPanel api={api} snap={snap} />
           ) : view === 'account' ? (
             <AccountPanel api={api} account={account} secretsPersist={snap?.secretsPersist ?? true} mode={authMode} setMode={setAuthMode} onUpgrade={() => setUpgrade(null)} />
           ) : view === 'cloud' && pro ? (
@@ -260,6 +362,9 @@ export default function LauncherPage() {
               log={logs[profile.id] || []}
               run={run}
               onRemoved={() => setSelected(null)}
+              onOpenProfile={id => { setSelected(id); setView('profile'); setTab('main'); }}
+              hubOpen={hubOpen}
+              setHubOpen={setHubOpen}
             />
           ) : (
             <div className="p-10 text-sm text-gray-500">Create a profile to start an edge.</div>
@@ -343,7 +448,7 @@ function UpdateChip({ update, onClick }: { update: UpdateStatus; onClick: () => 
   );
 }
 
-function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, tab, setTab, log, run, onRemoved }: {
+function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, tab, setTab, log, run, onRemoved, onOpenProfile, hubOpen, setHubOpen }: {
   api: DesktopApi;
   profile: Profile;
   hubUrl: string;
@@ -356,6 +461,9 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
   log: string[];
   run: (fn: () => Promise<unknown>) => void;
   onRemoved: () => void;
+  onOpenProfile: (id: string) => void;
+  hubOpen: boolean;
+  setHubOpen: (open: boolean) => void;
 }) {
   const s = profile.status;
   const busy = ['starting', 'stopping', 'installing'].includes(s.state);
@@ -427,7 +535,7 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
       </div>
 
       {tab === 'main' && (profile.kind === 'deck'
-        ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade} />
+        ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade} onOpenProfile={onOpenProfile} browsing={hubOpen} setBrowsing={setHubOpen} />
         : <ScriptOverview api={api} profile={profile} openSettings={() => setTab('settings')} />)}
       {tab === 'log' && <LogPanel api={api} profile={profile} lines={log} />}
       {tab === 'settings' && <ProfileSettings api={api} profile={profile} link={link} sharedWith={sharedWith} onRemoved={onRemoved} />}

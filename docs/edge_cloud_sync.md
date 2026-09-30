@@ -62,7 +62,8 @@ unset means LAN (a SQLite file, with an MQTT broker the daemon starts itself). N
 | `sequences/{name}` (empty) | Edge → Cloud | yes | 1 | zero bytes: MQTT's tombstone | the workflow is deleted on the edge |
 | `sequences-push` | Cloud → Edge | **no** | 1 | `{name, body, author}` | a workflow is saved in Cloud's editor |
 | `execute` | Cloud → Edge | no | 1 | one task: `{block, runId, nodeId}` or `{run, runId, nodeId}` | the dispatcher releases a task |
-| `task-status` | Edge → Cloud | no | 1 (0 for progress) | `{runId, nodeId, status, error?, progress?}` | start, progress (≤ every 2 s), finish, refusal |
+| `task-status` | Edge → Cloud | no | 1 (0 for progress, 1 for a paused one) | `{runId, nodeId, status, error?, progress?}` | start, progress (≤ every 2 s; at once when the run stops for a person), finish, refusal |
+| `task-control` | Cloud → Edge | **no** | 1 | `{runId, nodeId, pause, action, value?}`: an answer, or retry/skip/stop | someone decides in Cloud; re-sent every 10 s until the pause is gone |
 | `task-result` | Edge → Cloud | no | 1 | the finished run's record (steps, outputs; up to ~100 KB) | once, just before the final status |
 | `cloud-queue` | Cloud → Edge | no | 1 | what Cloud is holding for this device | when that summary changes, or the device comes back |
 
@@ -322,17 +323,27 @@ moment as A.
 - **`cloud-queue`:** the edge never receives queued Cloud work, so the daemon sends each device a
   short summary of what Cloud is holding for it (ready, waiting on another step, next scheduled
   run). The edge's Queue page shows it. It is for information only: nothing on the edge acts on it.
+- **Stopped for a person (`task-control`):** a Cloud run on a device stops the way a bench run
+  does, on a User_Input step or on a failed step waiting for retry/skip/stop. The progress summary
+  then carries the prompt and input type, or the error's first line, plus a `pause` id naming that
+  one stop (step id + start time). Cloud lists every such stop in a panel on every page (with the
+  count in the tab title and optional desktop notifications) and on the canvas node. A decision is
+  stored on the task (`run_tasks.command`) and sent by the daemon. The edge applies it only while
+  the same `pause` is current, which is what makes re-sending safe and a late click harmless. Stop
+  on an error also resumes the queue, unlike the bench's abort: a device paused with nobody at the
+  bench would hold every later Cloud task.
 
 ---
 
 ## Connecting a device (for context)
 
-A device is paired with an 8-character code from Cloud's Settings page, redeemed by the *edge
-server* (`POST /api/cloud-settings/pair`), not the browser. The device's broker credentials are
-minted at redemption and sent once over TLS. A device's name is its MQTT client id, so names must
-be unique: two clients with the same id keep evicting each other, which looks like a flaky
-connection. A headless deployment can set `CLOUD_TOKEN` in `.env` instead. Details are in
-AGENTS.md, section 0.
+The edge shows an 8-character code (`POST /api/cloud-settings/pair` on the edge, which asks Cloud's
+`/api/pair/start`), a signed-in person approves it on Cloud's **Pair a device** page, and the edge
+collects its broker credentials with a secret only it kept (`/api/pair/poll`). The credentials are
+minted at that moment and sent once over TLS, never through a browser. On a LAN a device's name is
+its MQTT client id, so names must be unique: two clients with the same id keep evicting each other,
+which looks like a flaky connection. A headless deployment can run `ivoryos-edge pair`, or set
+`CLOUD_TOKEN` in `.env`. Details are in AGENTS.md, section 0.
 
 ## Where the code is
 
@@ -345,5 +356,6 @@ AGENTS.md, section 0.
 | Run submission and graph rules | — | `api/cloud-workflows/runs`, `src/lib/dag.js` |
 | Dispatch | `server.py` → `handle_cloud_task`, `start_run` | `daemon.js` → `dispatchTask`, `deviceNotReady` |
 | Status, progress, results | `queue.py` → `report_run_finished`, `report_cloud_progress`, `publish_cloud_result` | `daemon.js` → `handleTaskStatus`, `advanceRun` |
+| Answers and error decisions | `queue.py` → `pause_summary`, `apply_cloud_control` | `api/cloud-workflows/control`, `api/attention`, `src/lib/taskCommands.js`, `daemon.js` → `sendTaskCommands` |
 | Lost tasks, schedules, cloud-queue | `server.py` → abandoned tasks in `status_loop` | `daemon.js` → `failLostTasks`, `tickSchedules`, `publishCloudQueues` |
 | Storage (both modes) | — | `src/lib/store/` (`sqlite.js`, `supabase.js`) |

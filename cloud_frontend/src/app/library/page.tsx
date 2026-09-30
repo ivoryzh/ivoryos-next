@@ -5,12 +5,14 @@ import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cp
 import { graphProblems } from '@/lib/libraryCheck';
 import { runtimeSummary, confirmDialog, notify, type WorkflowRuntime } from '@ivoryos/shared-ui';
 import { graphSignature, storedCanvasIsUnsaved } from '@/lib/graphSignature';
+import { listLibrary, uploadBrowserLibrary } from '@/lib/cloudLibrary';
 
 type Problem = { where?: string; message: string };
 
 // Two distinct kinds of saved workflow live here side by side: a 'distributed' one is a
-// multi-device Orchestrator graph (nodes/edges), browser-local only (cloud_saved_workflows) since
-// it isn't tied to any one device. An 'edge' one is a single-device prep/sequence/cleanup
+// multi-device Orchestrator graph (nodes/edges), stored in Cloud (/api/cloud-workflows/library)
+// and shared by everyone who opens it -- it used to be browser-local, which meant a workflow saved
+// on one machine was missing on every other. An 'edge' one is a single-device prep/sequence/cleanup
 // sequence — shared, database-backed (edge_sequences), written either by the edge device itself
 // (synced up automatically) or authored directly in the Cloud edge-sequence editor.
 type DistributedWorkflowItem = {
@@ -86,16 +88,11 @@ export default function CloudLibraryPage() {
     const sequenceRows: any[] = Array.isArray(sequences) ? sequences : [];
     const deviceRows: any[] = Array.isArray(devices) ? devices : [];
 
-    const saved = localStorage.getItem('cloud_saved_workflows');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        for (const w of parsed) {
-          items.push({ ...w, type: 'distributed', problems: graphProblems(w.nodes || [], deviceRows, sequenceRows) });
-        }
-      } catch (e) {
-        console.error("Failed to parse saved workflows", e);
-      }
+    // Anything this browser still holds from before the Library moved to the server goes up first.
+    await uploadBrowserLibrary();
+    const distributed = await listLibrary().catch((e) => { console.error('Failed to read the Cloud library', e); return []; });
+    for (const w of distributed) {
+      items.push({ ...w, type: 'distributed', problems: graphProblems(w.nodes || [], deviceRows, sequenceRows) });
     }
 
     for (const s of sequenceRows) {

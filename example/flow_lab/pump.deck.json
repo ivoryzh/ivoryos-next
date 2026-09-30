@@ -1,0 +1,8 @@
+{
+  "format": "ivoryos-deck/1",
+  "name": "Flow lab: pump",
+  "paths": ["."],
+  "instruments": [
+    { "name": "pump_controller", "import": "flow_drivers", "class": "PumpController" }
+  ]
+}

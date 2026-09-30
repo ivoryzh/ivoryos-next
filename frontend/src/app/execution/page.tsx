@@ -18,8 +18,7 @@ import {
   expandSpreadsheet,
   resolveFixedBlock,
   toSubmittedStep,
-  toWireBlock,
-} from '@ivoryos/shared-ui';
+  toWireBlock, useDocumentTheme } from '@ivoryos/shared-ui';
 
 /**
  * Resolve any `Library Workflows` blocks into the steps they stand for, via the server's own
@@ -109,7 +108,7 @@ export default function ExecutionPage() {
     results: any[];
   }>({ isRunning: false, currentRow: -1, results: [] });
 
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const theme = useDocumentTheme();
   const [hasPendingRuns, setHasPendingRuns] = useState(false);
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
 
@@ -151,10 +150,6 @@ export default function ExecutionPage() {
         } catch(e) {}
     };
 
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    setTheme(savedTheme as 'light' | 'dark');
-    if (savedTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
 
 
     fetch(`${API_BASE}/api/queue/runs?recent=1`)
@@ -311,13 +306,6 @@ export default function ExecutionPage() {
     }
   }, [rows]);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  };
 
   const addRow = () => {
     const newRow: Record<string, any> = {};
@@ -529,7 +517,7 @@ export default function ExecutionPage() {
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
       {/* Sidebar */}
-      <Sidebar theme={theme} toggleTheme={toggleTheme} />
+      <Sidebar />
 
       {/* Main Area */}
       <div className="flex-1 flex flex-col relative z-0">

@@ -70,8 +70,11 @@ export type { WorkflowRuntime } from './workflowRuntime';
 
 export {
   formatRun, datasheetCsv, phaseOf, toDetail, cellText, csvField, isFlowStep, templateOf,
-  namedOutputsOf, isUserInputStep, userInputVarsOf, userInputValue, aggregateStatus,
+  namedOutputsOf, isUserInputStep, userInputVarsOf, userInputValue, aggregateStatus, issuesLabel,
 } from './runRecord';
-export type { FormattedRun, RunRow } from './runRecord';
+export type { FormattedRun, RunRow, RunIssues } from './runRecord';
 export { RunDataTable, SectionTitle } from './RunDataTable';
 export { parseServerTime, serverDate } from './serverTime';
+
+export { ThemeSync, ThemeChoice, useDocumentTheme, useThemePreference, readThemePreference, setThemePreference, resolveTheme, inDesktopApp, THEME_KEY } from './theme';
+export type { Theme, ThemePreference } from './theme';

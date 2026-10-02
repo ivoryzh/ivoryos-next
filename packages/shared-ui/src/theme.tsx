@@ -124,7 +124,7 @@ export function ThemeChoice({ value, onChange, className = '' }: { value: ThemeP
     <div className={`inline-grid grid-cols-3 gap-1 p-1 rounded-lg bg-gray-100 dark:bg-white/5 ${className}`}>
       {options.map(o => (
         <button key={o.value} type="button" onClick={() => onChange(o.value)}
-          className={`px-3 py-1 rounded-md text-xs font-medium ${value === o.value ? 'bg-white text-gray-900 shadow-sm dark:bg-white/15 dark:text-white' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}>
+          className={`px-3 py-1 rounded-md text-xs font-medium ${value === o.value ? 'bg-white text-accent-fg shadow-sm ring-1 ring-accent-tint/60 dark:bg-accent-soft dark:ring-0' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}>
           {o.label}
         </button>
       ))}

@@ -4,6 +4,53 @@ import { Loader2, Lock, Users } from 'lucide-react';
 import type { Visibility } from '@/desktop';
 import { ownerLabel, visibilityOf } from '@/hubCatalog';
 
+/** The deck profile a Hub add lands on. */
+export type DeckTarget = { id: string; name: string };
+
+/**
+ * How an add path reaches its deck. The browser is usually opened on a deck (`target`); opened
+ * from the sidebar with no deck at all, it has none, and the first thing added creates one --
+ * `ensure` asks for its name then and hands it back, so nothing is added into thin air and
+ * nobody has to make an empty deck by hand before they can browse.
+ */
+export type DeckAccess = {
+  target: DeckTarget | null;
+  /** The deck to add to, made now (suggested `name`, editable) when there is none; null when the person cancels. */
+  ensure: (suggestedName: string) => Promise<DeckTarget | null>;
+  /** A deck `ensure` just made for an add that then failed: an empty profile nobody asked for. */
+  discard: (deck: DeckTarget) => Promise<void>;
+};
+
+/**
+ * Run `add` against the deck, creating one first when the browser has none. A failed add into a
+ * deck made for it removes that deck again; a failed add into an existing deck leaves it as the
+ * failure left it (manager.js writes nothing on failure). Returns false when nothing was done.
+ */
+export async function addTo(access: DeckAccess, suggestedName: string, add: (deck: DeckTarget) => Promise<unknown>): Promise<boolean> {
+  const own = access.target;
+  const deck = own ?? await access.ensure(suggestedName);
+  if (!deck) return false;
+  try {
+    await add(deck);
+  } catch (e) {
+    if (!own) await access.discard(deck).catch(() => {});
+    throw e;
+  }
+  return true;
+}
+
+/** An instrument name for a deck with nothing on it yet (deckEdit.js's freeName, without the deck). */
+export function plainInstrumentName(suggestion: string): string {
+  let base = String(suggestion || 'device').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!base) base = 'device';
+  return /^[a-z]/.test(base) ? base : `device_${base}`;
+}
+
+/** "“My deck”", or what an add says when the deck does not exist yet. */
+export function deckLabel(target: DeckTarget | null): string {
+  return target ? `“${target.name}”` : 'a new deck';
+}
+
 /** Who a private-hub row is shared with. Nothing for a public row. */
 export function VisibilityBadge({ row, className = '' }: { row: { visibility?: Visibility | null; organizations?: { name: string } | null }; className?: string }) {
   const label = ownerLabel(row);
@@ -39,7 +86,7 @@ export function CatalogCard({ onPick, muted, children }: { onPick: () => void; m
     <button
       type="button"
       onClick={onPick}
-      className={`group text-left rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-white dark:bg-white/[0.03] hover:border-indigo-300 hover:shadow-md dark:hover:border-indigo-500/40 transition flex flex-col ${muted ? 'opacity-70' : ''}`}
+      className={`group text-left rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-white dark:bg-white/[0.03] hover:border-gray-300 dark:hover:border-white/20 hover:shadow-md dark:hover:border-white/30 transition flex flex-col ${muted ? 'opacity-70' : ''}`}
     >
       {children}
     </button>

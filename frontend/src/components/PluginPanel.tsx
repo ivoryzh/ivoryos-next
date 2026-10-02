@@ -185,7 +185,7 @@ function Panel({ plugin, choices, panel }: { plugin: PluginInfo; choices: Plugin
         className={`shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03] ${dragHandle ? 'cursor-move select-none' : ''}`}
         style={{ height: HEADER }}
       >
-        <Plug className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+        <Plug className="w-3.5 h-3.5 text-gray-700 dark:text-gray-200 shrink-0" />
         {choices.length > 1 && state !== 'mini' ? (
           <select
             value={plugin.id}
@@ -236,7 +236,7 @@ function Panel({ plugin, choices, panel }: { plugin: PluginInfo; choices: Plugin
         <div
           onMouseDown={resizeDock}
           title="Drag to resize"
-          className={`absolute top-0 bottom-0 ${right ? '-left-1' : '-right-1'} w-2 cursor-col-resize hover:bg-indigo-400/30`}
+          className={`absolute top-0 bottom-0 ${right ? '-left-1' : '-right-1'} w-2 cursor-col-resize hover:bg-gray-500/30`}
         />
       )}
       {state === 'float' && (

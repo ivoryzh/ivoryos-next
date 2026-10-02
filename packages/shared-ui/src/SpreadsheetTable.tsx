@@ -15,7 +15,7 @@ import { groupSizeFor, SpreadsheetRow } from './spreadsheetRun';
  * one; `compact` is the whole of that difference.
  *
  * The group boundaries drawn here come from `groupSizeFor` in spreadsheetRun.ts — the same
- * function the expansion uses. That is the point of it living there: this table's teal divider,
+ * function the expansion uses. That is the point of it living there: this table's purple divider,
  * its "Batch N" label and its muted "not used for this row" cells are promises about what will
  * run, and they used to be computed separately from the thing that actually ran.
  */
@@ -82,7 +82,7 @@ export function SpreadsheetTable({
         <select
           value={row[v] || ''}
           onChange={(e) => onRowChange(idx, v, e.target.value)}
-          className="w-full cursor-pointer border-b border-transparent bg-transparent px-2 py-1 text-sm outline-none transition-colors hover:border-gray-300 focus:border-indigo-500 dark:hover:border-white/20 dark:focus:border-indigo-500"
+          className="w-full cursor-pointer border-b border-transparent bg-transparent px-2 py-1 text-sm outline-none transition-colors hover:border-gray-300 focus:border-accent dark:hover:border-white/20"
         >
           <option value="" disabled>Select {v}</option>
           {varOptions[v].map((opt) => (
@@ -109,7 +109,7 @@ export function SpreadsheetTable({
           invalid
             ? 'border-amber-400 bg-amber-50 dark:border-amber-500/50 dark:bg-amber-900/20'
             : isDesignatedRow
-              ? 'border-transparent bg-transparent hover:border-gray-300 focus:border-indigo-500 dark:hover:border-white/20 dark:focus:border-indigo-500'
+              ? 'border-transparent bg-transparent hover:border-gray-300 focus:border-accent dark:hover:border-white/20'
               : 'border-transparent bg-gray-50 italic text-gray-400 placeholder:text-gray-300 hover:border-gray-200 focus:border-gray-300 dark:bg-white/[0.03] dark:text-gray-600 dark:placeholder:text-gray-600'
         }`}
       />
@@ -128,7 +128,7 @@ export function SpreadsheetTable({
                 {batchVariables.includes(v) && (
                   <span
                     title="Batch step value — only needs to be filled in on one row per batch group"
-                    className="inline-flex items-center gap-0.5 rounded bg-teal-50 px-1 py-0.5 text-[9px] font-bold normal-case text-teal-600 dark:bg-teal-500/10 dark:text-teal-400"
+                    className="inline-flex items-center gap-0.5 rounded bg-purple-50 px-1 py-0.5 text-[9px] font-bold normal-case text-purple-600 dark:bg-purple-500/10 dark:text-purple-400"
                   >
                     <Layers className="h-2.5 w-2.5" /> 1/batch
                   </span>
@@ -162,7 +162,7 @@ export function SpreadsheetTable({
               <div className="flex flex-col items-center leading-none">
                 <span className="text-sm font-medium">{idx + 1}</span>
                 {groupNumber && (
-                  <span className="mt-0.5 text-[8px] font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400">
+                  <span className="mt-0.5 text-[8px] font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">
                     Batch {groupNumber}
                   </span>
                 )}
@@ -193,7 +193,7 @@ export function SpreadsheetTable({
 
   const rowClass = (isGroupStart: boolean) =>
     `border-b border-gray-100 bg-white hover:bg-gray-50 dark:border-white/5 dark:bg-transparent dark:hover:bg-white/[0.02] ${
-      isGroupStart ? 'border-t-2 border-t-teal-300 dark:border-t-teal-700/60' : ''
+      isGroupStart ? 'border-t-2 border-t-purple-300 dark:border-t-purple-700/60' : ''
     }`;
 
   const staticBody = (
@@ -259,7 +259,7 @@ export function SpreadsheetTable({
           : 'border-t border-gray-200 bg-gray-50 p-3 dark:border-white/10 dark:bg-white/5'}>
           <button
             onClick={onAddRow}
-            className="flex items-center space-x-2 px-2 py-1 text-sm font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300"
+            className="flex items-center space-x-2 px-2 py-1 text-sm font-medium text-accent-fg hover:text-accent"
           >
             <Plus className="h-4 w-4" />
             <span>Add Row</span>

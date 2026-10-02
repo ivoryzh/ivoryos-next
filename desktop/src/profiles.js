@@ -113,6 +113,8 @@ function loadProfiles(home) {
             trayHintShown: !!stored.trayHintShown,
             // One theme for the launcher, every deck's page and Cloud (see main.js, nativeTheme).
             theme: ['light', 'dark'].includes(stored.theme) ? stored.theme : 'system',
+            // Only Cloud: no decks on this computer, so no deck list, no Hub, and no Python.
+            cloudOnly: !!stored.cloudOnly,
             // Automation Hub items starred for quick access, per account: {accountId: ['module:12', ...]}.
             starred: stored.starred && typeof stored.starred === 'object' ? stored.starred : {},
             profiles: stored.profiles.map((p) => withDefaults(home, p)),
@@ -162,6 +164,8 @@ function commandFor(profile, ctx) {
         // The Cloud this launcher points at, when someone chose one (a lab running its own on the
         // network); otherwise the edge keeps its built-in default. A profile's own env wins.
         ...(ctx.cloudUrl ? { IVORYOS_CLOUD_URL: ctx.cloudUrl } : {}),
+        // A release where Cloud is not offered yet: the deck's own pages do not offer it either.
+        ...(ctx.cloudComingSoon ? { IVORYOS_CLOUD_COMING_SOON: '1' } : {}),
         ...profile.env,
         IVORYOS_PORT: String(profile.port),
         IVORYOS_HOST: host,

@@ -169,10 +169,49 @@ class PythonRuntime {
         this._writeState({ ...latest, packagesByKey: { ...(latest.packagesByKey || {}), [key]: fingerprint } });
     }
 
-    /** Install pip requirements into the venv. Call with the edge stopped (see supervisor). */
+    /**
+     * Install pip requirements into the venv. Call with the edge stopped (see supervisor).
+     * PyTorch comes as its CPU-only build (`--torch-backend cpu`), for every install into this
+     * environment, so one install never swaps it for another build: on Linux the default from
+     * PyPI carries the CUDA libraries, a few GB nobody asked for. Ax and BayBE pull it in.
+     */
     async install(requirements) {
         if (!requirements.length) return '';
-        return run(this.uv, ['pip', 'install', '--python', this.python, ...requirements], { onLine: this.onLine });
+        return run(this.uv, ['pip', 'install', '--python', this.python, '--torch-backend', 'cpu', ...requirements], { onLine: this.onLine });
+    }
+
+    /**
+     * What a problem report says about an environment: Python, the edge, which optimizer backends
+     * are installed (by version; importing them would take seconds and is what the edge's own log
+     * already reports), and every installed package. Never throws.
+     */
+    async describe(python) {
+        const probe = [
+            'import json, sys, importlib.metadata as m',
+            'def v(name):',
+            '    try:',
+            '        return m.version(name)',
+            '    except Exception:',
+            '        return None',
+            'pkgs = sorted({f"{d.metadata[\'Name\']}=={d.version}" for d in m.distributions() if d.metadata[\'Name\']}, key=str.lower)',
+            'print(json.dumps({"python": sys.version.split()[0], "prefix": sys.prefix, "edge": v("ivoryos-edge"),',
+            '    "optimizers": {"ax": v("ax-platform"), "baybe": v("baybe"), "nimo": v("nimo")}, "packages": pkgs}))',
+        ].join('\n');
+        try {
+            const out = await run(python, ['-c', probe]);
+            return JSON.parse(out.trim().split(/\r?\n/).pop());
+        } catch (e) {
+            return { error: fs.existsSync(python) ? (e.output || e.message).trim().split('\n').pop() : 'No Python at this path.' };
+        }
+    }
+
+    /** `uv pip check`: installed packages whose requirements are not met. Never throws. */
+    async check(python) {
+        try {
+            return (await run(this.uv, ['pip', 'check', '--python', python])).trim();
+        } catch (e) {
+            return (e.output || e.message).trim();
+        }
     }
 
     /** Throw the venv away; the next ensure() rebuilds it. For a broken environment. */

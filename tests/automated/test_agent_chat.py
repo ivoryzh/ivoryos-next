@@ -216,7 +216,7 @@ async def test_settings_round_trip_without_ever_echoing_the_key(api_workflows_di
         resp = await ac.get("/api/agent/settings")
         assert resp.status_code == 200
         assert resp.json()["settings"]["provider"] == "ollama"
-        assert [p["name"] for p in resp.json()["providers"]] == ["ollama", "openai-compatible"]
+        assert [p["name"] for p in resp.json()["providers"]] == ["ollama", "openai-compatible", "anthropic"]
 
         saved = await ac.post("/api/agent/settings", json={
             "provider": "openai-compatible", "model": "llama-3.3-70b",

@@ -5,6 +5,7 @@ import { claimAllowed, setOwner } from '@/lib/workspace';
 import { rateLimiter } from '@/lib/rateLimit';
 import { normalizeCode, formatCode, expiryFrom, cleanDeviceName, identityDecision, pollOutcome, CODE_LENGTH } from '@/lib/pairing';
 import type { Session } from '@/lib/auth';
+import { deviceNameConflict, nameTakenMessage } from '@/lib/deviceNaming';
 
 export const dynamic = 'force-dynamic';
 
@@ -100,10 +101,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Give the device a name of up to 64 characters, without / + or #.' }, { status: 400 });
   }
 
-  // Names are labels and may repeat; identity is the device's lasting id. Approving someone
-  // else's device would hand over its connection and tasks, so that alone is refused.
+  // Identity is the device's lasting id. Approving someone else's device would hand over its
+  // connection and tasks, so that is refused outright.
   if ((await identityOf(row, auth.session)).decision === 'foreign') {
     return NextResponse.json({ error: FOREIGN, identity: 'foreign' }, { status: 409 });
+  }
+  // The name is what people pick it by, so it is unique within the workspace it joins (the same
+  // device coming back keeps its own name). See pairing.js nameConflict.
+  if (await deviceNameConflict(workspace, name, row.requested_id)) {
+    return NextResponse.json({ error: nameTakenMessage(name), field: 'name' }, { status: 409 });
   }
 
   await setOwner('pairing', row.code, workspace);

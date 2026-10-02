@@ -62,8 +62,19 @@ function localDbPath() {
 }
 
 /** The broker this mode talks to, so the daemon and the health check agree on one answer. */
+/**
+ * Whether this Cloud's broker is AWS IoT Core: in cloud mode, when AWS_IOT_ENDPOINT is set. The
+ * mode decides, not the variable alone. A LAN Cloud always uses its own broker even with AWS
+ * settings left in .env.local; they used to win regardless of mode, which made a "local" Cloud a
+ * SQLite database connected to AWS while pairing handed devices the LAN address, and let removing
+ * a LAN device delete an AWS Thing that happened to share its id.
+ */
+function usesAwsIot() {
+  return resolveMode() === 'cloud' && !!process.env.AWS_IOT_ENDPOINT;
+}
+
 function resolveBrokerUrl() {
-  if (process.env.AWS_IOT_ENDPOINT) return `mqtts://${process.env.AWS_IOT_ENDPOINT}:8883`;
+  if (usesAwsIot()) return `mqtts://${process.env.AWS_IOT_ENDPOINT}:8883`;
   return process.env.MQTT_BROKER_URL || 'mqtt://127.0.0.1:1883';
 }
 
@@ -99,4 +110,4 @@ function getStore() {
   return cached;
 }
 
-module.exports = { getStore, resolveMode, resolveBrokerUrl, localDbPath, VALID_MODES };
+module.exports = { getStore, resolveMode, resolveBrokerUrl, usesAwsIot, localDbPath, VALID_MODES };

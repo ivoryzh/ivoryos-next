@@ -21,7 +21,7 @@ import { notify, serverDate, useDocumentTheme } from '@ivoryos/shared-ui';
 const STATUS_DOT: Record<string, string> = {
   completed: 'bg-green-500',
   error: 'bg-red-500',
-  running: 'bg-indigo-500 animate-pulse',
+  running: 'bg-accent animate-pulse',
   waiting_input: 'bg-amber-500 animate-pulse',
   pending: 'bg-gray-300 dark:bg-gray-600',
 };
@@ -90,10 +90,10 @@ export default function Home() {
       note: online ? `${instruments.reduce((n, [, methods]) => n + Object.keys(methods || {}).length, 0)} methods` : 'edge server unreachable',
     },
     {
-      href: '/queue', icon: ListTodo, label: 'Queue',
+      href: '/execution', icon: ListTodo, label: 'Queue',
       value: active.length ? 'Running' : edgeStatus?.queue_paused ? 'Paused' : 'Idle',
       note: `${queued.length} waiting${recent[0] ? ` · last run ${timeAgo(recent[0].start_time)}` : ''}`,
-      tone: active.length ? 'text-indigo-600 dark:text-indigo-400' : undefined,
+      tone: active.length ? 'text-gray-900 dark:text-white' : undefined,
     },
     {
       href: '/library', icon: Library, label: 'Saved workflows',
@@ -112,8 +112,8 @@ export default function Home() {
       <Sidebar />
 
       <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-100 dark:bg-transparent">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-          <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 ">Dashboard</h2>
+        <header data-ivoryos-page-header="mixed" className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+          <h2 data-ivoryos-page-title className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 ">Dashboard</h2>
           <button
             onClick={downloadSchema}
             title="The instrument schema this edge server introspected, as JSON"
@@ -130,15 +130,15 @@ export default function Home() {
             {active.map(run => (
               <Link
                 key={run.id}
-                href="/queue"
-                className="flex items-center gap-3 px-5 py-3 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 transition-colors"
+                href="/execution"
+                className="flex items-center gap-3 px-5 py-3 rounded-2xl bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-white/15 dark:border-white/20 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors"
               >
                 <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${STATUS_DOT[run.status]}`} />
-                <span className="text-sm font-semibold text-indigo-700 dark:text-indigo-300 truncate">{run.name.split(' - ')[0]}</span>
-                <span className="text-xs text-indigo-600/80 dark:text-indigo-300/70 shrink-0">
+                <span className="text-sm font-semibold text-gray-900 dark:text-white truncate">{run.name.split(' - ')[0]}</span>
+                <span className="text-xs text-gray-900/80 dark:text-white/80 dark:text-white/70 shrink-0">
                   {run.status === 'waiting_input' ? 'waiting for your input' : `running · started ${timeAgo(run.start_time)}`}
                 </span>
-                <ArrowRight className="w-4 h-4 ml-auto text-indigo-400 shrink-0" />
+                <ArrowRight className="w-4 h-4 ml-auto text-gray-500 dark:text-gray-300 shrink-0" />
               </Link>
             ))}
 
@@ -158,8 +158,8 @@ export default function Home() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {actions.map(a => (
-                <Link key={a.href} href={a.href} className={`${card} p-4 flex items-start gap-3 hover:border-indigo-300 dark:hover:border-indigo-500/40 transition-colors`}>
-                  <div className="p-2 rounded-lg bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 shrink-0">
+                <Link key={a.href} href={a.href} className={`${card} p-4 flex items-start gap-3 hover:border-gray-300 dark:hover:border-white/20 dark:hover:border-white/30 transition-colors`}>
+                  <div className="p-2 rounded-lg bg-gray-100 dark:bg-white/10 text-gray-900 dark:text-white shrink-0">
                     <a.icon className="w-4 h-4" />
                   </div>
                   <div className="min-w-0">
@@ -173,13 +173,13 @@ export default function Home() {
               <section className={`${card} overflow-hidden`}>
                 <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-white/5">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">Recent runs</h3>
-                  <Link href="/data" className="text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline">Data History</Link>
+                  <Link href="/data" className="text-xs font-medium text-accent-fg hover:underline">Data History</Link>
                 </div>
                 {runs === null ? (
                   <div className="px-5 py-6 text-sm text-gray-400">Loading…</div>
                 ) : recent.length === 0 ? (
                   <div className="px-5 py-6 text-sm text-gray-500 dark:text-gray-400">
-                    Nothing has run yet. <Link href="/designer" className="text-indigo-600 dark:text-indigo-400 hover:underline">Design a workflow</Link> to get started.
+                    Nothing has run yet. <Link href="/designer" className="text-accent-fg hover:underline">Design a workflow</Link> to get started.
                   </div>
                 ) : (
                   <ul className="divide-y divide-gray-100 dark:divide-white/5">

@@ -1,5 +1,5 @@
 "use client";
-import { API_BASE, WS_BASE } from '@/config';
+import { API_BASE } from '@/config';
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -7,6 +7,7 @@ import { Play, Trash2, Settings2, Save, Code, Download, Upload, LayoutTemplate, 
 import Sidebar from '@/components/Sidebar';
 import AgentPanel from '@/components/AgentPanel';
 import AgentToolboxButton from '@/components/AgentToolboxButton';
+import { useQueueBusy } from '@/queueBusy';
 import {
   WorkflowEditor,
   SequenceBlock,
@@ -22,7 +23,7 @@ import {
   chooseDialog,
   confirmDialog,
   notify,
-  promptDialog, useDocumentTheme } from '@ivoryos/shared-ui';
+  promptDialog, useDocumentTheme, FLOW_CONTROL_PALETTE, workflowOutputs, getReturnLeaves, runtimeVarNames } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
@@ -56,7 +57,8 @@ export default function DesignerPage() {
   // never see it, and one that uses it every day should not reopen it every visit.
   const [agentOpen, setAgentOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
-  const [hasPendingRuns, setHasPendingRuns] = useState(false);
+  // Something queued or under way: Run becomes "Add to queue" and asks first.
+  const hasPendingRuns = useQueueBusy();
   const [instrumentMeta, setInstrumentMeta] = useState<Record<string, any>>({});
   const [isOffline, setIsOffline] = useState(false);
   // Latest saved version per workflow name — drives the "vN available" badge on copies and links.
@@ -131,30 +133,6 @@ export default function DesignerPage() {
 
   // Fetch status on mount
   useEffect(() => {
-    // Theme init
-    const ws = new WebSocket(`${WS_BASE}/api/ws/queue`);
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.runs) {
-          const hasPending = data.runs.some((r: any) => r.status === 'pending');
-          const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
-          setHasPendingRuns(hasPending || hasActive);
-        }
-      } catch (e) { }
-    };
-
-    fetch(`${API_BASE}/api/queue/runs?recent=1`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.runs) {
-          const hasPending = data.runs.some((r: any) => r.status === 'pending');
-          const hasActive = data.runs.some((r: any) => ['running', 'paused', 'cancelling'].includes(r.status));
-          setHasPendingRuns(hasPending || hasActive);
-        }
-      });
-
-
     // Load saved sequence if exists
     setAgentOpen(localStorage.getItem('ivoryos_agent_panel') === 'true');
     const savedSeq = localStorage.getItem('ivoryos_sequence');
@@ -193,24 +171,19 @@ export default function DesignerPage() {
     setHasLoaded(true);
 
     const processStatusData = async (data: any) => {
+      // The built-in steps (shared-ui flowControl.ts), offered whether or not the deck has saved
+      // workflows yet: injecting them only alongside the workflows left a fresh deck with no
+      // If, While, Wait or User input at all.
+      if (!data.instruments) data.instruments = {};
+      data.instruments["Flow Control"] = { ...FLOW_CONTROL_PALETTE };
+
       // Fetch workflows
       try {
         const wfRes = await fetch(`${API_BASE}/api/workflows`);
         const wfData = await wfRes.json();
+        // Present even when empty, so the toolbox can say there are no saved workflows yet.
+        data.instruments["Library Workflows"] = {};
         if (wfData.workflows && wfData.workflows.length > 0) {
-
-          if (!data.instruments) data.instruments = {};
-
-          // Inject Flow Control
-          data.instruments["Flow Control"] = {
-            If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-            While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-            Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" },
-            User_Input: { description: "Pause and ask a person to type in a value (human-in-the-loop)", parameters: { prompt: { type: "str", required: true }, variable_name: { type: "str", required: true }, input_type: { type: "str", required: false, default: "str", options: ["str", "int", "float", "bool"] } }, return_type: "None" },
-            Comment: { description: "Add a note to the run log — like Python's print()", parameters: { message: { type: "str", required: true } }, return_type: "None" }
-          };
-
-          data.instruments["Library Workflows"] = {};
           const versions: Record<string, number> = {};
 
           for (const wfObj of wfData.workflows) {
@@ -234,6 +207,12 @@ export default function DesignerPage() {
               // The full saved body, so a Copy-mode drag can inline the real steps without a
               // second round trip — and so Detach can turn a link back into an editable copy.
               body: wfJson,
+              // The deck's verdict on it (compatibility.py): one that will not run is folded away
+              // in the toolbox, as Cloud does with the same verdict.
+              compatibility: wfObj.compatibility,
+              // What it saves, as the outputs of a step that links it (shared-ui workflowOutputs):
+              // the same names, renamable on the step, and numeric ones offered to Optimize.
+              return_paths: workflowOutputs(wfJson, (inst, method) => getReturnLeaves(data.instruments?.[inst]?.[method])),
             };
           }
           setWorkflowVersions(versions);
@@ -539,16 +518,9 @@ export default function DesignerPage() {
 
   // Variable names produced by a 'User_Input' step — these are resolved live on the edge server
   // while the workflow runs, so they shouldn't be treated as parameters the user must pre-fill.
-  const getLiveInputVars = (blocks: SequenceBlock[]): Set<string> => {
-    const vars = new Set<string>();
-    blocks.forEach(b => {
-      const isUserInput = (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'User_Input';
-      if (isUserInput && b.params?.variable_name) {
-        vars.add(String(b.params.variable_name).trim());
-      }
-    });
-    return vars;
-  };
+  // Names the run fills in itself: a User input's answer, or what an earlier step saved
+  // (shared-ui runtimeVarNames). `blocks` arrive in run order, prep through cleanup.
+  const getLiveInputVars = (blocks: SequenceBlock[]): Set<string> => runtimeVarNames([], blocks, []);
 
   // The `#names` this sequence still needs a value for before it can run, i.e. whether the
   // header offers Run or Configure. It has to agree with what the Configure page will then ask
@@ -673,6 +645,11 @@ export default function DesignerPage() {
         instrument: s.instrument,
         method: s.method,
         params: s.params,
+        // What the step saves. Left out, the edge bound nothing, so a later '#name' reading it
+        // failed mid-run ("'#test' is not available yet") after the steps before it had run.
+        // Configure and Optimize always sent these; only this Run did not.
+        ...(s.returnVar ? { returnVar: s.returnVar } : {}),
+        ...(s.returnBindings?.length ? { returnBindings: s.returnBindings } : {}),
         // A linked step's pinned version has to reach the server, or the run would silently
         // resolve against the newest saved body instead of the one this step was built with.
         ...(s.ref ? { ref: s.ref } : {})
@@ -716,17 +693,21 @@ export default function DesignerPage() {
 
 
   return (
-    <div className={`h-screen w-screen overflow-x-auto overflow-y-hidden bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans ${theme}`}>
-      {/* This designer is a dense, desktop-oriented workspace — rather than reflow/squish its
-        panes at narrow widths (which just produces overlapping, clipped controls), it holds its
-        natural minimum width and the page scrolls horizontally to reach whatever's off-screen. */}
-      {/* The assistant takes the toolbox's column rather than adding one, so the minimum only
-        grows by the difference between them (26rem panel vs 18rem toolbox) — not by the panel's
-        full width, which is what it cost when the two were shown side by side. */}
-      <div className={`flex h-full ${agentOpen ? 'min-w-[1208px]' : 'min-w-[1080px]'}`}>
+    <div className={`h-screen w-full overflow-hidden bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans ${theme}`}>
+      {/* Framed like every other page: full width, nothing scrolls sideways at the page level.
+        It used to be `w-screen` with a 1080px floor and a horizontal scrollbar, so with a plugin
+        panel docked (which pads the page) or the window narrower than the floor, the whole page
+        slid sideways, sidebar included. The toolbox and the assistant keep their widths and the
+        canvas column takes what is left; a very narrow window makes the canvas narrow, not the
+        page wider. */}
+      <div className="flex h-full">
         {/* Sidebar */}
         <Sidebar />
 
+        {/* One row for the assistant and the editor. With the navigation on top the frame above is a
+            column (globals.css), and as direct children the two would stack: the assistant took
+            the full height and the whole editor sat below the fold. */}
+        <div className="flex flex-1 min-h-0 min-w-0">
         {agentOpen && (
           <AgentPanel
             prepSequence={prepSequence}
@@ -806,17 +787,15 @@ export default function DesignerPage() {
                     className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                   >
                     <FilePlus2 className="w-4 h-4 text-gray-400" />
-                    <span className="hidden @3xl:inline">New</span>
                   </button>
 
                   <button
                     onClick={saveWorkflow}
                     disabled={sequence.length === 0}
                     title="Save this workflow to the library"
-                    className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Save className="w-4 h-4" />
-                    <span className="hidden @3xl:inline">Save</span>
                   </button>
 
                   <div className="relative group">
@@ -856,7 +835,7 @@ export default function DesignerPage() {
                     title={viewMode === 'canvas' ? 'Show this workflow as a Python script' : 'Back to the canvas'}
                     className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                   >
-                    {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
+                    {viewMode === 'canvas' ? <Code className="w-4 h-4 text-gray-700 dark:text-gray-200" /> : <LayoutTemplate className="w-4 h-4 text-gray-700 dark:text-gray-200" />}
                     <span className="hidden @3xl:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
                   </button>
                   {(() => {
@@ -890,7 +869,7 @@ export default function DesignerPage() {
                           className={`flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all ${hasNoSteps
                             ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                             : hasDynamicParams
-                              ? 'bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50 shadow-sm'
+                              ? 'bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 shadow-sm'
                               : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
                             }`}
                         >
@@ -916,7 +895,11 @@ export default function DesignerPage() {
             customView={
               viewMode === 'code' ? (
                 <PythonCodeView
-                  code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta)}
+                  code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta, {
+                    // A linked step becomes a call to a function of the script's own, written from the saved body.
+                    workflows: Object.fromEntries(Object.entries(statusData?.instruments?.['Library Workflows'] || {}).map(([n, e]: [string, any]) => [n, e?.body])),
+                    instruments: statusData?.instruments,
+                  })}
                   theme={theme}
                   fileName={currentWorkflowName || 'sequence'}
                 />
@@ -949,6 +932,7 @@ export default function DesignerPage() {
           />
         </div>
 
+        </div>
       </div>
     </div>
   );

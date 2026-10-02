@@ -1,7 +1,20 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateManifest, mergeIntoDeck, packageKey, isPinned, ManifestError } = require('../src/manifest');
+const { validateManifest, mergeIntoDeck, packageKey, isPinned, ManifestError, mergeRequirement } = require('../src/manifest');
+
+test('merging two requirements of one package keeps every extra and the newer version spec', () => {
+    // The colour-matcher case: the driver wants [full], its plugin only names a version.
+    assert.equal(mergeRequirement('colour-match-sdl[full]', 'colour-match-sdl>=0.1.7'), 'colour-match-sdl[full]>=0.1.7');
+    assert.equal(mergeRequirement('colour-match-sdl>=0.1.7', 'colour-match-sdl[full]'), 'colour-match-sdl[full]>=0.1.7');
+    assert.equal(mergeRequirement('pkg[a]==1.0', 'pkg[b,A]==2.0'), 'pkg[a,b]==2.0');
+    assert.equal(mergeRequirement('pkg', 'pkg'), 'pkg');
+    // Not a plain name on either side: the newer one simply replaces the older.
+    assert.equal(mergeRequirement('pkg @ git+https://x/y@1', 'pkg[full]'), 'pkg[full]');
+    // And through a deck merge, in either order within one manifest.
+    const { deck } = mergeIntoDeck({ packages: [] }, { packages: ['colour-match-sdl[full]', 'colour-match-sdl>=0.1.7'], instruments: [] });
+    assert.deepEqual(deck.packages, ['colour-match-sdl[full]>=0.1.7']);
+});
 
 const pump = { name: 'pump_1', import: 'vendor_pumps', class: 'SyringePump', args: { port: 'COM3' } };
 

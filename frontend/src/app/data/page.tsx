@@ -2,10 +2,10 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Database, Download, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { Table2, Download, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import {
-  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf, issuesLabel, useDocumentTheme } from '@ivoryos/shared-ui';
+  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf, issuesLabel, useDocumentTheme, confirmDialog, notify } from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned, so unwrap that one key before handing the value to ResultView — otherwise every result
@@ -44,7 +44,7 @@ const PlotFrame = ({ html }: { html: string }) => {
 const STATUS_BAR_COLOR: Record<string, string> = {
   completed: 'bg-green-500',
   error: 'bg-red-500',
-  running: 'bg-indigo-500 animate-pulse',
+  running: 'bg-accent animate-pulse',
 };
 
 type TimelineStep = {
@@ -71,15 +71,21 @@ const secondsBetween = (a?: string, b?: string) => {
   return Number.isFinite(ms) ? `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)}s` : '';
 };
 
-const StatusDot = ({ status }: { status?: string }) => (
-  <span
-    title={status}
-    className={`w-2 h-2 rounded-full shrink-0 ${status === 'completed' ? 'bg-green-500'
-      : status === 'error' ? 'bg-red-500'
-        : status === 'running' || status === 'waiting_input' ? 'bg-indigo-500 animate-pulse'
-          : 'bg-gray-300 dark:bg-gray-600'}`}
-  />
-);
+// 'not_run' (and a step 'skipped' with no error of its own): the run ended before it, after a
+// graceful stop. A hollow grey ring, so it reads as "never happened" rather than as pending or done.
+const StatusDot = ({ status, error }: { status?: string; error?: string }) => {
+  const notRun = status === 'not_run' || (status === 'skipped' && !error);
+  return (
+    <span
+      title={notRun ? 'not run: the run stopped before it' : status}
+      className={`w-2 h-2 rounded-full shrink-0 ${notRun ? 'border border-gray-400 dark:border-gray-500'
+        : status === 'completed' ? 'bg-green-500'
+        : status === 'error' ? 'bg-red-500'
+          : status === 'running' || status === 'waiting_input' ? 'bg-accent animate-pulse'
+            : 'bg-gray-300 dark:bg-gray-600'}`}
+    />
+  );
+};
 
 type ArgItem = { key: string; value: unknown; text: string; source?: string };
 
@@ -142,6 +148,10 @@ const summarizeFlowStep = (step: any): { label: string; args: string; outcome: s
         ? { label: 'Comment', args: '', outcome: cellText(outputs.message) }
         : { label: 'Comment', args: cellText(params.message ?? ''), outcome: '' };
     case 'User_Input':
+      // Without a name it was a pause: nothing was asked, someone pressed Continue.
+      if (!String(params.variable_name || '').trim()) {
+        return { label: 'Pause', args: cellText(params.prompt ?? ''), outcome: outputs.acknowledged ? 'continued' : '' };
+      }
       return {
         label: 'User Input',
         args: String(params.variable_name || ''),
@@ -210,8 +220,8 @@ const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
               className={`flex items-center gap-2 px-3 py-1 text-xs font-mono min-w-0 ${hasMore ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03]' : ''}`}
             >
               <span className="w-6 text-right text-[10px] text-gray-400 shrink-0">{start + i + 1}</span>
-              <StatusDot status={step.status} />
-              <span className="text-indigo-600 dark:text-indigo-400 font-semibold truncate shrink-0 max-w-[40%]" title={label}>{label}</span>
+              <StatusDot status={step.status} error={step.error} />
+              <span className="text-gray-900 dark:text-white font-semibold truncate shrink-0 max-w-[40%]" title={label}>{label}</span>
               {flowSummary ? (
                 <>
                   <span className="text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={flowSummary.args}>{flowSummary.args}</span>
@@ -291,15 +301,18 @@ const LogGroup = ({ label, summary, steps, muted, defaultOpen }: {
   if (steps.length === 0) return null;
   const first = steps.find(s => s.start_time)?.start_time;
   const last = [...steps].reverse().find(s => s.end_time)?.end_time;
+  const status = aggregateStatus(steps);
+  // After a graceful stop: a sample, or the cleanup, that never ran.
+  const notRun = status === 'not_run';
   return (
-    <div className="min-w-0">
+    <div className={`min-w-0 ${notRun ? 'opacity-60' : ''}`}>
       <div
         onClick={() => setOpen(!open)}
         className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03] min-w-0 ${muted ? 'bg-gray-50/60 dark:bg-white/[0.02]' : ''}`}
       >
-        <StatusDot status={aggregateStatus(steps)} />
+        <StatusDot status={status} />
         <span className={`text-xs font-semibold shrink-0 w-16 ${muted ? 'text-gray-500 dark:text-gray-400' : 'text-gray-700 dark:text-gray-200'}`}>{label}</span>
-        <span className="text-[11px] font-mono text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={summary}>{summary}</span>
+        <span className="text-[11px] font-mono text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1" title={notRun ? 'The run stopped before this' : summary}>{notRun ? 'not run' : summary}</span>
         <span className="text-[10px] text-gray-400 shrink-0">
           {steps.length} step{steps.length === 1 ? '' : 's'}{first && last ? ` · ${secondsBetween(first, last)}` : ''}
         </span>
@@ -432,7 +445,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
         <div className="text-[11px] font-mono truncate text-right flex-1 min-w-0">
           {activeBand ? (
             <span className="text-gray-700 dark:text-gray-200">
-              <span className="text-indigo-600 dark:text-indigo-400 font-bold">{bandName(activeBand.n)}</span>
+              <span className="text-gray-900 dark:text-white font-bold">{bandName(activeBand.n)}</span>
               <span className="text-gray-400">
                 {' · '}{((activeBand.end - activeBand.start) / 1000).toFixed(2)}s
                 {' · '}{activeBand.steps.length} step{activeBand.steps.length === 1 ? '' : 's'}
@@ -443,7 +456,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
           ) : active ? (
             <span className="text-gray-700 dark:text-gray-200">
               {active.iteration !== undefined && (
-                <span className="text-indigo-600 dark:text-indigo-400 font-bold">{bandName(active.iteration)} · </span>
+                <span className="text-gray-900 dark:text-white font-bold">{bandName(active.iteration)} · </span>
               )}
               {active.row !== undefined && unit === 'Batch' && (
                 <span className="text-teal-600 dark:text-teal-400">row {active.row} · </span>
@@ -454,7 +467,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
                 {' · +'}{((startOf(active) - minStart) / 1000).toFixed(1)}s
               </span>
               {active.status !== 'completed' && (
-                <span className={active.status === 'error' ? ' text-red-500' : ' text-indigo-500'}>
+                <span className={active.status === 'error' ? ' text-red-500' : ' text-gray-700 dark:text-gray-200'}>
                   {' · '}{active.status}
                 </span>
               )}
@@ -487,13 +500,13 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
                   onMouseLeave={() => setHoveredIteration(null)}
                   title={`${bandName(band.n)} — ${((band.end - band.start) / 1000).toFixed(2)}s, ${band.steps.length} step${band.steps.length === 1 ? '' : 's'}`}
                   className={`absolute rounded-md border text-[10px] font-bold overflow-hidden transition-colors ${selected
-                      ? 'bg-indigo-500 border-indigo-600 text-white z-20'
+                      ? 'bg-accent border-accent text-on-accent z-20'
                       : band.errors > 0
                         ? 'bg-red-100 border-red-300 text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:border-red-500/40 dark:text-red-300'
                         : isPhase(band.n)
                           ? 'bg-gray-50 border-dashed border-gray-300 text-gray-500 hover:bg-gray-100 dark:bg-white/[0.03] dark:border-white/20 dark:text-gray-400 dark:hover:bg-white/[0.06]'
-                          : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-500/15 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-500/25'
-                    } ${hoveredIteration === band.n && !selected ? 'ring-1 ring-inset ring-indigo-400' : ''}`}
+                          : 'bg-accent-soft border-accent-tint/60 text-accent-fg hover:bg-accent-tint/30'
+                    } ${hoveredIteration === band.n && !selected ? 'ring-1 ring-inset ring-accent' : ''}`}
                   style={{ left: `${leftPct}%`, width: `${widthPct}%`, top: (laneOf.get(band.n) || 0) * (BAND_H + BAND_GAP), height: BAND_H }}
                 >
                   {/* Only when it fits. A hundred-row run is a ribbon of unlabelled blocks, and
@@ -512,7 +525,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
               <button
                 type="button"
                 onClick={() => { setZoom(null); setHovered(null); }}
-                className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                className="font-semibold text-accent-fg hover:underline"
               >
                 ← whole run
               </button>
@@ -647,7 +660,7 @@ const LIST_DOT: Record<string, string> = {
   completed: 'bg-green-500',
   error: 'bg-red-500',
   cancelled: 'bg-gray-400',
-  running: 'bg-indigo-500 animate-pulse',
+  running: 'bg-accent animate-pulse',
   waiting_input: 'bg-amber-500 animate-pulse',
 };
 
@@ -670,8 +683,13 @@ export default function DataPage() {
   const [plots, setPlots] = useState<Record<string, string> | null>(null);
   const [plotsError, setPlotsError] = useState<string | null>(null);
   const [plotsLoading, setPlotsLoading] = useState(false);
-  const [pendingDeleteRun, setPendingDeleteRun] = useState<any>(null);
-  const [isDeletingRun, setIsDeletingRun] = useState(false);
+  // Deleting many: "Select" puts a checkbox on every card until "Done". Off, a card has only its
+  // trash icon (one run). The checkboxes used to appear on hover, pushing the name aside as the
+  // pointer crossed the list.
+  const [selecting, setSelecting] = useState(false);
+  // Runs ticked for deletion, from the page of the list that is showing.
+  const [checked, setChecked] = useState<Set<number>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
   const [listVersion, setListVersion] = useState(0);
   const selectedIdRef = useRef<number | null>(null);
   selectedIdRef.current = selectedId;
@@ -773,27 +791,53 @@ export default function DataPage() {
   }, [selectedRun?.id, selectedRun?.type]);
 
 
-  const deleteRun = async (run: any) => {
-    setIsDeletingRun(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to delete run');
-      if (selectedIdRef.current === run.id) setSelectedId(null);
-      setListVersion(v => v + 1);
-      setPendingDeleteRun(null);
-    } catch (e: any) {
-      alert("Failed to delete run: " + e.message);
-    } finally {
-      setIsDeletingRun(false);
-    }
-  };
+  // A ticked run that leaves the page (paging, a filter, a search) is no longer ticked: deleting
+  // something the person can no longer see would be a surprise.
+  useEffect(() => {
+    setChecked(prev => {
+      const visible = new Set(summaries.map((r: any) => r.id));
+      const next = new Set([...prev].filter(id => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [summaries]);
 
-  const clearHistory = async () => {
-    if (confirm("Are you sure you want to clear all history? (Not implemented in DB yet)")) {
-      // Future: call DELETE /api/queue/runs
-      alert("Clearing history directly from the Edge database will be added soon.");
+  const toggleChecked = (id: number) => setChecked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const allChecked = summaries.length > 0 && summaries.every((r: any) => checked.has(r.id));
+  const toggleAll = () => setChecked(allChecked ? new Set() : new Set(summaries.map((r: any) => r.id)));
+
+  // One run or many, through the same per-run delete: the edge refuses a run that is still going
+  // (cancel it instead, so its partial results stay on record), and that refusal is reported
+  // rather than stopping the rest.
+  const stopSelecting = () => { setSelecting(false); setChecked(new Set()); };
+  const deleteChecked = () => deleteRuns(summaries.filter((r: any) => checked.has(r.id)));
+  const deleteRuns = async (runs: any[]) => {
+    if (!runs.length) return;
+    const ok = await confirmDialog(
+      runs.length === 1
+        ? `"${String(runs[0].name).split(' - ')[0]}" and its recorded data will be permanently removed.`
+        : `${runs.length} runs and their recorded data will be permanently removed.`,
+      { title: runs.length === 1 ? 'Delete this run?' : `Delete ${runs.length} runs?`, confirmLabel: 'Delete', tone: 'danger' },
+    );
+    if (!ok) return;
+    setIsDeleting(true);
+    const failed: string[] = [];
+    for (const run of runs) {
+      try {
+        const res = await fetch(`${API_BASE}/api/queue/runs/${run.id}`, { method: 'DELETE' });
+        if (!res.ok) failed.push(`${String(run.name).split(' - ')[0]}: ${(await res.json().catch(() => ({}))).error || res.status}`);
+        else if (selectedIdRef.current === run.id) setSelectedId(null);
+      } catch (e: any) {
+        failed.push(`${String(run.name).split(' - ')[0]}: ${e.message}`);
+      }
     }
+    setIsDeleting(false);
+    stopSelecting();
+    setListVersion(v => v + 1);
+    if (failed.length) await notify(failed.join('\n'), { title: `${failed.length} not deleted`, tone: 'error' });
   };
 
   const downloadRunDataCSV = (run: any) => {
@@ -918,66 +962,55 @@ export default function DataPage() {
 
   return (
     <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      {pendingDeleteRun && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-red-200 dark:border-red-500/30 rounded-2xl shadow-2xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-9 h-9 rounded-lg bg-red-50 dark:bg-red-500/10 flex items-center justify-center shrink-0">
-                <Trash2 className="w-5 h-5 text-red-600 dark:text-red-400" />
-              </div>
-              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Delete this run?</h2>
-            </div>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
-              <span className="font-semibold text-gray-800 dark:text-gray-200">{pendingDeleteRun.name?.split(' - ')[0]}</span> and its recorded data will be permanently removed. This can&rsquo;t be undone.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setPendingDeleteRun(null)}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-white/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => deleteRun(pendingDeleteRun)}
-                disabled={isDeletingRun}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white transition-colors"
-              >
-                {isDeletingRun ? 'Deleting…' : 'Delete'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {/* Sidebar */}
       <Sidebar />
 
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden min-w-0">
         <div className="w-80 min-w-[20rem] max-w-[20rem] flex-none border-r border-gray-200 dark:border-white/10 bg-white/50 dark:bg-black/20 flex flex-col">
-          <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-            <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">Run History</h2>
-            <button onClick={clearHistory} className="text-red-500 hover:text-red-600 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20" title="Clear All History">
-              <Trash2 className="w-4 h-4" />
-            </button>
-          </header>
-          <div className="px-4 pt-4 space-y-2">
-            <div className="relative">
+          {/* No title: the page is named by the navigation, and the list explains itself. The row
+              keeps the height of the selected run's header beside it, so the two borders meet. */}
+          <div className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-2.5 px-4 bg-white/80 dark:bg-black/20 backdrop-blur-md z-10">
+            {selecting && (
+              <input
+                type="checkbox"
+                checked={allChecked}
+                ref={el => { if (el) el.indeterminate = checked.size > 0 && !allChecked; }}
+                onChange={toggleAll}
+                disabled={summaries.length === 0}
+                title={allChecked ? 'Clear the selection' : 'Select every run on this page'}
+                className="w-4 h-4 shrink-0 accent-accent cursor-pointer disabled:cursor-default"
+              />
+            )}
+            <div className="relative flex-1 min-w-0">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
               <input
                 type="text"
                 placeholder="Search runs..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                autoComplete="off"
                 title="Every word must match the run name, its columns or values, or an instrument or method it used"
-                className="w-full pl-10 pr-4 py-2 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full pl-9 pr-3 py-2 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent/50"
               />
             </div>
+            <button
+              type="button"
+              onClick={() => (selecting ? stopSelecting() : setSelecting(true))}
+              disabled={!selecting && summaries.length === 0}
+              title={selecting ? 'Stop selecting' : 'Select runs to delete several at once'}
+              className="shrink-0 px-2 py-1.5 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-40 dark:text-gray-300 dark:hover:bg-white/10 dark:hover:text-white"
+            >
+              {selecting ? 'Done' : 'Select'}
+            </button>
+          </div>
+          <div className="px-4 pt-3 space-y-2">
             <div className="flex gap-2">
               <select
                 value={sort}
                 onChange={(e) => { setSort(e.target.value); setPage(0); }}
                 title="Sort order"
-                className="flex-1 min-w-0 px-2 py-1.5 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
                 {SORTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
@@ -985,11 +1018,26 @@ export default function DataPage() {
                 value={statusFilter}
                 onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
                 title="Show only runs with this status"
-                className="flex-1 min-w-0 px-2 py-1.5 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded-lg text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
                 {STATUS_FILTERS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             </div>
+            {selecting && (
+              <div className="flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-white/10 px-2.5 py-1.5 text-xs">
+                <span className={checked.size ? 'font-semibold text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'}>
+                  {checked.size ? `${checked.size} selected` : 'Tick the runs to delete'}
+                </span>
+                <button
+                  type="button"
+                  onClick={deleteChecked}
+                  disabled={isDeleting || checked.size === 0}
+                  className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 font-semibold text-red-600 hover:bg-red-100 disabled:opacity-50 dark:text-red-400 dark:hover:bg-red-500/15"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> {isDeleting ? 'Deleting…' : 'Delete'}
+                </button>
+              </div>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-2">
             {summaries.length === 0 ? (
@@ -1001,10 +1049,20 @@ export default function DataPage() {
                 <div
                   key={run.id}
                   onClick={() => setSelectedId(run.id)}
-                  className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedId === run.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-500/30' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
+                  className={`group p-3 rounded-lg border cursor-pointer transition-all ${selectedId === run.id ? 'bg-accent-soft border-accent-tint' : 'bg-white dark:bg-white/5 border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10'}`}
                 >
                   <div className="flex justify-between items-center mb-1 gap-2">
                     <span className="flex items-center gap-1.5 min-w-0">
+                      {selecting && (
+                        <input
+                          type="checkbox"
+                          checked={checked.has(run.id)}
+                          onChange={() => toggleChecked(run.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          title="Select this run"
+                          className="w-3.5 h-3.5 shrink-0 accent-accent cursor-pointer"
+                        />
+                      )}
                       {/* Completed, but only after retries or skipping a failed step: not the
                           same outcome as a clean run, so not the same green. */}
                       <span
@@ -1013,20 +1071,27 @@ export default function DataPage() {
                       />
                       <span className="text-xs font-bold text-gray-800 dark:text-gray-200 truncate">{String(run.name).split(' - ')[0]}</span>
                     </span>
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="flex items-center gap-1.5 shrink-0">
                       <span className="text-[10px] text-gray-500">{run.start_time ? serverDate(run.start_time).toLocaleString() : ''}</span>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setPendingDeleteRun(run); }}
-                        title="Delete run"
-                        className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-opacity"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                      {/* Fades in on hover without taking or giving up space, so nothing moves. */}
+                      {!selecting && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); deleteRuns([run]); }}
+                          disabled={isDeleting}
+                          title="Delete this run"
+                          aria-label="Delete this run"
+                          className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-opacity"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </span>
                   </div>
-                  <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate" title={(run.instruments || []).join(', ')}>
+                  {/* What kind of run, and no more: the instruments it touched are on the run
+                      itself, and search still finds runs by them. */}
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
                     {run.row_count != null ? `${run.variable_count} variables • ${run.row_count} rows` : run.type === 'Optimization' ? 'optimization' : 'single run'}
-                    {run.instruments?.length ? ` • ${run.instruments.join(', ')}` : ''}
                   </div>
                 </div>
               ))
@@ -1058,35 +1123,38 @@ export default function DataPage() {
         <div className="flex-1 flex flex-col relative z-0 min-w-0 overflow-hidden">
           {selectedRun ? (
             <>
-              <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-                <div className="flex items-center space-x-3">
-                  <Database className="w-5 h-5 text-indigo-500" />
-                  <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">{selectedRun.name.split(' - ')[0]}</h2>
+              {/* A long name truncates; the two downloads keep their size and one line. */}
+              <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center justify-between gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Table2 className="w-5 h-5 shrink-0 text-gray-700 dark:text-gray-200" />
+                  <h2 className="min-w-0 truncate text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300" title={selectedRun.name.split(' - ')[0]}>{selectedRun.name.split(' - ')[0]}</h2>
                   {selectedRun.deckVersion != null && (
                     <span
                       title="The version of the instruments' schema this run executed against (Instruments → deck history)"
-                      className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"
+                      className="shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"
                     >
                       deck v{selectedRun.deckVersion}
                     </span>
                   )}
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center gap-2 shrink-0">
                   {selectedRun.variables?.length > 0 && (
                     <button
                       onClick={() => downloadRunDataCSV(selectedRun)}
-                      className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
+                      title="Download the data table (CSV): one row per sample or trial, inputs and outputs"
+                      className="flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded text-sm font-medium transition-all bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50"
                     >
                       <Download className="w-4 h-4" />
-                      <span>Export Data</span>
+                      <span>Data</span>
                     </button>
                   )}
                   <button
                     onClick={() => downloadRunLogCSV(selectedRun)}
-                    className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-500/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                    title="Download the step log (CSV): every step with its arguments, result and times"
+                    className="flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded text-sm font-medium transition-all bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-white/15 text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/10 dark:bg-white/15 dark:border-white/20 dark:text-white dark:hover:bg-white/15"
                   >
                     <Download className="w-4 h-4" />
-                    <span>Export Log</span>
+                    <span>Log</span>
                   </button>
                 </div>
               </header>
@@ -1104,10 +1172,13 @@ export default function DataPage() {
                           <div className="text-[10px] uppercase font-bold text-gray-400">Budget</div>
                           <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.budget ?? '—'}</div>
                         </div>
-                        <div>
-                          <div className="text-[10px] uppercase font-bold text-gray-400">Error Recovery</div>
-                          <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.error_recovery || '—'}</div>
-                        </div>
+                        {/* Only runs from before failures always waited for a person recorded one. */}
+                        {selectedRun.config.error_recovery && (
+                          <div>
+                            <div className="text-[10px] uppercase font-bold text-gray-400">Error Recovery</div>
+                            <div className="text-sm font-mono text-gray-800 dark:text-gray-200">{selectedRun.config.error_recovery}</div>
+                          </div>
+                        )}
                         {Object.entries(selectedRun.config.optimizer_config || {}).map(([stepKey, stepDef]: [string, any]) => (
                           <div key={stepKey}>
                             <div className="text-[10px] uppercase font-bold text-gray-400">{stepKey.replace('_', ' ')}</div>
@@ -1118,7 +1189,7 @@ export default function DataPage() {
                       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
                         {selectedRun.config.parameter_space.map((p: any) => (
                           <div key={p.name} className="flex flex-col space-y-1 p-3 bg-gray-50/50 dark:bg-white/[0.02] rounded-lg border border-gray-100 dark:border-white/5">
-                            <span className="text-[11px] font-bold text-indigo-500 font-mono truncate">#{p.name}</span>
+                            <span className="text-[11px] font-bold text-gray-700 dark:text-gray-200 font-mono truncate">#{p.name}</span>
                             <span className="text-xs text-gray-600 dark:text-gray-300">
                               {p.type === 'choice' ? `choice: ${(p.bounds || []).join(', ')}` : `range: ${p.bounds?.[0]} – ${p.bounds?.[1]}`}
                               <span className="text-gray-400"> ({p.value_type})</span>
@@ -1186,9 +1257,9 @@ export default function DataPage() {
                         {/* The same divider the Configure spreadsheet draws: these rows ran together,
                             step by step, rather than one after another. */}
                         {startsBatch && (
-                          <div className="flex items-center gap-2 px-3 py-1 bg-teal-50/60 dark:bg-teal-500/[0.06] border-t-2 border-t-teal-300 dark:border-t-teal-700/60">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400">Batch {batch}</span>
-                            <span className="text-[10px] text-teal-700/70 dark:text-teal-300/60">
+                          <div className="flex items-center gap-2 px-3 py-1 bg-purple-50/60 dark:bg-purple-500/[0.06] border-t-2 border-t-purple-300 dark:border-t-purple-700/60">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">Batch {batch}</span>
+                            <span className="text-[10px] text-purple-700/70 dark:text-purple-300/60">
                               rows {batchRows[0]?.row}–{batchRows[batchRows.length - 1]?.row} · ran together, step by step
                             </span>
                           </div>

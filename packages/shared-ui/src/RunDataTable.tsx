@@ -13,7 +13,7 @@ export function RunDataTable({ run, title = 'data', maxHeight = '420px', batchOf
   title?: string;
   maxHeight?: string;
   /**
-   * Which batch a row ran in, for a batched run. Draws the same teal divider and "Batch N" label
+   * Which batch a row ran in, for a batched run. Draws the same purple divider and "Batch N" label
    * the Configure spreadsheet uses, so the record looks like the table it was run from.
    */
   batchOf?: Map<number, number> | null;
@@ -30,8 +30,10 @@ export function RunDataTable({ run, title = 'data', maxHeight = '420px', batchOf
           <thead className="sticky top-0 bg-gray-50 dark:bg-[#141414] z-10">
             <tr>
               <th className="px-3 py-1.5 text-right text-[10px] font-bold text-gray-400 border-b border-gray-200 dark:border-white/10 w-10">#</th>
-              {variables.map((v) => (
-                <th key={v} className="px-3 py-1.5 text-left text-[11px] font-semibold text-gray-500 border-b border-gray-200 dark:border-white/10 whitespace-nowrap">{v}</th>
+              {/* Keyed by position: a run can carry an input and an output of the same name
+                  (an older run read `#test` as an input and also saved `test`). */}
+              {variables.map((v, i) => (
+                <th key={`${i}:${v}`} className="px-3 py-1.5 text-left text-[11px] font-semibold text-gray-500 border-b border-gray-200 dark:border-white/10 whitespace-nowrap">{v}</th>
               ))}
             </tr>
           </thead>
@@ -42,17 +44,17 @@ export function RunDataTable({ run, title = 'data', maxHeight = '420px', batchOf
               return (
               <tr
                 key={row.row}
-                title={row.status}
-                className={`border-b border-gray-100 dark:border-white/5 ${startsBatch && idx > 0 ? 'border-t-2 border-t-teal-300 dark:border-t-teal-700/60' : ''} ${row.status === 'error' ? 'bg-red-50/60 dark:bg-red-900/10' : 'hover:bg-gray-50 dark:hover:bg-white/[0.02]'}`}
+                title={row.status === 'not_run' ? 'Not run: the run stopped before this row' : row.status}
+                className={`border-b border-gray-100 dark:border-white/5 ${startsBatch && idx > 0 ? 'border-t-2 border-t-purple-300 dark:border-t-purple-700/60' : ''} ${row.status === 'error' ? 'bg-red-50/60 dark:bg-red-900/10' : row.status === 'not_run' ? 'opacity-45' : 'hover:bg-gray-50 dark:hover:bg-white/[0.02]'}`}
               >
                 <td className="px-3 py-1 text-right text-gray-400 whitespace-nowrap">
                   {startsBatch && (
-                    <span className="mr-1.5 text-[9px] font-sans font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400">Batch {batch}</span>
+                    <span className="mr-1.5 text-[9px] font-sans font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">Batch {batch}</span>
                   )}
                   {row.row}
                 </td>
                 {variables.map((v, i) => (
-                  <td key={v} className="px-3 py-1 text-gray-800 dark:text-gray-200 whitespace-nowrap max-w-[16rem] truncate" title={cellText(row.values?.[i])}>
+                  <td key={`${i}:${v}`} className="px-3 py-1 text-gray-800 dark:text-gray-200 whitespace-nowrap max-w-[16rem] truncate" title={cellText(row.values?.[i])}>
                     {cellText(row.values?.[i])}
                   </td>
                 ))}

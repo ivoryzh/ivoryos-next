@@ -4,6 +4,7 @@ import { AlertTriangle, ExternalLink, GitBranch, Loader2, Lock, Search, Sparkles
 import type { DesktopApi, GitConnection, GitImport, GitProvider, GitRepo } from '@/desktop';
 import { GitConnections } from './AccountPanel';
 import { Button, inputClass } from './ui';
+import { addTo, type DeckAccess } from './hubUi';
 
 export type InstrumentSeed = { name: string; import: string; class: string; from: string };
 
@@ -19,9 +20,10 @@ function snake(name: string) {
  * (desktop/src/gitRepos.js explains why it is a download and not `git+https`), then lists the
  * classes it provides; picking one opens the instrument form with it filled in.
  */
-export default function PrivateRepos({ api, profileId, pro, onUpgrade, onPicked }: {
+export default function PrivateRepos({ api, access, pro, onUpgrade, onPicked }: {
   api: DesktopApi;
-  profileId: string;
+  /** The deck the repository is installed into; made on the first import when there is none. */
+  access: DeckAccess;
   pro: boolean;
   onUpgrade: () => void;
   onPicked: (seed: InstrumentSeed) => void;
@@ -55,7 +57,7 @@ export default function PrivateRepos({ api, profileId, pro, onUpgrade, onPicked 
   if (!pro) {
     return (
       <div className="max-w-lg mx-auto mt-10 text-center space-y-3">
-        <span className="inline-flex w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-500 text-white items-center justify-center"><Lock className="w-6 h-6" /></span>
+        <span className="inline-flex w-12 h-12 rounded-2xl bg-gradient-to-br from-accent to-accent-hover text-on-accent items-center justify-center"><Lock className="w-6 h-6" /></span>
         <h3 className="font-semibold">Your lab&apos;s private drivers</h3>
         <p className="text-sm text-gray-500 dark:text-gray-400">
           Connect GitHub or GitLab and add drivers from your own private repositories to a deck, installed and pinned the same way as a Hub driver.
@@ -83,7 +85,7 @@ export default function PrivateRepos({ api, profileId, pro, onUpgrade, onPicked 
               {classes.map(c => (
                 <li key={`${c.module}.${c.class}`}>
                   <button type="button" className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-white/5" onClick={async () => {
-                    const name = await api.freeName(profileId, snake(c.class)).catch(() => snake(c.class));
+                    const name = access.target ? await api.freeName(access.target.id, snake(c.class)).catch(() => snake(c.class)) : snake(c.class);
                     onPicked({ name, import: c.module, class: c.class, from: repo.name });
                   }}>
                     <span className="font-mono text-sm font-semibold">{c.class}</span>
@@ -125,7 +127,7 @@ export default function PrivateRepos({ api, profileId, pro, onUpgrade, onPicked 
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         {connected.map(c => (
-          <button key={c.provider} type="button" onClick={() => setProvider(c.provider)} className={`px-3 py-1.5 rounded-lg text-sm border ${provider === c.provider ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300 dark:border-indigo-500/40' : 'border-gray-200 dark:border-white/10'}`}>
+          <button key={c.provider} type="button" onClick={() => setProvider(c.provider)} className={`px-3 py-1.5 rounded-lg text-sm border ${provider === c.provider ? 'border-accent-tint bg-accent-soft text-accent-fg' : 'border-gray-200 dark:border-white/10'}`}>
             {c.label} <span className="text-xs text-gray-500">· {c.login}</span>
           </button>
         ))}
@@ -154,7 +156,9 @@ export default function PrivateRepos({ api, profileId, pro, onUpgrade, onPicked 
               </div>
               <Button small tone="primary" disabled={!!importing} onClick={async () => {
                 setImporting(r.id); setError(null);
-                try { setImported({ repo: r, result: await api.gitImport(profileId, provider!, r.id) }); } catch (e: any) { setError(e.message); } finally { setImporting(null); }
+                try {
+                  await addTo(access, r.name, async deck => { setImported({ repo: r, result: await api.gitImport(deck.id, provider!, r.id) }); });
+                } catch (e: any) { setError(e.message); } finally { setImporting(null); }
               }}>
                 {importing === r.id ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Installing…</> : `Import ${r.defaultBranch}`}
               </Button>

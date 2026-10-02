@@ -45,21 +45,21 @@ function Login() {
     }
   };
 
-  const input = 'w-full px-3 py-2 rounded-lg text-sm bg-transparent border outline-none focus:border-blue-400';
+  const input = 'w-full px-3 py-2 rounded-lg text-sm bg-transparent border outline-none focus:border-accent';
   const inputStyle = { borderColor: 'var(--panel-border)', color: 'var(--text-primary)' } as const;
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
       <div className="w-full max-w-sm rounded-2xl p-7 space-y-5" style={{ background: 'var(--panel-bg)', border: '1px solid var(--panel-border)' }}>
         <div className="flex items-center gap-2">
-          <Cloud className="w-6 h-6 text-blue-400" />
+          <Cloud className="w-6 h-6 text-gray-500 dark:text-gray-300" />
           <h1 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>IvoryOS Cloud</h1>
         </div>
 
         {confirm ? (
           <div className="space-y-3 text-sm" style={{ color: 'var(--text-primary)' }}>
             <p>We sent a confirmation link to <b>{confirm}</b>. Open it, then sign in here.</p>
-            <button type="button" className="text-blue-400 hover:underline" onClick={() => { setConfirm(null); setMode('sign-in'); }}>Back to sign in</button>
+            <button type="button" className="font-medium text-accent-fg underline-offset-2 hover:underline" onClick={() => { setConfirm(null); setMode('sign-in'); }}>Back to sign in</button>
           </div>
         ) : (
           <>
@@ -82,12 +82,12 @@ function Login() {
               <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" autoFocus className={input} style={inputStyle} />
               <input type="password" required value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" className={input} style={inputStyle} />
               {error && <div className="text-sm text-red-500">{error}</div>}
-              <button type="submit" disabled={busy} className="w-full py-2 rounded-lg text-sm font-semibold text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center gap-2">
+              <button type="submit" disabled={busy} className="w-full py-2 rounded-lg text-sm font-semibold text-on-accent bg-accent hover:bg-accent-hover disabled:opacity-50 flex items-center justify-center gap-2">
                 {busy && <Loader2 className="w-4 h-4 animate-spin" />}
                 {mode === 'sign-in' ? 'Sign in' : 'Create account'}
               </button>
             </form>
-            <button type="button" className="text-sm text-blue-400 hover:underline" onClick={() => { setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in'); setError(null); }}>
+            <button type="button" className="text-sm font-medium text-accent-fg underline-offset-2 hover:underline" onClick={() => { setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in'); setError(null); }}>
               {mode === 'sign-in' ? 'Create an IvoryOS account' : 'I already have an account'}
             </button>
           </>

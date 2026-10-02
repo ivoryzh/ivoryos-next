@@ -440,3 +440,181 @@ async def test_cloud_optimization_reports_running_and_finished(monkeypatch):
         await asyncio.sleep(0.05)
 
     assert statuses == ["running", "completed"], statuses
+
+
+def test_an_installed_optimizer_that_will_not_import_says_why(monkeypatch, capsys):
+    """A backend whose package is installed but whose import fails (two backends wanting different
+    versions of a shared dependency, say) used to vanish exactly as if it were not installed."""
+    import importlib
+    import importlib.util
+    import ivoryos_edge.optimizer.registry as registry
+
+    saved = registry.OPTIMIZER_REGISTRY, registry.OPTIMIZER_ERRORS
+    real_find, real_import = importlib.util.find_spec, importlib.import_module
+
+    def find(name, *a):
+        return object() if name == "baybe" else real_find(name, *a)
+
+    def load(name, *a):
+        if name == "ivoryos_edge.optimizer.baybe_optimizer":
+            raise ImportError("cannot import name 'Kernel' from 'botorch.models'")
+        return real_import(name, *a)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find)
+    monkeypatch.setattr(importlib, "import_module", load)
+    try:
+        importlib.reload(registry)
+        assert "baybe" not in registry.OPTIMIZER_REGISTRY
+        assert registry.OPTIMIZER_ERRORS["baybe"].startswith("ImportError: cannot import name 'Kernel'")
+        assert "[optimizer] baybe is installed but could not be loaded" in capsys.readouterr().err
+    finally:
+        # Other tests hold the original dicts (imported by name), so put those objects back.
+        registry.OPTIMIZER_REGISTRY, registry.OPTIMIZER_ERRORS = saved
+
+
+@pytest.mark.asyncio
+async def test_observe_gets_every_suggested_trial_in_order_with_its_parameters():
+    """observe() is told about each suggested trial, in order, with the values it ran with and
+    its objectives. A failed step waits for a person (here: skip it), and the trial it belonged
+    to arrives without an objective, so the adapter can mark it failed rather than misread it.
+    Ax and NIMO pair results with trials by position; BayBE needs the parameter values."""
+    from ivoryos_edge.server import app as fastapi_app, queue_manager
+    # The autouse fixture registers the mock and resets its records.
+    async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url="http://test") as ac:
+        payload = {
+            "name": "Failed trial in a round",
+            "parameters": {
+                "type": "Optimization", "optimizer": "mock", "budget": 2, "batch_size": 2,
+                "optimizer_config": {},
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "result", "minimize": False}],
+                "sequence_template": [
+                    # The first trial's step fails, the second's succeeds.
+                    {"instrument": "dummy", "method": "fail_first_call", "params": {}, "returnVar": "result"},
+                ],
+            },
+        }
+        fastapi_app.state.instruments["dummy"].calls_seen = 0
+        resp = await ac.post("/api/queue/runs", json=payload)
+        assert resp.status_code == 200, resp.text
+        run_id = resp.json()["run_id"]
+        # Nothing is skipped on its own: the run waits for a decision.
+        for _ in range(80):
+            if queue_manager.awaiting_decision == run_id:
+                break
+            await asyncio.sleep(0.05)
+        assert queue_manager.awaiting_decision == run_id
+        assert queue_manager.paused is True
+        assert (await ac.post(f"/api/queue/runs/{run_id}/resolve", json={"action": "skip"})).status_code == 200
+        # While it waits the run reads "error"; wait for it to have finished, not for a status.
+        for _ in range(80):
+            await asyncio.sleep(0.05)
+            if queue_manager.active_run_id != run_id:
+                break
+        run = (await ac.get(f"/api/queue/runs/{run_id}")).json()
+        assert run["status"] == "completed", [(s["method"], s["status"], (s.get("error") or "")[:200]) for s in run["steps"]]
+        assert len(MockOptimizer.observe_calls) == 1
+        failed, ok = MockOptimizer.observe_calls[0]
+        assert "x" in failed and "result" not in failed       # its step was skipped: no objective
+        assert "x" in ok and ok["result"] == 2.0              # the second trial's own result
+
+
+@pytest.mark.asyncio
+async def test_flow_control_runs_inside_an_optimization():
+    """Sleep, Comment, If/Else/End_If and While/End_While run in an optimization's prep and
+    trials as in a normal run (_flow_control_step). The optimization loop used to treat every
+    step as an instrument and stopped at the first one: "Instrument Flow_Control not found"."""
+    from ivoryos_edge.server import app as fastapi_app
+    fastapi_app.state.instruments["dummy"].counter = 0
+    fc = lambda method, **params: {"instrument": "Flow_Control", "method": method, "params": params}
+    async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url="http://test") as ac:
+        payload = {
+            "name": "Flow control in an optimization",
+            "parameters": {
+                "type": "Optimization", "optimizer": "mock", "budget": 2, "optimizer_config": {},
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "echoed", "minimize": False}],
+                "sequence_template": [
+                    {"instrument": "dummy", "method": "assay_method", "params": {}, "returnVar": "y",
+                     "returnBindings": [{"path": "yield_pct", "var": "y"}]},
+                    fc("Sleep", duration_seconds=0),
+                    fc("If", condition="y > 0"),
+                    {"instrument": "dummy", "method": "echo_method", "params": {"value": "#y"}, "returnVar": "echoed"},
+                    fc("Else"),
+                    {"instrument": "dummy", "method": "fail_method", "params": {}},
+                    fc("End_If"),
+                    {"instrument": "Flow Control", "method": "Comment", "params": {"message": "prep counted to #c"}},
+                ],
+            },
+            # Top level, as the Optimize page sends it: start_run makes it the run's prep_template.
+            "prep": [
+                {"instrument": "dummy", "method": "counting_method", "params": {}, "returnVar": "c"},
+                fc("While", condition="c < 3"),
+                {"instrument": "dummy", "method": "counting_method", "params": {}, "returnVar": "c"},
+                fc("End_While"),
+            ],
+        }
+        resp = await ac.post("/api/queue/runs", json=payload)
+        assert resp.status_code == 200, resp.text
+        run_id = resp.json()["run_id"]
+        for _ in range(80):
+            run = (await ac.get(f"/api/queue/runs/{run_id}")).json()
+            if run.get("status") in ["completed", "error", "cancelled"]:
+                break
+            await asyncio.sleep(0.05)
+        assert run["status"] == "completed", [(s["method"], s["status"], (s.get("error") or "")[:80]) for s in run["steps"]]
+
+        steps = run["steps"]
+        # Two counting steps in prep, the second inside the loop: it is one row in the record, run
+        # again on each pass (End_While resets it). The Comment below shows the loop reached 3.
+        assert sum(1 for s in steps if s["method"] == "counting_method") == 2
+        # Each trial took the If's true branch; the Else branch never ran.
+        assert [s["status"] for s in steps if s["method"] == "fail_method"] == ["skipped", "skipped"]
+        assert [s["outputs"]["message"] for s in steps if s["method"] == "Comment"] == ["prep counted to 3"] * 2
+        observed = [row for call in MockOptimizer.observe_calls for row in call]
+        assert len(observed) == 2 and all(float(row["echoed"]) > 0 for row in observed), observed
+
+
+@pytest.mark.asyncio
+async def test_optimizing_a_linked_workflow_runs_its_prep_and_cleanup_once():
+    """An optimization over a linked workflow runs that workflow's prep once, its main block per
+    trial, and its cleanup once. The Optimize page splits the link three ways with `phases`
+    (shared-ui splitRepeatedLinks); sent whole, every trial ran the workflow's setup again (a
+    colour-match campaign set its target and asked for confirmation before every trial)."""
+    from ivoryos_edge.server import app as fastapi_app
+    fastapi_app.state.instruments["dummy"].counter = 0
+    async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url="http://test") as ac:
+        saved = await ac.post("/api/workflows/Setup then measure", json={"description": "",
+            "prep": [{"id": 1, "uuid": 1, "instrument": "dummy", "action": "echo_method", "args": {"value": "setup"}, "arg_types": {}}],
+            "script": [{"id": 2, "uuid": 2, "instrument": "dummy", "action": "assay_method", "args": {}, "arg_types": {},
+                        "return": "y", "return_bindings": [{"path": "yield_pct", "var": "y"}]}],
+            "cleanup": [{"id": 3, "uuid": 3, "instrument": "dummy", "action": "echo_method", "args": {"value": "teardown"}, "arg_types": {}}],
+        })
+        assert saved.status_code == 200, saved.text
+        link = lambda phase: {"instrument": "Library Workflows", "method": "Setup then measure", "params": {}, "phases": [phase]}
+        payload = {
+            "name": "Linked, split",
+            "parameters": {
+                "type": "Optimization", "optimizer": "mock", "budget": 3, "optimizer_config": {},
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                "objective_config": [{"name": "y", "minimize": False}],
+                "sequence_template": [link("script")],
+            },
+            "prep": [link("prep")],
+            "cleanup": [link("cleanup")],
+        }
+        resp = await ac.post("/api/queue/runs", json=payload)
+        assert resp.status_code == 200, resp.text
+        run_id = resp.json()["run_id"]
+        for _ in range(80):
+            run = (await ac.get(f"/api/queue/runs/{run_id}")).json()
+            if run.get("status") in ["completed", "error", "cancelled"]:
+                break
+            await asyncio.sleep(0.05)
+        assert run["status"] == "completed", [(s["method"], s["status"], (s.get("error") or "")[:200]) for s in run["steps"]]
+        order = [(s["method"], (s.get("outputs") or {}).get("result")) for s in run["steps"]]
+        assert order[0] == ("echo_method", "setup") and order[-1] == ("echo_method", "teardown"), order
+        assert sum(1 for m, r in order if r == "setup") == 1
+        assert sum(1 for m, r in order if r == "teardown") == 1
+        assert sum(1 for m, _ in order if m == "assay_method") == 3
+        assert len([row for call in MockOptimizer.observe_calls for row in call]) == 3

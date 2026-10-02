@@ -26,6 +26,20 @@ export async function workflowSourcesFor(nodes: any[]): Promise<(node: any) => W
   };
 }
 
+/** The saved workflows a graph uses that exist in Cloud only ("device/name"), not on their device. */
+export async function unsentWorkflows(nodes: any[]): Promise<string[]> {
+  const links = nodes.filter((n) => String(blockOf(n)?.instrument || '') === LIBRARY_INSTRUMENT);
+  if (!links.length) return [];
+  const sequences = await getStore().listSequences() as any[];
+  const unsent = new Set<string>();
+  for (const node of links) {
+    const deviceId = String(node?.data?.targetDeviceId || '');
+    const name = String(blockOf(node)?.method || '');
+    if (sequences.find((s) => s.device_id === deviceId && s.name === name)?.body?.cloud_only) unsent.add(`${name} (${deviceId})`);
+  }
+  return Array.from(unsent);
+}
+
 /**
  * The experiment's name: what was typed, or the canvas's name numbered like the edge numbers its
  * runs ("Screen #3") -- never a generic "Distributed Run", which says nothing about which one.

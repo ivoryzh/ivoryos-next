@@ -30,13 +30,20 @@ class BaybeOptimizer(OptimizerBase):
 
     def observe(self, results, index=None):
         """
-        Observes the results of a trial and updates the experiment.
-        :param results: A dictionary containing the results of the trial.
-        :param index: The index of the trial in the DataFrame, if applicable.
-
+        Record a round's results: one dict per suggested trial, holding the parameter values it
+        ran with and its objective values (the queue sends both; BayBE needs both). A trial with
+        an objective missing failed and is left out, since BayBE records only measurements.
         """
-        df = DataFrame(results)
-        self.experiment.add_measurements(df)
+        targets = [o["name"] for o in self.objective_config]
+        params = [p["name"] for p in self.parameter_space]
+        rows = [r for r in results if all(r.get(t) is not None for t in targets)]
+        if not rows:
+            return
+        df = DataFrame(rows)
+        missing = [p for p in params if p not in df.columns]
+        if missing:
+            raise ValueError(f"BayBE needs each result's parameter values too; missing {missing}.")
+        self.experiment.add_measurements(df[params + targets])
 
     def append_existing_data(self, existing_data: DataFrame, file_path: str = None):
         """

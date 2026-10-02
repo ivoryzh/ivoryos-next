@@ -36,3 +36,8 @@ test = [
 mcp = [
     "mcp>=1.2.0"
 ]
+# The assistant's Claude provider (agent/providers.py). Ollama and OpenAI-compatible endpoints
+# need nothing beyond httpx; Claude uses Anthropic's own SDK.
+claude = [
+    "anthropic>=1.0"
+]

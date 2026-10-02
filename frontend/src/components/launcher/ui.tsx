@@ -4,17 +4,21 @@ import { Plus, X } from 'lucide-react';
 import type { ProfileStatus } from '@/desktop';
 
 export const cardClass = 'bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-xl';
-export const inputClass = 'w-full px-2.5 py-1.5 rounded-lg text-sm bg-white border border-gray-200 text-gray-800 placeholder:text-gray-400 focus:outline-none focus:border-indigo-400 dark:bg-black/40 dark:border-white/10 dark:text-gray-100 dark:placeholder:text-gray-600';
+export const inputClass = 'w-full px-2.5 py-1.5 rounded-lg text-sm bg-white border border-gray-200 text-gray-800 placeholder:text-gray-400 focus:outline-none focus:border-accent dark:bg-black/40 dark:border-white/10 dark:text-gray-100 dark:placeholder:text-gray-600';
 export const labelClass = 'block text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-1';
 
-type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & { tone?: 'primary' | 'default' | 'danger' | 'ghost'; small?: boolean };
+type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & { tone?: 'primary' | 'default' | 'danger' | 'ghost' | 'go' | 'stop'; small?: boolean };
 
 export function Button({ tone = 'default', small, className = '', ...props }: ButtonProps) {
   const tones = {
-    primary: 'bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600',
+    primary: 'bg-accent hover:bg-accent-hover text-on-accent border-accent',
     default: 'bg-white hover:bg-gray-50 text-gray-700 border-gray-200 dark:bg-white/5 dark:hover:bg-white/10 dark:text-gray-200 dark:border-white/10',
     danger: 'bg-white hover:bg-red-50 text-red-600 border-gray-200 dark:bg-white/5 dark:hover:bg-red-900/20 dark:text-red-400 dark:border-white/10',
     ghost: 'bg-transparent hover:bg-gray-100 text-gray-600 border-transparent dark:hover:bg-white/10 dark:text-gray-300',
+    // Start and Stop: the two a person reaches for on reflex, so they carry the colours everyone
+    // already reads as "go" and "stop" rather than the app's accent.
+    go: 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600',
+    stop: 'bg-red-600 hover:bg-red-700 text-white border-red-600',
   };
   return (
     <button
@@ -105,7 +109,7 @@ export function KeyValueRows({ value, onChange, resetKey, keyPlaceholder = 'NAME
       <button
         type="button"
         onClick={() => setRows([...rows, { id: Date.now(), k: '', v: '' }])}
-        className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+        className="inline-flex items-center gap-1 text-xs font-medium text-accent-fg hover:underline"
       >
         <Plus className="w-3.5 h-3.5" /> {addLabel}
       </button>

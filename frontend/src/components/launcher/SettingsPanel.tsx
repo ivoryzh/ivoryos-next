@@ -1,7 +1,7 @@
 "use client";
 import React, { useState } from 'react';
-import { AlertTriangle, CheckCircle2, Download, ExternalLink, FolderOpen, Globe, Loader2, Monitor, Moon, RefreshCw, RotateCw, Sun } from 'lucide-react';
-import { confirmDialog, notify, promptDialog } from '@ivoryos/shared-ui';
+import { AlertTriangle, CheckCircle2, Download, ExternalLink, FolderOpen, Loader2, Monitor, Moon, RefreshCw, RotateCw, Sun } from 'lucide-react';
+import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { DesktopApi, Snapshot, UpdateStatus } from '@/desktop';
 import PythonEnvironment from './PythonEnvironment';
 import { Button, cardClass } from './ui';
@@ -18,11 +18,6 @@ export default function SettingsPanel({ api, snap }: {
   const isMac = snap.platform === 'darwin';
   const mod = isMac ? '⌘' : 'Ctrl';
 
-  const setHub = async () => {
-    const url = await promptDialog('The Hub website the launcher links to (your profile, contributing a driver). The Automation Hub catalog itself is read from its database, not from this address. Leave empty for ivoryos.ai.', { title: 'Hub address', defaultValue: snap.hubUrl });
-    if (url !== null && url !== undefined) api.setHubUrl(url.trim()).catch(e => notify(e.message, { tone: 'error' }));
-  };
-
   return (
     <div className="p-6 max-w-3xl space-y-5">
       <h2 className="text-xl font-semibold">Settings</h2>
@@ -31,7 +26,7 @@ export default function SettingsPanel({ api, snap }: {
         {/* One theme for the whole app: the launcher, every deck's page and Cloud follow it. */}
         <div className="flex gap-2">
           {([['system', Monitor, 'System'], ['light', Sun, 'Light'], ['dark', Moon, 'Dark']] as const).map(([value, Icon, label]) => (
-            <button key={value} type="button" onClick={() => api.setTheme(value).catch(e => notify(e.message, { tone: 'error' }))} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${(snap.theme || 'system') === value ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300 dark:border-indigo-500/40' : 'border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/5'}`}>
+            <button key={value} type="button" onClick={() => api.setTheme(value).catch(e => notify(e.message, { tone: 'error' }))} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${(snap.theme || 'system') === value ? 'border-accent-tint bg-accent-soft text-accent-fg' : 'border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/5'}`}>
               <Icon className="w-4 h-4" /> {label}
             </button>
           ))}
@@ -39,15 +34,23 @@ export default function SettingsPanel({ api, snap }: {
         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Every deck&apos;s page and Cloud use it too. System follows your computer.</p>
       </Section>
 
+      {/* A release without Cloud (snap.cloudComingSoon) has nothing to be "Cloud only" for. */}
+      {!snap.cloudComingSoon && <Section title="Decks">
+        <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input type="checkbox" checked={!!snap.cloudOnly} onChange={e => api.setCloudOnly(e.target.checked).catch(err => notify(err.message, { tone: 'error' }))} className="accent-gray-900 dark:accent-white" />
+          Cloud only: hide decks and the Hub, and skip setting up Python
+        </label>
+      </Section>}
+
       {snap.tray?.available && !isMac && (
         <Section title="Window">
           <div className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200">
             <label className="flex items-start gap-2">
-              <input type="checkbox" className="accent-indigo-600 mt-0.5" checked={snap.tray.minimizeToTray} onChange={e => api.setWindowPref('minimizeToTray', e.target.checked)} />
+              <input type="checkbox" className="accent-accent mt-0.5" checked={snap.tray.minimizeToTray} onChange={e => api.setWindowPref('minimizeToTray', e.target.checked)} />
               <span>Minimize to the system tray<span className="block text-xs text-gray-500 dark:text-gray-400">The window leaves the taskbar; click the IvoryOS icon in the tray to bring it back.</span></span>
             </label>
             <label className="flex items-start gap-2">
-              <input type="checkbox" className="accent-indigo-600 mt-0.5" checked={snap.tray.closeToTray} onChange={e => api.setWindowPref('closeToTray', e.target.checked)} />
+              <input type="checkbox" className="accent-accent mt-0.5" checked={snap.tray.closeToTray} onChange={e => api.setWindowPref('closeToTray', e.target.checked)} />
               <span>Keep running in the tray when the window is closed<span className="block text-xs text-gray-500 dark:text-gray-400">Decks keep running. Quit from the tray icon&apos;s menu stops them. Off: closing the window quits IvoryOS and stops every deck.</span></span>
             </label>
           </div>
@@ -58,18 +61,10 @@ export default function SettingsPanel({ api, snap }: {
         <UpdateRow api={api} update={snap.update} />
         {snap.update.state !== 'unsupported' && !snap.update.manual && (
           <label className="mt-3 flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
-            <input type="checkbox" checked={snap.autoUpdate} onChange={e => api.setAutoUpdate(e.target.checked)} className="accent-indigo-600" />
+            <input type="checkbox" checked={snap.autoUpdate} onChange={e => api.setAutoUpdate(e.target.checked)} className="accent-accent" />
             Download new versions automatically (they install when you restart the app)
           </label>
         )}
-      </Section>
-
-      <Section title="Drivers">
-        <div className="flex items-center gap-3 text-sm">
-          <Globe className="w-4 h-4 text-gray-400" />
-          <span className="flex-1">Hub website: <span className="font-mono">{snap.hubUrl}</span></span>
-          <Button small onClick={setHub}>Change</Button>
-        </div>
       </Section>
 
       <Section title="Python">
@@ -138,13 +133,13 @@ export function UpdateRow({ api, update }: { api: DesktopApi; update: UpdateStat
     <div className="flex items-center gap-3 text-sm">
       {s === 'checking' || s === 'downloading' ? <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
         : s === 'error' ? <AlertTriangle className="w-4 h-4 text-amber-500" />
-          : s === 'ready' || s === 'available' ? <Download className="w-4 h-4 text-indigo-500" />
+          : s === 'ready' || s === 'available' ? <Download className="w-4 h-4 text-gray-700 dark:text-gray-200" />
             : <CheckCircle2 className="w-4 h-4 text-gray-300 dark:text-gray-600" />}
       <div className="flex-1">
         <div>IvoryOS {update.current}</div>
         <div className="text-xs text-gray-500 dark:text-gray-400">{line}</div>
         {s === 'downloading' && (
-          <div className="mt-1 h-1 rounded bg-gray-100 dark:bg-white/10 overflow-hidden"><div className="h-full bg-indigo-500" style={{ width: `${update.percent ?? 0}%` }} /></div>
+          <div className="mt-1 h-1 rounded bg-gray-100 dark:bg-white/10 overflow-hidden"><div className="h-full bg-accent" style={{ width: `${update.percent ?? 0}%` }} /></div>
         )}
       </div>
       {s === 'ready' && <Button small tone="primary" onClick={async () => {

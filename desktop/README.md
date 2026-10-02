@@ -21,14 +21,23 @@ shows the edge's own web UI. The app sets up Python, keeps the edge running, and
 ## The launcher
 
 The app opens on the **launcher**: a list of saved **profiles**, each one way of starting an edge,
-in the spirit of a `launch.json`. Several can run at once on different ports.
+in the spirit of a `launch.json`. Several can run at once on different ports. With no profile
+yet it shows a welcome page instead: **Try the example** (a simulated lab, `src/example.js`,
+written into `<home>/example/` as a script profile with its own data folder), **Add a deck**
+(empty, or from a Python script you have) and the Automation Hub, plus sign in / sign up, none
+of it required. The sidebar keeps the same two actions under the deck list, above Cloud.
 
 | Kind | What it runs | Where instruments are configured |
 |---|---|---|
 | **Deck** | `python -m ivoryos_edge --deck deck.json` | In the launcher: the Instruments tab edits each one's arguments (COM port, IP, …), switches it off, or adds one from the Hub. |
 | **Python script** | Any script ending in `ivoryos_edge.run(__name__)`, such as `example/demo.py` | In the script. Read a port from an environment variable (`os.environ.get("PUMP_PORT", "COM3")`) and set the variable in the profile's Configuration tab. |
 
-For each profile the launcher shows its state, Start / Stop / Restart / **Open**, and a live log.
+For each profile the launcher shows its state, Start (green) / Stop (red) / Restart / **Open**,
+and a live log. A script profile also has a **Code** tab: the script itself, editable in place,
+with Save and **Save and restart**, since a deck script is usually one short file and the loop
+that matters is edit, save, restart. The launcher reloads an edge's open tab whenever that edge
+comes back after a restart (an install, a deck edit, Restart), so the tab always shows the edge
+that is running.
 Open shows the edge's UI as a **tab in the launcher window** (a `WebContentsView` laid under the
 tab bar, one per open profile), so the app is one window however many decks run. ↗ opens the
 same page in the system browser; the edge is an ordinary web server either way. A deck profile also shows whether each instrument loaded,
@@ -55,8 +64,8 @@ npm run smoke        # boot headless, start the first profile, check the launche
 Development uses the repository directly: the edge is installed as an editable package, so a
 Python change applies on the next Restart, and the UI comes from `frontend/out`. `uv` must be
 installed. `IVORYOS_DESKTOP_HOME=/some/folder npm start` uses a separate profile folder;
-`IVORYOS_HUB_URL=http://localhost:3000` points "Add from Hub" at a local Hub (also settable in the
-launcher header).
+`IVORYOS_HUB_URL=http://localhost:3000` points the launcher's Hub website links at a local Hub, for
+development only: the Hub is one central service and the app has no setting for its address.
 
 ## What lives where
 
@@ -70,6 +79,7 @@ Everything is in the app's per-user folder (`~/Library/Application Support/Ivory
 | `profiles/<id>/data/` | That deck's runs, workflows and Cloud settings (`IVORYOS_DATA_DIR`). |
 | `runtime/venv/` | The Python environment every profile runs in. uv creates it on first launch and downloads Python if the machine has none. |
 | `logs/<id>.log` | Each profile's edge output, kept across restarts. |
+| `example/` | The example lab's script and simulated drivers (from **Try the example**), plus its `data/`. |
 
 A launcher from before profiles existed kept one deck in `data/`; it becomes the first profile.
 
@@ -82,9 +92,11 @@ demo deck written that way.
 An **install manifest** is a deck file describing only what to add. Drivers reach a deck three
 ways, all through the same install path:
 
-- **Add from Hub** on a deck's Instruments tab: search the Hub's drivers, fill in the settings
-  form the Hub provides for that driver (connection, port, init arguments), and add. The Hub
-  turns the choice into a deck entry (`/api/catalog/deck-entry` in the Hub repo).
+- **Add from Hub** on a deck's Instruments tab, or **Automation Hub** in the sidebar: search the
+  Hub's drivers, fill in the settings form the Hub provides for that driver (connection, port,
+  init arguments), and add. With no deck yet, the first add asks for a deck name and creates
+  the deck it lands on. The Hub turns the choice into a deck entry (`/api/catalog/deck-entry`
+  in the Hub repo).
 - **Open in IvoryOS** on the Hub's build page: the whole cart, as an
   `ivoryos://install?deck=<base64url JSON>` link. The launcher asks which deck to install into.
   `ivoryos://install?manifest=https://…` (a manifest by URL) works too.

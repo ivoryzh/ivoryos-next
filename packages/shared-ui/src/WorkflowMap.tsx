@@ -153,7 +153,7 @@ function RepeatPill({ batch, perGroup, lastGroup, groups, rows }: {
     return (
       <span
         title={`Runs once for each batch${groups > 1 ? ` — ${groups} times in all` : ''}, with the values from that batch's first row.`}
-        className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-bold bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-500/15 dark:text-teal-300 dark:border-teal-500/30"
+        className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-bold bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/15 dark:text-purple-300 dark:border-purple-500/30"
       >
         <Layers className="w-3 h-3" />
         ×1
@@ -165,7 +165,7 @@ function RepeatPill({ batch, perGroup, lastGroup, groups, rows }: {
   return (
     <span
       title={`Runs once for each row ${groups > 1 ? 'in a batch' : ''} before the next step starts — ${rows} times in all${uneven ? `; the last batch has ${lastGroup} row${lastGroup === 1 ? '' : 's'}` : ''}.`}
-      className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-bold bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:border-indigo-500/30"
+      className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-bold bg-gray-100 dark:bg-white/10 text-gray-900 dark:text-white border-gray-200 dark:border-white/15 dark:bg-white/10 dark:text-white dark:border-white/20"
     >
       <Repeat className="w-3 h-3" />
       ×{perGroup}{uneven ? '*' : ''}
@@ -343,7 +343,7 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
     if (!result || !mainSteps.length) return null;
     const passes = groups.length;
     const iterationPill = !loops ? oncePill : (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-600 text-white">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-accent-soft text-accent-fg">
         <Repeat className="w-3 h-3" />
         {passes > 1 ? `${passes} batches` : `${rows} row${rows === 1 ? '' : 's'}`}
       </span>
@@ -388,9 +388,9 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
         ) : (
           // The loop is drawn, not described: a frame around exactly the steps that repeat, with
           // what it repeats over written on the frame itself. Prep and cleanup sit outside it.
-          <div className="rounded-xl border-2 border-dashed border-indigo-200 dark:border-indigo-500/30 bg-indigo-50/30 dark:bg-indigo-500/[0.04] p-2">
+          <div className="rounded-xl border-2 border-dashed border-gray-200 dark:border-white/15 dark:border-white/20 bg-gray-100/30 dark:bg-white/10 dark:bg-white/[0.04] p-2">
             <div className="space-y-1">{renderSteps('sequence', mainSteps)}</div>
-            <div className="mt-2 pt-2 border-t border-dashed border-indigo-200 dark:border-indigo-500/30 flex flex-wrap items-center gap-1.5 text-[11px] text-indigo-700 dark:text-indigo-300">
+            <div className="mt-2 pt-2 border-t border-dashed border-gray-200 dark:border-white/15 dark:border-white/20 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-900 dark:text-white">
               <Repeat className="w-3.5 h-3.5 shrink-0" />
               {passes > 1 ? (
                 <>
@@ -398,7 +398,7 @@ export function WorkflowMap({ isOpen, onClose, fetchExpansion, spreadsheet, conf
                   {groups.map(group => (
                     <span
                       key={group.index}
-                      className="px-2 py-0.5 rounded-full bg-white dark:bg-black/30 border border-indigo-200 dark:border-indigo-500/30"
+                      className="px-2 py-0.5 rounded-full bg-white dark:bg-black/30 border border-gray-200 dark:border-white/15 dark:border-white/20"
                     >
                       {/* "rows 5–5" reads like a typo; a remainder batch of one is common. */}
                       {group.firstRow === group.lastRow ? `row ${group.firstRow}` : `rows ${group.firstRow}–${group.lastRow}`}

@@ -84,6 +84,21 @@ function cleanDeviceName(input) {
 }
 
 /**
+ * Whether a device name is free in one workspace. The lasting id is a device's identity (below);
+ * the name is what people pick it by in the toolbox, the canvas and every list, so within one
+ * workspace no two devices share one, compared as a person reads them (case and runs of spaces
+ * ignored). `taken` is every name already claimed there as {id, name}: its devices, and approvals
+ * not yet collected. A device never collides with its own name (`selfId`), so re-pairing or
+ * renaming it to the same name is fine. Returns the clashing entry, or null.
+ */
+function nameConflict(name, taken, selfId) {
+  const key = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const wanted = key(name);
+  if (!wanted) return null;
+  return (taken || []).find((t) => key(t.name) === wanted && !(selfId && String(t.id || '') === String(selfId))) || null;
+}
+
+/**
  * The edge's display of itself for the approval screen: instrument names only, a bounded number
  * of short ones. It is what a person reads to recognise their device, not data anything uses.
  */
@@ -156,5 +171,5 @@ function pollOutcome(row, nowMs = Date.now()) {
 module.exports = {
   ALPHABET, CODE_LENGTH, TTL_MS, POLL_INTERVAL_S,
   generateCode, generateSecret, hashSecret, formatCode, normalizeCode, expiryFrom,
-  cleanDeviceName, cleanInstruments, cleanDeviceId, generateDeviceId, identityDecision, pollOutcome,
+  cleanDeviceName, nameConflict, cleanInstruments, cleanDeviceId, generateDeviceId, identityDecision, pollOutcome,
 };

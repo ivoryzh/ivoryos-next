@@ -19,6 +19,7 @@ const {
 const { validateManifest, mergeIntoDeck } = require('./manifest');
 const { updateInstrument, removeInstrument, setInstrumentEnabled } = require('./deckEdit');
 const { addWorkflows } = require('./library');
+const { selectionOf, withSelection } = require('./optimizers');
 
 function portIsFree(port) {
     return new Promise((resolve) => {
@@ -36,8 +37,13 @@ class ProfileManager extends EventEmitter {
      * @param {() => Promise<import('./runtime').PythonRuntime>} opts.getRuntime  resolves once Python is ready
      * @param {string|null} [opts.frontendDir]      the web UI every edge should serve
      */
-    constructor({ home, getRuntime, frontendDir = null }) {
+    /**
+     * @param {boolean} [opts.cloudComingSoon]  a release build where Cloud is not offered yet: its
+     *   decks hide their Cloud pages (IVORYOS_CLOUD_COMING_SOON) and Cloud-only mode is off.
+     */
+    constructor({ home, getRuntime, frontendDir = null, cloudComingSoon = false }) {
         super();
+        this.cloudComingSoon = !!cloudComingSoon;
         this.home = home;
         this.getRuntime = getRuntime;
         this.frontendDir = frontendDir;
@@ -182,6 +188,21 @@ class ProfileManager extends EventEmitter {
     }
 
     /**
+     * Someone who only uses Cloud: the launcher shows Cloud and the account, not decks or the Hub,
+     * and the app never prepares Python (a download of its own on first launch, for nothing).
+     * Decks already set up are kept, just hidden and not started, until this is turned off.
+     */
+    get cloudOnly() {
+        // Kept as saved, but not in force while Cloud is not offered.
+        return !this.cloudComingSoon && !!this.store.cloudOnly;
+    }
+
+    setCloudOnly(on) {
+        this.store.cloudOnly = !!on;
+        this._save();
+    }
+
+    /**
      * Automation Hub items this account starred ('module:12', 'platform:4', 'plugin:3',
      * 'template:9'), for the browser's Starred view. Kept per account on this computer: two people
      * sharing a bench PC each get their own, and signing out shows the signed-out list.
@@ -289,7 +310,7 @@ class ProfileManager extends EventEmitter {
                 throw new Error(`Port ${profile.port} is in use by another program. Stop it, or give this profile another port.`);
             }
 
-            const cmd = commandFor(profile, { python: runtime.python, frontendDir: this.frontendDir, cloudUrl: this.store.cloudUrl || null });
+            const cmd = commandFor(profile, { python: runtime.python, frontendDir: this.frontendDir, cloudUrl: this.store.cloudUrl || null, cloudComingSoon: this.cloudComingSoon });
             const supervisor = new EdgeSupervisor({ ...cmd, logFile: this.logFile(id) });
             this.running.set(id, { supervisor });
             supervisor.on('log', (line) => this.emit('log', id, line));
@@ -404,6 +425,36 @@ class ProfileManager extends EventEmitter {
         }
         if (wasRunning) await this._start(id);
         return { added: merged.added, replaced: merged.replaced, pluginsAdded: merged.pluginsAdded };
+    }
+
+    /**
+     * Choose a deck's optimizer backends (optimizers.js): `selection` is {id: version | null}.
+     * Installed the way the Hub's drivers are: the deck's whole package list in one resolution
+     * (a conflict is refused before anything changes), the deck written only once it installed,
+     * and a running deck restarted to load it. Taking one out of the deck leaves it installed,
+     * since the decks share one environment.
+     */
+    setOptimizers(id, selection) {
+        return this._exclusive(id, async () => {
+            const profile = this._deckProfile(id);
+            const deck = readDeckFile(profile.deck);
+            const packages = withSelection(deck.packages || [], selection);
+            const wasRunning = this.running.has(id);
+            await this._stop(id);
+            try {
+                this._setStatus(id, { state: 'installing', message: 'Installing optimizers…' });
+                const runtime = await this.getRuntime();
+                await runtime.ensurePackages(packages, { key: id, onProgress: (message) => this._setStatus(id, { message }) });
+                writeDeckFile(profile.deck, { ...deck, packages });
+                this._setStatus(id, { state: 'stopped', message: 'Installed' });
+            } catch (e) {
+                this._setStatus(id, { state: 'error', message: `Install failed: ${e.message}`, error: e.message, logTail: e.output || '' });
+                if (wasRunning) await this._start(id).catch(() => {});
+                throw e;
+            }
+            if (wasRunning) await this._start(id);
+            return selectionOf(packages);
+        });
     }
 
     // --- the workflow library ---------------------------------------------------------------

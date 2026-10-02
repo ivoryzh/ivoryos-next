@@ -24,6 +24,11 @@ type Settings = {
   pairing: Pairing | null;
   paused?: boolean;
   device_id?: string | null;
+  /** Whether saved workflows go to Cloud by themselves ('always') or only on Sync now ('manual'). */
+  sync_workflows?: 'always' | 'manual';
+  /** When workflows were last sent since this edge started (epoch seconds), or null. */
+  last_workflow_sync?: number | null;
+  workflow_count?: number;
 };
 
 /**
@@ -82,12 +87,18 @@ export default function CloudSettingsPage() {
   const cancelPairing = () => call('DELETE', '/api/cloud-settings/pair');
   // Pause: stay paired, stop connecting (Cloud shows it paused). Resume: reconnect, no pairing.
   const pause = () => call('POST', '/api/cloud-settings/pause');
+  // Workflows: sent to Cloud by themselves, or only when asked. The instruments are always sent.
+  const setSyncMode = (mode: 'always' | 'manual') => call('POST', '/api/cloud-settings/sync-mode', { mode });
+  const syncNow = async () => {
+    const result = await call('POST', '/api/cloud-settings/sync-now');
+    if (result) await notify(`Sent ${result.sent} workflow${result.sent === 1 ? '' : 's'} to Cloud.`, { title: 'Workflows synced' });
+  };
   const resume = () => call('POST', '/api/cloud-settings/resume');
   // Remove: leave Cloud for good. Cloud forgets this device; it keeps its id, so pairing again
   // later reconnects the same device.
   const remove = async () => {
     const ok = await confirmDialog(
-      'Remove this edge from Cloud? Cloud forgets it and it stops syncing; its past runs stay on Cloud. '
+      'Remove this edge from Cloud? Cloud forgets it and it stops syncing; its past runs and the workflows it sent stay on Cloud as a record. '
       + 'This edge forgets its credentials, so it can pair with any Cloud. To step away for a while instead, use Pause.',
       { title: 'Remove from Cloud?', confirmLabel: 'Remove', tone: 'danger' },
     );
@@ -99,7 +110,7 @@ export default function CloudSettingsPage() {
   };
 
   const state = settings?.connection_state || 'disconnected';
-  const dot = settings?.paused ? 'bg-indigo-400' : state === 'connected' ? 'bg-green-500' : state === 'connecting' || state === 'reconnecting' ? 'bg-amber-500 animate-pulse'
+  const dot = settings?.paused ? 'bg-gray-500' : state === 'connected' ? 'bg-green-500' : state === 'connecting' || state === 'reconnecting' ? 'bg-amber-500 animate-pulse'
     : state === 'error' || state === 'conflict' ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600';
   const label = !settings?.paired ? 'Not paired' : settings.paused ? 'Paused' : state === 'connected' ? 'Connected' : state === 'connecting' ? 'Connecting…'
     : state === 'reconnecting' ? 'Reconnecting…' : state === 'conflict' ? 'Identity in use elsewhere' : state === 'error' ? 'Connection failed' : 'Disconnected';
@@ -110,7 +121,7 @@ export default function CloudSettingsPage() {
       <Sidebar />
 
       <main className="flex-1 flex flex-col h-full w-full overflow-y-auto">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-8 bg-white dark:bg-black/20 z-10">
+        <header data-ivoryos-page-header="title" className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-8 bg-white dark:bg-black/20 z-10">
           <h2 className="text-base font-medium text-gray-800 dark:text-gray-200">Cloud Connect</h2>
         </header>
 
@@ -141,13 +152,13 @@ export default function CloudSettingsPage() {
             )}
 
             {pending && pairing ? (
-              <div className="p-6 rounded-xl bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-500/30 flex flex-col items-center gap-3 text-center">
-                <span className="text-xs font-semibold uppercase tracking-wider text-indigo-700 dark:text-indigo-300">Pairing code</span>
-                <span className="text-4xl font-mono font-bold tracking-[0.25em] text-indigo-700 dark:text-indigo-300">{pairing.code}</span>
+              <div className="p-6 rounded-xl bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-white/15 dark:border-white/20 flex flex-col items-center gap-3 text-center">
+                <span className="text-xs font-semibold uppercase tracking-wider text-gray-900 dark:text-white">Pairing code</span>
+                <span className="text-4xl font-mono font-bold tracking-[0.25em] text-gray-900 dark:text-white">{pairing.code}</span>
                 <p className="text-sm text-gray-600 dark:text-gray-300 max-w-md">
                   On Cloud, open <strong>Pair a device</strong> and enter this code, or follow the link. Approve it there, and this edge connects on its own.
                 </p>
-                <a href={pairing.approve_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:underline">
+                <a href={pairing.approve_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm font-medium text-accent-fg hover:underline">
                   Approve on Cloud <ExternalLink className="w-3.5 h-3.5" />
                 </a>
                 <span className="inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
@@ -164,19 +175,19 @@ export default function CloudSettingsPage() {
                   <label className="text-sm">
                     <span className="block font-medium mb-1 text-gray-700 dark:text-gray-300">Device name</span>
                     <input value={name} onChange={e => setName(e.target.value)} placeholder="This computer's name"
-                      className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                      className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50" />
                   </label>
                   <label className="text-sm">
                     <span className="block font-medium mb-1 text-gray-700 dark:text-gray-300">Cloud address</span>
                     <input value={cloudUrl} onChange={e => setCloudUrl(e.target.value)} placeholder="Hosted Cloud (leave blank)"
-                      className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                      className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50" />
                   </label>
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
                   Fill in the address only for a Cloud your lab runs itself; its Settings page shows it. The name can be changed when you approve.
                 </p>
                 <button onClick={startPairing} disabled={busy}
-                  className="px-5 py-2.5 rounded-lg font-semibold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition-colors disabled:opacity-50">
+                  className="px-5 py-2.5 rounded-lg font-semibold text-sm bg-accent hover:bg-accent-hover text-on-accent transition-colors disabled:opacity-50">
                   {busy ? 'Starting…' : 'Connect to Cloud'}
                 </button>
                 {settings?.device_id && (
@@ -192,6 +203,53 @@ export default function CloudSettingsPage() {
             )}
 
             {settings?.paired && (
+              <div className="pt-4 border-t border-gray-200 dark:border-white/10 space-y-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">Workflows on Cloud</h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    Cloud always knows this edge’s instruments. Whether it also gets the workflows saved here is up to you.
+                  </p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {([
+                    ['always', 'Send automatically', 'Every saved workflow goes to Cloud when this edge connects and each time one is saved.'],
+                    ['manual', 'Only when I choose', 'Nothing is sent until you press Sync now. Cloud keeps what it was sent before.'],
+                  ] as const).map(([mode, title, hint]) => {
+                    const on = (settings.sync_workflows || 'always') === mode;
+                    return (
+                      <button key={mode} type="button" onClick={() => !on && setSyncMode(mode)} disabled={busy} aria-pressed={on}
+                        className={`text-left rounded-lg border px-3 py-2.5 transition-colors disabled:opacity-60 ${on
+                          ? 'border-accent-tint bg-accent-soft'
+                          : 'border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/5'}`}>
+                        <span className="flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-100">
+                          <span className={`w-3 h-3 rounded-full border ${on ? 'border-accent bg-accent' : 'border-gray-400'}`} />
+                          {title}
+                        </span>
+                        <span className="block text-xs text-gray-500 dark:text-gray-400 mt-1">{hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button onClick={syncNow} disabled={busy || settings.paused || settings.connection_state !== 'connected'}
+                    title={settings.connection_state === 'connected' && !settings.paused ? 'Send every saved workflow to Cloud now' : 'This edge is not connected to Cloud right now'}
+                    className="px-4 py-2 rounded-lg font-semibold text-sm bg-gray-100 dark:bg-white/10 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-white/15 disabled:opacity-50">
+                    Sync now
+                  </button>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    {settings.workflow_count ?? 0} saved here
+                    {settings.last_workflow_sync
+                      ? ` · last sent ${new Date(settings.last_workflow_sync * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                      : (settings.sync_workflows || 'always') === 'manual' ? ' · not sent since this edge started' : ''}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400">
+                  A workflow sent here from Cloud is saved on this edge either way, and deleting one here removes Cloud’s copy.
+                </p>
+              </div>
+            )}
+
+            {settings?.paired && (
               <div className="pt-4 border-t border-gray-200 dark:border-white/10 flex flex-wrap items-center gap-3">
                 <p className="text-xs text-gray-500 dark:text-gray-400 flex-1 min-w-[16rem]">
                   {settings.paused
@@ -200,7 +258,7 @@ export default function CloudSettingsPage() {
                 </p>
                 {settings.paused ? (
                   <button onClick={resume} disabled={busy}
-                    className="px-5 py-2 rounded-lg font-semibold text-sm bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50">
+                    className="px-5 py-2 rounded-lg font-semibold text-sm bg-accent hover:bg-accent-hover text-on-accent disabled:opacity-50">
                     Resume
                   </button>
                 ) : (

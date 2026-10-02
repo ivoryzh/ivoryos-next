@@ -89,6 +89,10 @@ export type Snapshot = {
   tray: { available: boolean; minimizeToTray: boolean; closeToTray: boolean };
   /** The app's one theme: every page it shows (launcher, decks, Cloud) follows it. */
   theme: 'system' | 'light' | 'dark';
+  /** Only Cloud on this computer: no deck list, no Hub, no Python (main.js). */
+  cloudOnly?: boolean;
+  /** A release that does not offer Cloud yet: the Cloud row asks for early access instead. */
+  cloudComingSoon?: boolean;
 };
 
 /** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
@@ -201,6 +205,12 @@ export type HubPlatform = {
   templates?: HubTemplate[];
 } & HubOwned;
 
+/** An optimizer backend IvoryOS supports and the versions tested with it (desktop/src/optimizers.js). */
+export interface OptimizerChoice { id: string; name: string; package: string; versions: string[] }
+
+/** What the page knows about a failure that the report should carry. */
+export interface ReportFailure { log?: string; message?: string; output?: string; kind?: 'install' | 'start' | 'crash' }
+
 export interface DesktopApi {
   isDesktop: true;
   snapshot(): Promise<Snapshot>;
@@ -229,6 +239,23 @@ export interface DesktopApi {
   reveal(id: string, what: 'log' | 'deck' | 'data' | 'script'): Promise<void>;
   pick(kind: 'script' | 'python' | 'folder'): Promise<string | null>;
   rebuildPython(): Promise<void>;
+  /**
+   * "Send to IvoryOS": gather and redact a report about a failed start or install. Sends nothing.
+   * `failure.log` is this session's log as the page shows it; a Hub install that failed passes
+   * its message and pip output (and a null id when the new deck it made is already gone).
+   */
+  /** A deck's optimizer backends: what is offered, what the deck lists ('any' = unpinned), what is installed. */
+  /** "Cloud early access" while Cloud is not offered; fails with `output` = the Hub's contact page. */
+  joinEarlyAccess(details: { email: string; name?: string }): Promise<boolean>;
+  optimizers(id: string | null): Promise<{ catalog: OptimizerChoice[]; selected: Record<string, string | null>; installed: Record<string, string | null>; error: string | null }>;
+  /** Set them ({id: version | null}); installs with the deck's other packages and restarts a running deck. */
+  setOptimizers(id: string, selection: Record<string, string | null>): Promise<Record<string, string | null>>;
+  prepareReport(id: string | null, failure?: ReportFailure): Promise<{ details: string; kind: string; email: string | null }>;
+  /**
+   * File the report in the Hub. Fails with `output` set to a prefilled GitHub issue URL when
+   * the Hub cannot take it, so the person still has a way to send it.
+   */
+  sendReport(report: { description: string; details: string; kind: string; contactEmail: string | null }): Promise<{ id: string }>;
   deck(id: string): Promise<Deck>;
   saveInstrument(id: string, originalName: string | null, entry: DeckInstrument): Promise<Deck>;
   removeInstrument(id: string, name: string): Promise<Deck>;
@@ -237,6 +264,13 @@ export interface DesktopApi {
   /** Add workflows to a profile's library without replacing any; a name in use gets a number. */
   addWorkflows(id: string, workflows: { name: string; body: Record<string, unknown> }[]): Promise<{ requested: string; saved: string }[]>;
   installFromFile(): Promise<void>;
+  /** A script profile's file, for the Code tab. */
+  readScript(id: string): Promise<string>;
+  writeScript(id: string, text: string): Promise<void>;
+  /** The simulated example lab as a script profile (created once; returns the existing one after). */
+  createExample(): Promise<Profile>;
+  /** The absolute path of a File dropped on the launcher page. */
+  pathForFile(file: File): string;
   freeName(id: string, suggestion: string): Promise<string>;
   setHubUrl(url: string): Promise<void>;
   setCloudUrl(url: string): Promise<void>;
@@ -310,6 +344,7 @@ export interface DesktopApi {
   setWindowPref(key: 'minimizeToTray' | 'closeToTray', on: boolean): Promise<void>;
   revealData(): Promise<void>;
   setTheme(theme: 'system' | 'light' | 'dark'): Promise<void>;
+  setCloudOnly(on: boolean): Promise<void>;
   /** The sidebar's order, dragged; ids not listed keep their place after these. */
   reorderProfiles(ids: string[]): Promise<void>;
   /** Reload the active deck or Cloud tab. */

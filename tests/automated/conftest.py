@@ -1,4 +1,12 @@
 import os
+import tempfile
+
+# The tests get a data folder of their own (database, workflows, .env pairing), made fresh for each
+# run, before anything imports ivoryos_edge (paths.py reads this at import). Without it the suite
+# wrote into the developer's real ivoryos_edge.db: dozens of fixture runs ("Runnable", "filler 0")
+# appeared in Data History and on Home, some left "running", and a test server it spawned refused
+# to start beside a demo edge already holding that folder.
+os.environ["IVORYOS_DATA_DIR"] = tempfile.mkdtemp(prefix="ivoryos-tests-")
 
 # The names the in-process test clients call the app by (httpx's base_url "http://test",
 # Starlette's TestClient "testserver"). The edge refuses Host names that are not this machine's
@@ -88,6 +96,14 @@ class DummyInstrument:
         """Returns whatever it's given — no side effects, no sleep. Lets a test assert on the
         exact value a step actually received without caring what the value means."""
         return value
+
+    def fail_first_call(self) -> float:
+        """Fails the first time after `calls_seen` is reset to 0, then returns 2.0: one trial of
+        an optimization round failing while the next succeeds."""
+        self.calls_seen = getattr(self, "calls_seen", 0) + 1
+        if self.calls_seen == 1:
+            raise RuntimeError("simulated failure on the first call")
+        return 2.0
 
 import pytest_asyncio
 

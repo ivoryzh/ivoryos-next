@@ -75,12 +75,39 @@ function createSupabaseStore(url, serviceRoleKey) {
       if (error) fail(`Failed to create device row for ${deviceId}`, error);
     },
 
-    async listDevices() {
+    /** A device's display name; its id (identity) is untouched. False if there is no such device. */
+    async renameDevice(deviceId, name) {
+      const { data, error } = await supabase.from('devices').update({ name }).eq('id', deviceId).select('id');
+      if (error) fail(`Failed to rename device ${deviceId}`, error);
+      return (data || []).length > 0;
+    },
+
+    /** The hash of a device's broker secret (brokerAuth.js); used when this Cloud runs its own broker. */
+    async setBrokerCredential(deviceId, secretHash) {
+      const { error } = await supabase.from('broker_credentials')
+        .upsert({ device_id: deviceId, secret_hash: secretHash, created_at: nowIso() }, { onConflict: 'device_id' });
+      if (error) fail(`Failed to store broker credential for ${deviceId}`, error);
+    },
+
+    async getBrokerCredential(deviceId) {
+      const { data, error } = await supabase.from('broker_credentials').select('secret_hash').eq('device_id', deviceId).maybeSingle();
+      if (error) fail(`Failed to read broker credential for ${deviceId}`, error);
+      return data?.secret_hash || null;
+    },
+
+    async deleteBrokerCredential(deviceId) {
+      const { error } = await supabase.from('broker_credentials').delete().eq('device_id', deviceId);
+      if (error) fail(`Failed to delete broker credential for ${deviceId}`, error);
+    },
+
+    // A removed device's kept record (status 'removed', see archiveDevice) is left out unless
+    // asked for; only the Library, which lists the workflows kept from it, wants it.
+    async listDevices({ includeRemoved = false } = {}) {
       const { data, error } = await supabase.from('devices')
         .select('id, name, status, busy, last_seen, schema, image_updated_at')
         .order('id', { ascending: true });
       if (error) fail('Failed to fetch devices', error);
-      return (data || []).map(({ image_updated_at, ...d }) => ({ ...d, image_version: image_updated_at || null }));
+      return (data || []).filter((d) => includeRemoved || d.status !== 'removed').map(({ image_updated_at, ...d }) => ({ ...d, image_version: image_updated_at || null }));
     },
 
     /** See the LAN backend. Returns whether the device exists; `image` null removes it. */
@@ -100,6 +127,24 @@ function createSupabaseStore(url, serviceRoleKey) {
     },
 
     /** Cloud tasks not yet sent anywhere: ready but held (`pending`) or waiting on others (`blocked`). */
+    /** A task's repeat counters, for numbering an occurrence and spotting a report from an earlier one. */
+    async getTaskRepeat(runId, nodeId) {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('status, repeat_total, repeat_done, repeat_every_ms, dispatched_at')
+        .eq('run_id', runId).eq('node_id', nodeId).limit(1);
+      if (error) fail(`Failed to read repeat state for ${runId}/${nodeId}`, error);
+      return (data || [])[0] || null;
+    },
+    /** Repeating tasks that still have occurrences to run, for telling a device what is to come. */
+    async listRepeatingTasks() {
+      const { data, error } = await supabase.from('run_tasks')
+        .select('run_id, node_id, device_id, status, block, not_before, repeat_total, repeat_done, repeat_every_ms, runs(name)')
+        .gt('repeat_total', 1)
+        .in('status', ['pending', 'queued', 'running', 'waiting_input'])
+        .order('updated_at', { ascending: true });
+      if (error) fail('Failed to fetch repeating tasks', error);
+      return (data || []).map(({ runs, ...t }) => ({ ...t, run_name: runs?.name || null }));
+    },
     async listWaitingTasks() {
       const { data, error } = await supabase.from('run_tasks')
         .select('run_id, node_id, device_id, status, block, not_before, runs(name)')
@@ -150,6 +195,18 @@ function createSupabaseStore(url, serviceRoleKey) {
       return (data || []).map(({ runs, ...t }) => ({ ...t, run_name: runs?.name || null }));
     },
 
+    /** Offline because it went quiet: unlike a status it sent, this must not move `last_seen`. */
+    async markDeviceOffline(deviceId) {
+      const { error } = await supabase.from('devices')
+        .update({ status: 'offline', busy: false }).eq('id', deviceId).eq('status', 'online');
+      if (error) fail(`Failed to mark ${deviceId} offline`, error);
+    },
+    async getSequence(deviceId, name) {
+      const { data, error } = await supabase.from('edge_sequences')
+        .select('device_id, name, description, body, updated_at').eq('device_id', deviceId).eq('name', name).limit(1);
+      if (error) fail(`Failed to read sequence ${deviceId}/${name}`, error);
+      return (data || [])[0] || null;
+    },
     async markStaleDevicesOffline(staleBeforeIso) {
       const { data, error } = await supabase.from('devices')
         .update({ status: 'offline' })
@@ -177,6 +234,30 @@ function createSupabaseStore(url, serviceRoleKey) {
     // named a since-removed device is still a truthful record of what actually ran. Deleted
     // explicitly rather than leaning on a cascade so both stores behave identically whatever the
     // Supabase schema's foreign keys happen to say.
+    /** Take a device out of Cloud but keep its mirrored workflows under `archiveId` (see sqlite.js). */
+    async archiveDevice(deviceId, archiveId) {
+      const { data: found, error: readErr } = await supabase.from('devices')
+        .select('name, last_seen, schema').eq('id', deviceId).limit(1);
+      if (readErr) fail(`Failed to read device ${deviceId}`, readErr);
+      const device = (found || [])[0];
+      const { count, error: countErr } = await supabase.from('edge_sequences')
+        .select('name', { count: 'exact', head: true }).eq('device_id', deviceId);
+      if (countErr) fail(`Failed to count the workflows of ${deviceId}`, countErr);
+      const keep = !!device && (count || 0) > 0;
+      if (keep) {
+        // The kept record first: edge_sequences.device_id references devices(id).
+        const { error: insErr } = await supabase.from('devices').insert({
+          id: archiveId, name: device.name || deviceId, status: 'removed', busy: false,
+          last_seen: device.last_seen, schema: device.schema,
+        });
+        if (insErr) fail(`Failed to keep a record of ${deviceId}`, insErr);
+        const { error: moveErr } = await supabase.from('edge_sequences')
+          .update({ device_id: archiveId }).eq('device_id', deviceId);
+        if (moveErr) fail(`Failed to keep the workflows of ${deviceId}`, moveErr);
+      }
+      const removed = await this.deleteDevice(deviceId);
+      return { removed, archived: keep ? archiveId : null, workflows: keep ? count : 0 };
+    },
     async deleteDevice(deviceId) {
       for (const table of ['edge_sequences', 'sequence_pushes']) {
         const { error } = await supabase.from(table).delete().eq('device_id', deviceId);
@@ -305,7 +386,7 @@ function createSupabaseStore(url, serviceRoleKey) {
 
     async listTasksByStatus(status) {
       const { data, error } = await supabase.from('run_tasks')
-        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress, repeat_done').eq('status', status)
+        .select('run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress, repeat_done, repeat_total').eq('status', status)
         .order('updated_at', { ascending: true });
       if (error) fail(`Failed to fetch ${status} tasks`, error);
       return (data || []).filter((t) => isDue(t));
@@ -547,6 +628,63 @@ function createSupabaseStore(url, serviceRoleKey) {
       const { error } = await supabase.from('cloud_config')
         .upsert({ id: 'broker', host, port, updated_at: nowIso() }, { onConflict: 'id' });
       if (error) fail('Failed to save broker config', error);
+    },
+
+    // --- named settings ----------------------------------------------------------------------
+    async getSetting(key) {
+      const { data, error } = await supabase.from('cloud_settings').select('value').eq('key', key).single();
+      if (error || !data) return null;
+      return data.value;
+    },
+
+    async setSetting(key, value) {
+      const { error } = await supabase.from('cloud_settings')
+        .upsert({ key, value: value ?? null, updated_at: nowIso() }, { onConflict: 'key' });
+      if (error) fail('Failed to save setting', error);
+    },
+
+    // --- agent tokens and proposals (src/lib/agent/) ------------------------------------------
+    async createAgentToken({ token_hash, workspace_id, user_id, label }) {
+      const { error } = await supabase.from('agent_tokens').insert({ token_hash, workspace_id, user_id: user_id || '', label: label || '', created_at: nowIso() });
+      if (error) fail('Failed to create agent token', error);
+    },
+    async resolveAgentToken(token_hash) {
+      const { data, error } = await supabase.from('agent_tokens').select('token_hash, workspace_id, user_id, label').eq('token_hash', token_hash).maybeSingle();
+      if (error || !data) return null;
+      await supabase.from('agent_tokens').update({ last_used_at: nowIso() }).eq('token_hash', token_hash);
+      return data;
+    },
+    async listAgentTokens(workspace_id) {
+      const { data, error } = await supabase.from('agent_tokens').select('token_hash, label, created_at, last_used_at').eq('workspace_id', workspace_id).order('created_at');
+      if (error) fail('Failed to list agent tokens', error);
+      return data || [];
+    },
+    async deleteAgentToken(token_hash, workspace_id) {
+      const { error } = await supabase.from('agent_tokens').delete().eq('token_hash', token_hash).eq('workspace_id', workspace_id);
+      if (error) fail('Failed to delete agent token', error);
+    },
+    async insertAgentProposal(p) {
+      const { error } = await supabase.from('agent_proposals').insert({
+        id: p.id, workspace_id: p.workspace_id, user_id: p.user_id || '', name: p.name, summary: p.summary || '', source: p.source || '',
+        spec: p.spec, graph: p.graph || null, issues: p.issues || [], questions: p.questions || [], status: 'pending', created_at: nowIso(),
+      });
+      if (error) fail('Failed to file proposal', error);
+    },
+    async listAgentProposals(workspace_id, user_id, status = 'pending', limit = 50) {
+      let q = supabase.from('agent_proposals').select('*').eq('workspace_id', workspace_id).eq('user_id', user_id).order('created_at', { ascending: false }).limit(limit);
+      if (status !== 'all') q = q.eq('status', status);
+      const { data, error } = await q;
+      if (error) fail('Failed to list proposals', error);
+      return data || [];
+    },
+    async getAgentProposal(id) {
+      const { data, error } = await supabase.from('agent_proposals').select('*').eq('id', id).maybeSingle();
+      if (error) fail('Failed to read proposal', error);
+      return data || null;
+    },
+    async decideAgentProposal(id, { status, result }) {
+      const { error } = await supabase.from('agent_proposals').update({ status, result: result || null, decided_at: nowIso() }).eq('id', id);
+      if (error) fail('Failed to decide proposal', error);
     },
 
     // --- cloud -> edge workflow pushes -----------------------------------------------------

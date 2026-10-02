@@ -64,7 +64,8 @@ test('deck entries, plugin entries and templates convert as the Hub converts the
         { packages: ['view'], plugins: ['view.plugin:plugin'], blocked: null });
 
     const wf = toEdgeWorkflow({ name: 't', script_dict: { prep: [{ instrument: 'pause', action: 'pause', args: { statement: 'Load vials' } }], script: [{ instrument: 'deck.pump', action: 'prime', args: {} }, { instrument: 'wait', action: 'wait', args: { statement: 2 } }], cleanup: [] } }, 'x');
-    assert.deepEqual(wf.prep.map((b) => [b.instrument, b.action]), [['Flow_Control', 'User_Input']]);
+    // A pause is a User input with nothing to save: it shows the message and waits for Continue.
+    assert.deepEqual(wf.prep.map((b) => [b.instrument, b.action, b.args]), [['Flow_Control', 'User_Input', { prompt: 'Load vials' }]]);
     assert.deepEqual(wf.script.map((b) => [b.instrument, b.action, b.args]), [['pump', 'prime', {}], ['Flow_Control', 'Sleep', { duration_seconds: 2 }]]);
 });
 
@@ -72,4 +73,33 @@ test('an unknown or unshared row says so', async () => {
     const c = new HubCatalog({ fetch: fakeHub({ modules }).fetch, url: 'https://hub.example', key: 'anon' });
     await assert.rejects(c.module(99), /not shared with you/);
     await assert.rejects(c.deckEntry({ moduleId: 1, name: '1bad' }), /letters, digits/);
+});
+
+test('a problem report is inserted write-only, with the session when signed in', async () => {
+    const calls = [];
+    const fetch = async (url, init) => { calls.push({ url, init }); return { ok: true, status: 201, text: async () => '' }; };
+    const hub = new HubCatalog({ fetch, url: 'https://hub.example/', key: 'anon', token: async () => 'user-jwt' });
+    const res = await hub.fileReport({ id: 'abc', title: 't', body: 'b' });
+    assert.deepEqual(res, { id: 'abc' });
+    assert.equal(calls[0].url, 'https://hub.example/rest/v1/problem_reports');
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer user-jwt');
+    // No read-back: clients have no select policy on the table.
+    assert.equal(calls[0].init.headers.Prefer, 'return=minimal');
+});
+
+test('a Hub without the reports table says so, distinctly', async () => {
+    const fetch = async () => ({ ok: false, status: 404, text: async () => JSON.stringify({ code: 'PGRST205', message: 'Could not find the table' }) });
+    const hub = new HubCatalog({ fetch, url: 'https://hub.example', key: 'anon' });
+    await assert.rejects(hub.fileReport({ id: 'x' }), (e) => e.code === 'unavailable' && /cannot take reports/.test(e.message));
+});
+
+test('an early-access request is a contact inquiry, insert only', async () => {
+    const calls = [];
+    const fetch = async (url, init) => { calls.push({ url, init }); return { ok: true, status: 201, text: async () => '' }; };
+    const hub = new HubCatalog({ fetch, url: 'https://hub.example', key: 'anon' });
+    await hub.contactInquiry({ name: 'Ada', email: 'ada@example.org', message: 'Cloud early access' });
+    assert.equal(calls[0].url, 'https://hub.example/rest/v1/contact_inquiries');
+    assert.deepEqual(JSON.parse(calls[0].init.body), { name: 'Ada', email: 'ada@example.org', message: 'Cloud early access' });
+    assert.equal(calls[0].init.headers.Prefer, 'return=minimal');
 });

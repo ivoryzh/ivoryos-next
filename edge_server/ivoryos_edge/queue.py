@@ -126,6 +126,160 @@ def scoped_context(context: Dict[str, Any], row_contexts: Dict[int, Dict[str, An
     return {**context, **row_contexts[row]}
 
 
+FLOW_CONTROL_INSTRUMENTS = ("Flow Control", "Flow_Control")
+
+
+def step_saved_names(step: dict) -> set:
+    """The names a run step binds when it finishes: what the queue below puts in the context.
+
+    Its outputs (`_return_var`, `_return_bindings`, and a linked workflow's renames in
+    `_return_aliases`), or a User_Input step's `variable_name`.
+    """
+    params = step.get("params") or step.get("parameters") or {}
+    names = {n.strip() for n in str(params.get("_return_var") or "").split(",") if n.strip()}
+    names.update(str(b.get("var")).strip() for b in params.get("_return_bindings") or [] if isinstance(b, dict) and b.get("var"))
+    names.update(str(p[1]) for p in params.get("_return_aliases") or [] if isinstance(p, (list, tuple)) and len(p) == 2 and p[1])
+    if step.get("instrument") in FLOW_CONTROL_INSTRUMENTS and step.get("method") == "User_Input":
+        if str(params.get("variable_name") or "").strip():
+            names.add(str(params["variable_name"]).strip())
+    return names
+
+
+def attention_items(run: Optional[Dict[str, Any]], awaiting_decision: Optional[int]) -> List[Dict[str, Any]]:
+    """What in the active run needs a person now, for notifications (the desktop app, a browser):
+    a User input waiting for an answer, or a failed step waiting for retry, skip or stop.
+
+    Each item has a `key` that names that moment, so a listener announces it once: the input step,
+    or the failed step and how many times it has failed (a retry that fails again is a new moment).
+    Decided here so every listener announces the same things.
+    """
+    if not run:
+        return []
+    steps = run.get("steps") or []
+    name = run.get("name") or f"Run {run.get('id')}"
+    items = []
+    if run.get("status") == "waiting_input":
+        step = next((s for s in steps if s.get("status") == "waiting_input"), None)
+        if step:
+            outputs = step.get("outputs") or {}
+            paused = outputs.get("input_type") == "none"  # a User input with nothing to save: a pause
+            items.append({
+                "key": f"input:{run['id']}:{step.get('id')}", "kind": "input", "run_id": run["id"], "run_name": name,
+                "title": "Paused for you" if paused else "Input needed",
+                "body": str(outputs.get("prompt") or ("The run waits for you to continue." if paused else "A step is waiting for your answer.")),
+            })
+    if awaiting_decision == run.get("id"):
+        step = next((s for s in steps if s.get("status") == "error"), None)
+        if step:
+            failures = len((step.get("outputs") or {}).get("attempts") or []) or 1
+            first_line = str(step.get("error") or "").split("\n", 1)[0]
+            items.append({
+                "key": f"error:{run['id']}:{step.get('id')}:{failures}", "kind": "error", "run_id": run["id"], "run_name": name,
+                "title": "A step failed",
+                "body": f"{step.get('instrument')}.{step.get('method')}: {first_line}".strip(": "),
+            })
+    return items
+
+
+def step_phase(step) -> str:
+    """prep, main or cleanup: expand_workflow_blocks stamps every step of a run with `_phase`."""
+    params = (step.get("params") if isinstance(step, dict) else getattr(step, "parameters", None)) or {}
+    return params.get("_phase") or "main"
+
+
+def graceful_stop_here(steps: list, index: int, batch_size: int = 1) -> bool:
+    """Whether a graceful stop ends the main block before `steps[index]`.
+
+    True for a main step that begins an iteration not yet started: a spreadsheet row, or its
+    batch when rows run in batches (`_row // batch_size`; within a batch the walk interleaves its
+    rows, so the batch is the iteration). A run without rows (a plain run) has no iterations, so
+    it stops after the step it was on. Prep is always finished first.
+    """
+    step = steps[index]
+    if step_phase(step) != "main":
+        return False
+    row = (step.parameters or {}).get("_row")
+    if row is None:
+        return True
+    size = max(1, int(batch_size or 1))
+    started = {
+        int(s.parameters["_row"]) // size
+        for s in steps[:index]
+        if step_phase(s) == "main" and s.status != "pending" and (s.parameters or {}).get("_row") is not None
+    }
+    return int(row) // size not in started
+
+
+def skip_after_graceful_stop(steps: list, index: int, cleanup: bool) -> int:
+    """Mark what a graceful stop leaves out: every pending main step from `index` on, and the
+    cleanup too unless it is wanted. Returns how many main steps it left out."""
+    left_out = 0
+    for s in steps[index:]:
+        if s.status != "pending":
+            continue
+        phase = step_phase(s)
+        if phase == "main" or (phase == "cleanup" and not cleanup):
+            s.status = "skipped"
+            left_out += phase == "main"
+    return left_out
+
+
+def unproduced_references(steps: list) -> list:
+    """Every '#name' an instrument step will ask substitute_workflow_vars for that no step
+    before it saves, as a sentence each.
+
+    Such a run cannot succeed: the step raises when it is reached. It used to be found out
+    there, after every step before it had already run (two pumps dispensed, then "'#test' is
+    not available yet"), so start_run refuses it before anything moves. Only what the queue
+    substitutes is checked: an instrument step's whole-value '#name' arguments. Free text
+    (a Comment, a User_Input prompt) is interpolated and leaves an unknown name as it is, and a
+    condition is an expression of its own.
+    """
+    produced: set = set()
+    problems = []
+
+    def reads(value, out):
+        if isinstance(value, str):
+            name = value[1:].strip() if value.startswith("#") else ""
+            if name:
+                out.append(name)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if not str(key).startswith("_"):
+                    reads(item, out)
+        elif isinstance(value, list):
+            for item in value:
+                reads(item, out)
+
+    for number, step in enumerate(steps, start=1):
+        if step.get("instrument") not in FLOW_CONTROL_INSTRUMENTS:
+            names: list = []
+            reads(step.get("params") or step.get("parameters") or {}, names)
+            for name in dict.fromkeys(names):
+                if name not in produced:
+                    problems.append(
+                        f"Step {number} ({step.get('instrument')}.{step.get('method')}) reads #{name}, "
+                        f"but no step before it saves '{name}'."
+                    )
+        produced |= step_saved_names(step)
+    return problems
+
+
+def with_aliases(values: Dict[str, Any], aliases) -> Dict[str, Any]:
+    """Also bind each value under the names a linked workflow step renamed it to.
+
+    `aliases` is a step's `_return_aliases` (expand_workflow_blocks): ``[[inner, outer], ...]``,
+    applied in order so a rename made by a nested link and then again by its caller resolves.
+    """
+    if not aliases:
+        return values
+    out = dict(values)
+    for pair in aliases:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] in out and pair[1]:
+            out[pair[1]] = out[pair[0]]
+    return out
+
+
 def bind_values(context: Dict[str, Any], row_contexts: Dict[int, Dict[str, Any]], step, values: Dict[str, Any]) -> None:
     context.update(values)
     row = step_row(step)
@@ -202,6 +356,9 @@ def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
     done = sum(1 for s in steps if s.get("status") in _DONE_STEP_STATUSES)
 
     summary: Dict[str, Any] = {"done": done, "total": len(steps), "state": run.get("status")}
+    # When it started, by this device's clock (naive UTC, like every run time here).
+    if run.get("start_time"):
+        summary["started"] = run.get("start_time")
 
     current = next((s for s in steps if s.get("status") in ("running", "waiting_input", "error")), None) \
         or next((s for s in steps if s.get("status") == "pending"), None)
@@ -253,6 +410,7 @@ def build_cloud_result(run: Dict[str, Any]) -> Dict[str, Any]:
     device under `edgeRunId`.
     """
     params = {k: v for k, v in (run.get("parameters") or {}).items() if k not in ("cloud_run_id", "cloud_node_id")}
+    # `cloud_occurrence` stays in: it is which run of a repeated step this record is.
     steps = [{k: s.get(k) for k in _RESULT_STEP_KEYS} for s in run.get("steps") or []]
     record = {
         "edgeRunId": run.get("id"), "name": run.get("name"), "status": run.get("status"),
@@ -396,6 +554,10 @@ class WorkflowQueueManager:
         self.cancelled = False
         self.pause_event: Optional[asyncio.Event] = None
         self.error_action: Optional[str] = None
+        # The run whose failed step is waiting for a person (retry, skip or stop), if any.
+        self.awaiting_decision: Optional[int] = None
+        # A graceful stop asked for on the active run: {"cleanup": bool, "continue_queue": bool}.
+        self.graceful: Optional[Dict[str, bool]] = None
         # Cloud tasks whose runs a restart abandoned (see cleanup_zombies): reported to Cloud as
         # errors once the broker is connected, since Cloud would otherwise wait on them forever.
         self.abandoned_cloud_tasks: List[Dict[str, Any]] = []
@@ -645,6 +807,17 @@ class WorkflowQueueManager:
                 await session.commit()
                 run_id = run.id
 
+                # The queue is held after a stop or an error (_hold_queue_after) so the runs that
+                # were waiting do not start on their own. A run submitted now with nothing else
+                # waiting is someone starting it, so it goes; one submitted behind held runs waits
+                # with them for Resume queue.
+                if self.paused and self.active_run_id is None:
+                    waiting = await session.execute(
+                        select(WorkflowRun.id).where(WorkflowRun.status == "pending", WorkflowRun.id != run_id).limit(1)
+                    )
+                    if waiting.first() is None:
+                        self.resume()
+
             if not self.current_task or self.current_task.done():
                 self.paused = False
                 self.cancelled = False
@@ -657,6 +830,31 @@ class WorkflowQueueManager:
             notify_status_changed()
             return run_id
             
+    async def replace_pending_run(self, run_id: int, name: Optional[str], sequence: List[Dict[str, Any]], parameters: dict) -> None:
+        """Swap a queued run's steps and parameters for edited ones, keeping its name (unless a
+        new one is given) and its place in the queue. Refused once it has started: a run only
+        changes while it is still waiting."""
+        await self.init_asyncio()
+        async with self._runner_lock:
+            async with async_session() as session:
+                run = await session.get(WorkflowRun, run_id)
+                if not run:
+                    raise LookupError("Run not found")
+                if run.status != "pending" or self.active_run_id == run_id:
+                    raise ValueError(f"This run is {run.status if run.status != 'pending' else 'starting'} and can no longer be changed.")
+                kept = {k: v for k, v in (run.parameters or {}).items() if k == "queue_position"}
+                await session.execute(WorkflowStep.__table__.delete().where(WorkflowStep.run_id == run_id))
+                for idx, step in enumerate(sequence):
+                    session.add(WorkflowStep(
+                        run_id=run_id, sequence_index=idx, instrument=step["instrument"],
+                        method=step["method"], parameters=step.get("params", {}),
+                    ))
+                run.parameters = {**(parameters or {}), **kept}
+                if name and name.strip():
+                    run.name = name.strip()[:128]
+                await session.commit()
+        await self.broadcast_global_queue()
+
     def pause(self):
         self.paused = True
         if self.pause_event: self.pause_event.clear()
@@ -665,6 +863,64 @@ class WorkflowQueueManager:
         self.paused = False
         if self.pause_event: self.pause_event.set()
         
+    def request_graceful_stop(self, cleanup: bool, continue_queue: bool):
+        """Let the active run finish the iteration it is in (a spreadsheet row or batch, an
+        optimization trial, or for a plain run the current step), skip the rest, then run its
+        cleanup or not, and go on with the queue or hold it. A paused run is resumed so it can
+        finish the iteration."""
+        self.graceful = {"cleanup": bool(cleanup), "continue_queue": bool(continue_queue)}
+        self.resume()
+
+    async def _wait_for_error_decision(self, run_id: int, session, run, step, error: BaseException, trace: str) -> str:
+        """A step failed: record why, pause the run and the queue, and wait for a person.
+
+        Returns "retry" (the step is pending again), "skip" (it is skipped and the run goes on)
+        or "stop". Nothing is retried or skipped on its own: for a normal run and an optimization
+        alike, a failure waits for a decision. Optimizations used to follow an error_recovery
+        setting that could skip or "retry" a failed trial unattended, which on real hardware is
+        the risky choice.
+        """
+        step.status = "error"
+        step.error = str(error) + "\n" + trace
+        step.end_time = datetime.utcnow()
+        step.outputs = record_failed_attempt(step.outputs, str(error), step.start_time, step.end_time)
+        run.status = "error"
+        await session.commit()
+        self.pause()
+        self.error_action = None
+        self.awaiting_decision = run_id
+        await self.broadcast_updates(run_id)
+        try:
+            while self.error_action is None and not self.cancelled:
+                await asyncio.sleep(0.5)
+        finally:
+            self.awaiting_decision = None
+        action = "stop" if self.cancelled else self.error_action
+        self.error_action = None
+        if action == "retry":
+            step.status = "pending"
+            step.error = None
+        elif action == "skip":
+            step.status = "skipped"
+        else:
+            action = "stop"
+        step.outputs = resolve_last_attempt(step.outputs, action)
+        if action != "stop":
+            run.status = "running"
+            self.resume()
+        await session.commit()
+        await self.broadcast_updates(run_id)
+        return action
+
+    def _hold_queue_after(self, run) -> None:
+        """After a run, hold the queue (nothing else starts until Resume queue) when it ended
+        by Stop, on an error, or by a graceful stop told not to go on. Stop used to let the next
+        queued run start at once, which is the opposite of what pressing Stop means."""
+        graceful = self.graceful
+        self.graceful = None
+        if self.cancelled or run.status == "error" or (graceful and not graceful.get("continue_queue", True)):
+            self.pause()
+
     def cancel(self):
         self.cancelled = True
         if self.current_step_task and not self.current_step_task.done():
@@ -763,12 +1019,15 @@ class WorkflowQueueManager:
                 "status": "running", 
                 "active_workflow_id": self.active_run_id,
                 "queue_paused": self.paused,
+                "awaiting_decision": self.awaiting_decision,
+                "graceful_stop": self.graceful,
                 "cloud_queue": self.cloud_queue,
             }
         }
         
         if self.active_run_id:
             payload["active_run"] = await self.get_run_status(self.active_run_id)
+            payload["status"]["attention"] = attention_items(payload["active_run"], self.awaiting_decision)
         else:
             # If no active run, send the most recently completed/errored run to show final status
             async with async_session() as session:
@@ -894,6 +1153,7 @@ class WorkflowQueueManager:
                     run_id = run.id
                     self.active_run_id = run_id
                     self.cancelled = False
+                    self.graceful = None
                     
                     if run.parameters and run.parameters.get("type") == "Optimization":
                         if run.parameters.get("cloud_run_id"):
@@ -912,6 +1172,9 @@ class WorkflowQueueManager:
                     workflow_context = {}
                     # Per spreadsheet row, see scoped_context.
                     row_contexts: Dict[int, Dict[str, Any]] = {}
+                    batch_size = (run.parameters or {}).get("batch_size") or 1
+                    stopped_early = False
+                    graceful_applied = False  # the cut is made once; cleanup then runs as usual
                     index = 0
                     while index < len(steps):
                         step = steps[index]
@@ -924,6 +1187,14 @@ class WorkflowQueueManager:
                         
                         if self.cancelled:
                             break
+
+                        # A graceful stop takes effect between iterations (graceful_stop_here).
+                        if self.graceful and not graceful_applied and (graceful_stop_here(steps, index, batch_size) or step_phase(step) == "cleanup"):
+                            graceful_applied = True
+                            stopped_early = skip_after_graceful_stop(steps, index, self.graceful["cleanup"]) > 0
+                            await session.commit()
+                            await self.broadcast_updates(run_id)
+                            continue
                             
                         # Refresh step in case params were edited while paused
                         await session.refresh(step)
@@ -953,229 +1224,15 @@ class WorkflowQueueManager:
                             await self.broadcast_updates(run_id)
                         
                         try:
-                            if step.instrument in ("Flow_Control", "Flow Control"):
-                                method = step.method
-                                args = step.parameters or {}
-                                
-                                if method == "Sleep":
-                                    duration = float(args.get("duration_seconds", 0))
-                                    await asyncio.sleep(duration)
-                                    step.status = "completed"
-                                    step.end_time = datetime.utcnow()
-                                    await session.commit()
-                                    await self.broadcast_updates(run_id)
-                                    index += 1
-                                    continue
-
-                                elif method == "Comment":
-                                    message = interpolate_message(str(args.get("message", "")), scoped_context(workflow_context, row_contexts, step))
-                                    print(f"[Run {run_id}] {message}")
-                                    step.status = "completed"
-                                    step.outputs = {"message": message}
-                                    step.end_time = datetime.utcnow()
-                                    await session.commit()
-                                    await self.broadcast_updates(run_id)
-                                    index += 1
-                                    continue
-
-                                elif method == "User_Input":
-                                    var_name = (args.get("variable_name") or "").strip()
-                                    if not var_name:
-                                        raise Exception("User Input step is missing a variable name")
-                                    prompt = interpolate_message(str(args.get("prompt", "Input required")), scoped_context(workflow_context, row_contexts, step))
-                                    input_type = str(args.get("input_type") or "str").strip().lower()
-                                    if input_type not in ("str", "int", "float", "bool"):
-                                        input_type = "str"
-
-                                    step.status = "waiting_input"
-                                    # The type travels with the prompt so the UI can render the right
-                                    # control (number spinner / checkbox) instead of a bare text box.
-                                    step.outputs = {"prompt": prompt, "input_type": input_type}
-                                    run.status = "waiting_input"
-                                    event = asyncio.Event()
-                                    self.pending_input_event[run_id] = event
-                                    await session.commit()
-                                    await self.broadcast_updates(run_id)
-
-                                    await event.wait()
-                                    self.pending_input_event.pop(run_id, None)
-                                    value = self.pending_input_value.pop(run_id, None)
-
-                                    if self.cancelled:
-                                        step.status = "error"
-                                        step.error = "Cancelled while waiting for input"
-                                        step.end_time = datetime.utcnow()
-                                        await session.commit()
-                                        break
-
-                                    value = coerce_input_value(value, input_type)
-
-                                    bind_values(workflow_context, row_contexts, step, {var_name: value})
-                                    step.status = "completed"
-                                    step.outputs = {"result": value, "input_type": input_type}
-                                    step.end_time = datetime.utcnow()
-                                    run.status = "running"
-                                    await session.commit()
-                                    await self.broadcast_updates(run_id)
-                                    index += 1
-                                    continue
-
-                                elif method == "If":
-                                    condition = args.get("condition", "False")
-                                    try:
-                                        # Safe evaluation using only workflow variables
-                                        scope = scoped_context(workflow_context, row_contexts, step)
-                                        result = eval(condition, {"__builtins__": {}}, scope)
-                                    except Exception as e:
-                                        raise Exception(f"Failed to evaluate If condition: {e}")
-                                    step.outputs = condition_record(condition, result, scope)
-
-                                    if result:
-                                        # True: just proceed into the block normally
-                                        step.status = "completed"
-                                        step.end_time = datetime.utcnow()
-                                        await session.commit()
-                                        index += 1
-                                    else:
-                                        # False: skip to matching Else or End_If
-                                        depth = 0
-                                        found = False
-                                        for i in range(index + 1, len(steps)):
-                                            s = steps[i]
-                                            s.status = "skipped"
-                                            if s.instrument in ("Flow_Control", "Flow Control"):
-                                                if s.method == "If":
-                                                    depth += 1
-                                                elif s.method == "End_If":
-                                                    if depth == 0:
-                                                        s.status = "pending"
-                                                        index = i
-                                                        found = True
-                                                        break
-                                                    else:
-                                                        depth -= 1
-                                                elif s.method == "Else" and depth == 0:
-                                                    s.status = "pending"
-                                                    index = i
-                                                    found = True
-                                                    break
-                                                    
-                                        if not found:
-                                            raise Exception("Matching Else or End_If not found for If statement")
-                                            
-                                        # Mark the If statement itself as completed
-                                        step.status = "completed"
-                                        step.end_time = datetime.utcnow()
-                                        await session.commit()
-                                        
-                                elif method == "Else":
-                                    # If we hit an Else normally, it means the preceding If was True.
-                                    # So we skip to the End_If.
-                                    depth = 0
-                                    found = False
-                                    for i in range(index + 1, len(steps)):
-                                        s = steps[i]
-                                        s.status = "skipped"
-                                        if s.instrument in ("Flow_Control", "Flow Control"):
-                                            if s.method == "If":
-                                                depth += 1
-                                            elif s.method == "End_If":
-                                                if depth == 0:
-                                                    s.status = "pending"
-                                                    index = i
-                                                    found = True
-                                                    break
-                                                else:
-                                                    depth -= 1
-                                                    
-                                    if not found:
-                                        raise Exception("Matching End_If not found for Else statement")
-                                        
-                                    step.status = "completed"
-                                    step.end_time = datetime.utcnow()
-                                    await session.commit()
-                                    
-                                elif method == "End_If":
-                                    # Nothing to do, just pass
-                                    step.status = "completed"
-                                    step.end_time = datetime.utcnow()
-                                    await session.commit()
-                                    index += 1
-                                    
-                                elif method == "While":
-                                    condition = args.get("condition", "False")
-                                    try:
-                                        scope = scoped_context(workflow_context, row_contexts, step)
-                                        result = eval(condition, {"__builtins__": {}}, scope)
-                                    except Exception as e:
-                                        raise Exception(f"Failed to evaluate While condition: {e}")
-                                    # Accumulates across iterations: End_While resets this step's
-                                    # status for the next pass but leaves its outputs alone.
-                                    step.outputs = condition_record(condition, result, scope, step.outputs)
-
-                                    if result:
-                                        # Enter loop
-                                        step.status = "completed"
-                                        step.end_time = datetime.utcnow()
-                                        await session.commit()
-                                        index += 1
-                                    else:
-                                        # Skip loop
-                                        depth = 0
-                                        found = False
-                                        for i in range(index + 1, len(steps)):
-                                            s = steps[i]
-                                            s.status = "skipped"
-                                            if s.instrument in ("Flow_Control", "Flow Control"):
-                                                if s.method == "While":
-                                                    depth += 1
-                                                elif s.method == "End_While":
-                                                    if depth == 0:
-                                                        index = i + 1 # jump past the end
-                                                        found = True
-                                                        break
-                                                    else:
-                                                        depth -= 1
-                                        if not found:
-                                            raise Exception("Matching End_While not found for While statement")
-                                            
-                                        step.status = "completed"
-                                        step.end_time = datetime.utcnow()
-                                        await session.commit()
-                                        
-                                elif method == "End_While":
-                                    # Loop iteration completed, jump back to While
-                                    depth = 0
-                                    found = False
-                                    while_idx = -1
-                                    for i in range(index - 1, -1, -1):
-                                        s = steps[i]
-                                        if s.instrument in ("Flow_Control", "Flow Control"):
-                                            if s.method == "End_While":
-                                                depth += 1
-                                            elif s.method == "While":
-                                                if depth == 0:
-                                                    while_idx = i
-                                                    found = True
-                                                    break
-                                                else:
-                                                    depth -= 1
-                                                    
-                                    if not found:
-                                        raise Exception("Matching While not found for End_While statement")
-                                        
-                                    # Mark End_While complete for this iteration (optional but good)
-                                    step.status = "completed"
-                                    step.end_time = datetime.utcnow()
-                                    
-                                    # Reset statuses for the next iteration (including the While loop itself and End_While!)
-                                    for i in range(while_idx, index + 1):
-                                        steps[i].status = "pending"
-                                        
-                                    await session.commit()
-                                    index = while_idx
-                                    
-                                await self.broadcast_updates(run_id)
+                            if step.instrument in FLOW_CONTROL_INSTRUMENTS:
+                                next_index = await self._flow_control_step(
+                                    run_id, session, run, steps, index,
+                                    scope=lambda s: scoped_context(workflow_context, row_contexts, s),
+                                    bind=lambda s, values: bind_values(workflow_context, row_contexts, s, values),
+                                )
+                                if next_index is None:
+                                    break  # cancelled while waiting for input
+                                index = next_index
                                 continue
 
                             instruments = getattr(self.app.state, "instruments", {})
@@ -1208,12 +1265,12 @@ class WorkflowQueueManager:
                             step.outputs = with_attempts({"result": serialized_res}, step.outputs)
                             
                             if step.parameters and (step.parameters.get("_return_bindings") or step.parameters.get("_return_var")):
-                                bind_values(workflow_context, row_contexts, step, extract_return_values(
+                                bind_values(workflow_context, row_contexts, step, with_aliases(extract_return_values(
                                     step.parameters.get("_return_bindings"),
                                     step.parameters.get("_return_var"),
                                     serialized_res,
                                     result,
-                                ))
+                                ), step.parameters.get("_return_aliases")))
                                 
                             step.end_time = datetime.utcnow()
                             await session.commit()
@@ -1231,45 +1288,13 @@ class WorkflowQueueManager:
                             else:
                                 raise
                         except Exception as e:
-                            step.status = "error"
-                            step.error = str(e) + "\n" + traceback.format_exc()
-                            step.end_time = datetime.utcnow()
-                            step.outputs = record_failed_attempt(step.outputs, str(e), step.start_time, step.end_time)
-
-                            run.status = "error"
-                            await session.commit()
-
-                            self.pause()
-                            self.error_action = None
-                            
-                            await self.broadcast_updates(run_id)
-                            
-                            while self.error_action is None and not self.cancelled:
-                                await asyncio.sleep(0.5)
-                                
-                            if self.cancelled:
-                                break
-                                
-                            if self.error_action == "retry":
-                                step.status = "pending"
-                                step.error = None
-                                step.outputs = resolve_last_attempt(step.outputs, "retry")
-                                await session.commit()
-                                self.error_action = None
-                                self.resume()
+                            action = await self._wait_for_error_decision(run_id, session, run, step, e, traceback.format_exc())
+                            if action == "retry":
                                 continue
-                            elif self.error_action == "skip":
-                                step.status = "skipped"
-                                step.outputs = resolve_last_attempt(step.outputs, "skip")
-                                await session.commit()
+                            if action == "skip":
                                 index += 1
-                                self.error_action = None
-                                self.resume()
                                 continue
-                            else:
-                                step.outputs = resolve_last_attempt(step.outputs, "stop")
-                                await session.commit()
-                                break # Unknown action or cancel
+                            break
                     
                     # Update run status
                     run = await session.get(WorkflowRun, run_id)
@@ -1280,16 +1305,15 @@ class WorkflowQueueManager:
                     else:
                         run.status = "completed"
                     issues = run_issues([s.as_dict() for s in steps])
+                    if stopped_early:
+                        issues["stopped_early"] = 1
                     if issues:
                         run.parameters = {**(run.parameters or {}), "_issues": issues}
                     run.end_time = datetime.utcnow()
                     await session.commit()
                     await self.publish_cloud_result(run.id)
                     report_run_finished(run, issues)
-                    
-                    if not self.cancelled:
-                        await self.pause_event.wait()
-                        
+                    self._hold_queue_after(run)
                     self.active_run_id = None
                     await self.broadcast_updates(run_id)
                     
@@ -1308,6 +1332,177 @@ class WorkflowQueueManager:
                 self.active_run_id = None
                 await asyncio.sleep(1)
 
+    async def _flow_control_step(self, run_id: int, session, run, steps: list, index: int, scope, bind) -> Optional[int]:
+        """Run the Flow Control step at `steps[index]` and return the index to go on from, or None
+        when the run was stopped while it waited (for input, or in a Sleep).
+
+        One implementation for a normal run and for an optimization's prep, trials and cleanup.
+        An optimization used to treat every step as an instrument, so a Sleep, a User input or an
+        If in its workflow stopped it with "Instrument Flow_Control not found".
+
+        `scope(step)` is what a condition or a message may read; `bind(step, values)` saves a User
+        input's answer where later steps read it. A condition that cannot be evaluated, or a block
+        with no matching end, raises: the caller decides what a failed step means for its run.
+        An If or While that skips steps marks them "skipped", and End_While sets its loop's steps
+        back to "pending", so a caller walks only steps that are "pending" (or "error").
+        """
+        step = steps[index]
+        method = step.method
+        args = step.parameters or {}
+
+        def find_forward(opener, closer, stop_at_else=False):
+            """The index of the matching `closer` (or a same-level Else), marking what it passes skipped."""
+            depth = 0
+            for i in range(index + 1, len(steps)):
+                s = steps[i]
+                s.status = "skipped"
+                if s.instrument in FLOW_CONTROL_INSTRUMENTS:
+                    if s.method == opener:
+                        depth += 1
+                    elif s.method == closer:
+                        if depth == 0:
+                            return i
+                        depth -= 1
+                    elif stop_at_else and s.method == "Else" and depth == 0:
+                        return i
+            return None
+
+        async def done(outputs=None):
+            step.status = "completed"
+            if outputs is not None:
+                step.outputs = outputs
+            step.end_time = datetime.utcnow()
+            await session.commit()
+            await self.broadcast_updates(run_id)
+
+        if method == "Sleep":
+            # Waited in short slices so Stop ends it at once: one long sleep left a stopped run
+            # "cancelling" until the wait ran out, which for a long incubation is hours.
+            loop = asyncio.get_running_loop()
+            until = loop.time() + float(args.get("duration_seconds", 0))
+            while not self.cancelled and (remaining := until - loop.time()) > 0:
+                await asyncio.sleep(min(0.5, remaining))
+            if self.cancelled:
+                step.status = "error"
+                step.error = "Stopped during the wait"
+                step.end_time = datetime.utcnow()
+                await session.commit()
+                return None
+            await done()
+            return index + 1
+
+        if method == "Comment":
+            message = interpolate_message(str(args.get("message", "")), scope(step))
+            print(f"[Run {run_id}] {message}")
+            await done({"message": message})
+            return index + 1
+
+        if method == "User_Input":
+            # With no name to save under it is a pause: the message waits for Continue and nothing
+            # is asked or saved (the original IvoryOS's `pause`). `input_type` "none" tells the UI.
+            var_name = (args.get("variable_name") or "").strip()
+            prompt = interpolate_message(str(args.get("prompt", "Input required")), scope(step))
+            input_type = str(args.get("input_type") or "str").strip().lower()
+            if input_type not in ("str", "int", "float", "bool"):
+                input_type = "str"
+            if not var_name:
+                input_type = "none"
+
+            step.status = "waiting_input"
+            # The type travels with the prompt so the UI can render the right control (number
+            # spinner / checkbox) instead of a bare text box.
+            step.outputs = {"prompt": prompt, "input_type": input_type}
+            run.status = "waiting_input"
+            event = asyncio.Event()
+            self.pending_input_event[run_id] = event
+            await session.commit()
+            await self.broadcast_updates(run_id)
+
+            await event.wait()
+            self.pending_input_event.pop(run_id, None)
+            value = self.pending_input_value.pop(run_id, None)
+
+            if self.cancelled:
+                step.status = "error"
+                step.error = "Cancelled while waiting for input"
+                step.end_time = datetime.utcnow()
+                await session.commit()
+                return None
+
+            run.status = "running"
+            if not var_name:
+                await done({"prompt": prompt, "input_type": input_type, "acknowledged": True})
+                return index + 1
+            value = coerce_input_value(value, input_type)
+            bind(step, {var_name: value})
+            await done({"result": value, "input_type": input_type})
+            return index + 1
+
+        if method in ("If", "While"):
+            condition = args.get("condition", "False")
+            try:
+                # Safe evaluation using only workflow variables
+                values = scope(step)
+                result = eval(condition, {"__builtins__": {}}, values)
+            except Exception as e:
+                raise Exception(f"Failed to evaluate {method} condition: {e}")
+            # A While's record accumulates across iterations: End_While resets this step's
+            # status for the next pass but leaves its outputs alone.
+            step.outputs = condition_record(condition, result, values, step.outputs if method == "While" else None)
+            if result:
+                await done()
+                return index + 1
+            if method == "If":
+                # False: on to the matching Else or End_If, which still runs.
+                target = find_forward("If", "End_If", stop_at_else=True)
+                if target is None:
+                    raise Exception("Matching Else or End_If not found for If statement")
+                steps[target].status = "pending"
+                await done()
+                return target
+            target = find_forward("While", "End_While")
+            if target is None:
+                raise Exception("Matching End_While not found for While statement")
+            await done()
+            return target + 1  # past the end of the loop
+
+        if method == "Else":
+            # Reached by running the If's true branch to its end: skip to the End_If.
+            target = find_forward("If", "End_If")
+            if target is None:
+                raise Exception("Matching End_If not found for Else statement")
+            steps[target].status = "pending"
+            await done()
+            return target
+
+        if method == "End_While":
+            # One pass done: back to the While, with the loop's steps pending again.
+            depth = 0
+            while_idx = None
+            for i in range(index - 1, -1, -1):
+                s = steps[i]
+                if s.instrument in FLOW_CONTROL_INSTRUMENTS:
+                    if s.method == "End_While":
+                        depth += 1
+                    elif s.method == "While":
+                        if depth == 0:
+                            while_idx = i
+                            break
+                        depth -= 1
+            if while_idx is None:
+                raise Exception("Matching While not found for End_While statement")
+            step.status = "completed"
+            step.end_time = datetime.utcnow()
+            for i in range(while_idx, index + 1):
+                steps[i].status = "pending"
+            await session.commit()
+            await self.broadcast_updates(run_id)
+            return while_idx
+
+        # End_If, and any marker step with nothing to do.
+        await done()
+        return index + 1
+
     async def _execute_optimization_run(self, run_id: int, session, parameters: dict):
         """Executes an optimization loop run, generating steps dynamically."""
         import os
@@ -1321,7 +1516,6 @@ class WorkflowQueueManager:
         opt_config = parameters.get("optimizer_config", {})
         parameter_constraints = parameters.get("parameter_constraints")
         additional_params = parameters.get("additional_params")
-        error_recovery = parameters.get("error_recovery", "stop")
         seq_template = parameters.get("sequence_template", [])
         early_stop = parameters.get("early_stop")
         # A var excluded from the search space can still differ per iteration (spreadsheet-style,
@@ -1365,6 +1559,27 @@ class WorkflowQueueManager:
         await session.commit()
         await self.broadcast_updates(run_id)
 
+        async def finish(stopped_early: bool = False):
+            """Every way out of an optimization ends here: final status, record, Cloud, queue hold.
+            A failure in existing data or prep used to return early, leaving the run without an
+            end time, Cloud never told it had ended, and the queue running on."""
+            nonlocal run
+            run = await session.get(WorkflowRun, run_id)
+            if self.cancelled:
+                run.status = "cancelled"
+            elif run.status != "error":
+                run.status = "completed"
+            issues = {"stopped_early": 1} if stopped_early else {}
+            if issues:
+                run.parameters = {**(run.parameters or {}), "_issues": issues}
+            run.end_time = datetime.utcnow()
+            await session.commit()
+            await self.publish_cloud_result(run.id)
+            report_run_finished(run, issues)
+            self._hold_queue_after(run)
+            self.active_run_id = None
+            await self.broadcast_updates(run_id)
+
         if existing_data:
             try:
                 import pandas as pd
@@ -1376,10 +1591,109 @@ class WorkflowQueueManager:
                 await session.commit()
                 await self.broadcast_updates(run_id)
                 print(f"Failed to append existing data: {e}\n{traceback.format_exc()}")
+                await finish()
                 return
         
         step_index = 0
-        
+        # What this run's steps have saved so far, prep through cleanup: a later step's '#name'
+        # reads it when it runs, as in a normal run (substitute_workflow_vars), so '#absorbance'
+        # after a step that saves `absorbance` is that value, not something to optimize or ask for.
+        run_context: Dict[str, Any] = {}
+
+        async def run_steps(entries, context: Dict[str, Any], objectives: Optional[Dict[str, float]] = None) -> bool:
+            """Run one block of this run's steps in order: prep, one trial, or cleanup.
+
+            `entries` are (step, returnVar, returnBindings, aliases). Flow Control goes through
+            the same _flow_control_step as a normal run; what a step saves goes into `context`,
+            where later steps read it as '#name', and its numbers into `objectives` when given.
+            False when a step failed (it records why) or the run was cancelled.
+            """
+            steps = [entry[0] for entry in entries]
+            index = 0
+            while index < len(steps):
+                if self.cancelled:
+                    return False
+                await self.pause_event.wait()
+                db_step = steps[index]
+                if db_step.status not in ("pending", "error"):  # skipped by an If or a While
+                    index += 1
+                    continue
+                _, return_var, return_bindings, return_aliases = entries[index]
+
+                db_step.status = "running"
+                db_step.start_time = datetime.utcnow()
+                await session.commit()
+                await self.broadcast_updates(run_id)
+
+                try:
+                    if db_step.instrument in FLOW_CONTROL_INSTRUMENTS:
+                        next_index = await self._flow_control_step(
+                            run_id, session, run, steps, index,
+                            scope=lambda s: context,
+                            bind=lambda s, values: context.update(values),
+                        )
+                        if next_index is None:
+                            return False  # cancelled while waiting for input
+                        index = next_index
+                        continue
+
+                    instruments = getattr(self.app.state, "instruments", {})
+                    if db_step.instrument not in instruments:
+                        raise Exception(f"Instrument {db_step.instrument} not found")
+                    from ivoryos_edge.introspection import cast_arguments, resolve_callable
+                    method = resolve_callable(instruments[db_step.instrument], db_step.method)
+                    casted_args = cast_arguments(method, substitute_workflow_vars(db_step.parameters or {}, context))
+
+                    if inspect.iscoroutinefunction(method):
+                        self.current_step_task = asyncio.create_task(method(**casted_args))
+                    else:
+                        loop = asyncio.get_running_loop()
+                        self.current_step_task = loop.run_in_executor(None, lambda: method(**casted_args))
+                    result = await self.current_step_task
+                    self.current_step_task = None
+
+                    serialized_res = serialize_result(result)
+                    db_step.status = "completed"
+                    db_step.outputs = {"result": serialized_res}
+                    if return_bindings or return_var:
+                        saved = with_aliases(extract_return_values(
+                            return_bindings, return_var, serialized_res, result), return_aliases)
+                        context.update(saved)
+                        if objectives is not None:
+                            # An objective has to be a number; anything a pointer resolves to
+                            # that isn't (a status string, a nested list) is simply not an
+                            # objective and is dropped rather than crashing the trial.
+                            for var_name, value in saved.items():
+                                try:
+                                    objectives[var_name] = float(value)
+                                except (TypeError, ValueError):
+                                    pass
+                    db_step.end_time = datetime.utcnow()
+                    await session.commit()
+                    await self.broadcast_updates(run_id)
+                    index += 1
+                except asyncio.CancelledError:
+                    self.current_step_task = None
+                    db_step.status = "error"
+                    db_step.error = "Step execution cancelled"
+                    db_step.end_time = datetime.utcnow()
+                    await session.commit()
+                    await self.broadcast_updates(run_id)
+                    return False
+                except Exception as e:
+                    self.current_step_task = None
+                    # A failure waits for a person, as in a normal run: retry the step, skip it,
+                    # or stop the run. (traceback is imported at module level; a local re-import
+                    # in here would make the name local to the whole enclosing function.)
+                    action = await self._wait_for_error_decision(run_id, session, run, db_step, e, traceback.format_exc())
+                    if action == "retry":
+                        continue
+                    if action == "skip":
+                        index += 1
+                        continue
+                    return False
+            return True
+
         async def execute_template_block(template, suggestion_args=None):
             nonlocal step_index, run
             iteration_steps = []
@@ -1401,54 +1715,26 @@ class WorkflowQueueManager:
                     status="pending"
                 )
                 session.add(db_step)
-                iteration_steps.append((db_step, tmpl_step.get("returnVar", tmpl_step.get("return"))))
+                params = tmpl_step.get("params") or {}
+                iteration_steps.append((
+                    db_step,
+                    tmpl_step.get("returnVar") or tmpl_step.get("return") or params.get("_return_var"),
+                    tmpl_step.get("returnBindings") or params.get("_return_bindings"),
+                    params.get("_return_aliases"),
+                ))
                 step_index += 1
                 
             await session.commit()
             await self.broadcast_updates(run_id)
-            
-            for db_step, return_var in iteration_steps:
-                if self.cancelled:
-                    return False, {}
-                await self.pause_event.wait()
-                
-                db_step.status = "running"
-                db_step.start_time = datetime.utcnow()
+
+            # What it saves goes into the run's context and the block carries on (it used to
+            # `return` at the first step that saved anything, skipping the rest).
+            ok = await run_steps(iteration_steps, run_context)
+            if not ok and not self.cancelled:
+                run.status = "error"
                 await session.commit()
                 await self.broadcast_updates(run_id)
-                
-                try:
-                    from ivoryos_edge.server import app, run_and_track_task
-                    instruments = getattr(app.state, "instruments", {})
-                    instance = instruments.get(db_step.instrument)
-                    from ivoryos_edge.introspection import cast_arguments, resolve_callable
-                    method = resolve_callable(instance, db_step.method)
-
-                    task_id = str(uuid.uuid4())
-                    casted_args = cast_arguments(method, db_step.parameters or {})
-                    self.current_step_task = asyncio.create_task(
-                        run_and_track_task(task_id, method, casted_args)
-                    )
-                    result = await self.current_step_task
-                    
-                    db_step.status = "completed"
-                    db_step.end_time = datetime.utcnow()
-                    
-                    # Very simple return var handling for optimization loop objective feedback
-                    if return_var:
-                        return True, {return_var: result}
-                        
-                    await session.commit()
-                    await self.broadcast_updates(run_id)
-                except Exception as e:
-                    db_step.status = "error"
-                    db_step.error = str(e) + "\n" + traceback.format_exc()
-                    db_step.end_time = datetime.utcnow()
-                    run.status = "error"
-                    await session.commit()
-                    await self.broadcast_updates(run_id)
-                    return False, {}
-            return True, {}
+            return ok, run_context
 
         # 1. Execute Prep Phase
         prep_template = parameters.get("prep_template", [])
@@ -1457,18 +1743,24 @@ class WorkflowQueueManager:
             if not success:
                 run.status = "error"
                 await session.commit()
-                await self.broadcast_updates(run_id)
+                await finish()
                 return
 
+        stopped_early = False
         # Trials are grouped into rounds of up to `batch_size`: the optimizer suggests a whole
         # round at once, every trial in the round runs, and only then does the whole round get
         # reported back via one observe() call — not one ask/run/tell per trial. batch_size=1
         # (the default) makes this behave exactly like the original one-at-a-time loop.
         completed = 0
+        trials_run = 0  # trials that actually ran, for "stopped early"
         while completed < budget:
             if self.cancelled:
                 break
             await self.pause_event.wait()
+            # A graceful stop asked for during prep, or between rounds: no more trials.
+            if self.graceful:
+                stopped_early = trials_run < budget
+                break
 
             n_this_round = min(batch_size, budget - completed)
 
@@ -1484,6 +1776,15 @@ class WorkflowQueueManager:
                 break
 
             round_results = []
+            # What observe() is told: one entry per suggested trial, in the order suggest()
+            # returned them, holding the values the trial ran with and, unless it failed, its
+            # objective values. The adapters need both halves. Ax and NIMO pair a result with
+            # its trial by position, so dropping a failed trial (as this used to) shifted every
+            # later result onto the wrong trial; BayBE records measurements as parameter values
+            # plus targets, so objectives alone were refused on every round, and the refusal
+            # was caught below and printed: a BayBE run finished without its model ever seeing
+            # a result.
+            observations = []
 
             for offset, suggestion in enumerate(suggestions):
                 global_iteration = completed + offset
@@ -1519,105 +1820,54 @@ class WorkflowQueueManager:
                         status="pending"
                     )
                     session.add(db_step)
-                    iteration_steps.append((db_step, tmpl_step.get("returnVar"), tmpl_step.get("returnBindings")))
+                    # A step expanded from a linked workflow carries its outputs in its params
+                    # (expand_workflow_blocks), not as top-level returnVar/returnBindings. Reading
+                    # only the top level left every result of a linked workflow unseen by the
+                    # optimizer, which then had no objective value for any trial.
+                    tmpl_params = tmpl_step.get("params") or {}
+                    iteration_steps.append((
+                        db_step,
+                        tmpl_step.get("returnVar") or tmpl_params.get("_return_var"),
+                        tmpl_step.get("returnBindings") or tmpl_params.get("_return_bindings"),
+                        tmpl_params.get("_return_aliases"),
+                    ))
                     step_index += 1
 
                 await session.commit()
                 await self.broadcast_updates(run_id)
 
                 # 3. Execute steps for this trial
-                trial_failed = False
                 objective_values = {}
-
-                for db_step, return_var, return_bindings in iteration_steps:
-                    if self.cancelled:
-                        break
-                    await self.pause_event.wait()
-
-                    db_step.status = "running"
-                    db_step.start_time = datetime.utcnow()
-                    await session.commit()
-                    await self.broadcast_updates(run_id)
-
-                    try:
-                        instruments = getattr(self.app.state, "instruments", {})
-                        if db_step.instrument not in instruments:
-                            raise Exception(f"Instrument {db_step.instrument} not found")
-                        instance = instruments[db_step.instrument]
-                        from ivoryos_edge.introspection import cast_arguments, resolve_callable
-                        method = resolve_callable(instance, db_step.method)
-
-                        casted_args = cast_arguments(method, db_step.parameters or {})
-
-                        if inspect.iscoroutinefunction(method):
-                            self.current_step_task = asyncio.create_task(method(**casted_args))
-                        else:
-                            loop = asyncio.get_running_loop()
-                            self.current_step_task = loop.run_in_executor(None, lambda: method(**casted_args))
-
-                        result = await self.current_step_task
-                        self.current_step_task = None
-
-                        serialized_res = serialize_result(result)
-                        db_step.status = "completed"
-                        db_step.outputs = {"result": serialized_res}
-
-                        if return_bindings or return_var:
-                            # An objective has to be a number; anything a pointer resolves to
-                            # that isn't (a status string, a nested list) is simply not an
-                            # objective and is dropped rather than crashing the trial.
-                            for var_name, value in extract_return_values(
-                                    return_bindings, return_var, serialized_res, result).items():
-                                try:
-                                    objective_values[var_name] = float(value)
-                                except (TypeError, ValueError):
-                                    pass
-                    except asyncio.CancelledError:
-                        self.current_step_task = None
-                        db_step.status = "error"
-                        db_step.error = "Step execution cancelled"
-                        trial_failed = True
-                    except Exception as e:
-                        self.current_step_task = None
-                        db_step.status = "error"
-                        # traceback is imported at module level — a local re-import here (even
-                        # this deep in a nested except) would make Python treat the name as local
-                        # to the whole enclosing function, breaking the earlier, legitimate
-                        # module-level traceback.format_exc() call in the existing-data handler
-                        # above (UnboundLocalError, since it runs before this line ever would).
-                        db_step.error = str(e) + "\n" + traceback.format_exc()
-                        trial_failed = True
-
-                    db_step.end_time = datetime.utcnow()
-                    await session.commit()
-                    await self.broadcast_updates(run_id)
-
-                    if trial_failed:
-                        break
+                # This trial's own saved values on top of what prep saved; a trial does not see
+                # the previous trial's (each trial is one evaluation of the workflow).
+                trial_context = dict(run_context)
+                trial_failed = not await run_steps(iteration_steps, trial_context, objective_values)
 
                 if self.cancelled:
                     break
 
-                # 4. Handle this trial's result
+                # 4. Handle this trial's result. A trial only fails here when someone chose Stop
+                # on a failed step (run_steps waits for that decision); a skipped step leaves a
+                # trial that completed, possibly without its objective.
                 if trial_failed:
-                    if error_recovery == "stop":
-                        run.status = "error"
-                        break
-                    # "skip" and "retry" both just drop this trial from the round without
-                    # observing it — "retry" doesn't actually retry yet, same simplification as
-                    # the original single-trial loop had.
-                else:
-                    round_results.append(objective_values)
+                    run.status = "error"
+                    break
+                observations.append({**(suggestion if isinstance(suggestion, dict) else {}), **objective_values})
+                round_results.append(objective_values)
+                trials_run += 1
+                # Graceful stop: this trial is done; the rest of the round is not started.
+                if self.graceful:
+                    break
 
             if self.cancelled or run.status == "error":
                 break
 
             # 5. Tell the optimizer about however many trials in this round actually succeeded,
             # then check early-stop against each of them.
-            if round_results:
+            if observations:
                 try:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, lambda: optimizer.observe(round_results))
+                    await loop.run_in_executor(None, lambda: optimizer.observe(observations))
                 except Exception as e:
                     print(f"Optimizer observe error: {e}")
 
@@ -1649,6 +1899,9 @@ class WorkflowQueueManager:
                     break
 
             completed += n_this_round
+            if self.graceful:
+                stopped_early = trials_run < budget
+                break
 
         # 2. Execute Cleanup Phase — runs once after the budget loop, mirroring Prep. This was
         # previously never executed at all for Optimization runs even though the Optimize page
@@ -1656,24 +1909,10 @@ class WorkflowQueueManager:
         # out immediately once self.cancelled is set, so cleanup can't run through a cancel yet —
         # that would need its own bypass, left for later if it turns out to matter.
         cleanup_template = parameters.get("cleanup_template", [])
-        if cleanup_template and not self.cancelled:
+        wants_cleanup = not self.graceful or self.graceful.get("cleanup", True)
+        if cleanup_template and not self.cancelled and run.status != "error" and wants_cleanup:
             success, _ = await execute_template_block(cleanup_template)
             if not success:
                 run.status = "error"
 
-        # Finish run
-        run = await session.get(WorkflowRun, run_id)
-        if self.cancelled:
-            run.status = "cancelled"
-        elif run.status != "error":
-            run.status = "completed"
-        run.end_time = datetime.utcnow()
-        await session.commit()
-        await self.publish_cloud_result(run.id)
-        report_run_finished(run)
-        
-        if not self.cancelled:
-            await self.pause_event.wait()
-            
-        self.active_run_id = None
-        await self.broadcast_updates(run_id)
+        await finish(stopped_early)

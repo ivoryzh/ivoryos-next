@@ -105,7 +105,7 @@ function StepCell({
         </span>
         {step.batch && (
           <span className={`inline-flex items-center gap-0.5 text-[9px] font-bold uppercase px-1 py-0.5 rounded shrink-0 ${
-            batchChange ? valueClass : 'bg-teal-100 text-teal-700 dark:bg-teal-500/20 dark:text-teal-300'
+            batchChange ? valueClass : 'bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-300'
           }`}>
             <Layers className="w-2.5 h-2.5" /> batch
           </span>
@@ -216,7 +216,7 @@ export function WorkflowDiff({
                   type="checkbox"
                   checked={onlyChanges}
                   onChange={(e) => setOnlyChanges(e.target.checked)}
-                  className="accent-indigo-600"
+                  className="accent-accent"
                 />
                 Only changes
               </label>
@@ -236,7 +236,7 @@ export function WorkflowDiff({
           <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 truncate">
             {fromLabel}
           </span>
-          <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 truncate">
+          <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-900 dark:text-white truncate">
             <ArrowRight className="w-3 h-3 shrink-0" />
             {toLabel}
           </span>
@@ -249,8 +249,8 @@ export function WorkflowDiff({
         )}
 
         {(paramChanges?.added.length || paramChanges?.removed.length) ? (
-          <div className="shrink-0 mx-5 mt-3 rounded-lg border border-indigo-200 dark:border-indigo-800/40 bg-indigo-50/60 dark:bg-indigo-900/15 px-3 py-2">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
+          <div className="shrink-0 mx-5 mt-3 rounded-lg border border-gray-200 dark:border-white/15 dark:border-white/30 bg-gray-100/60 dark:bg-white/10 px-3 py-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-gray-900 dark:text-white">
               This step&apos;s inputs
             </p>
             <div className="mt-1 space-y-0.5">
@@ -293,7 +293,7 @@ export function WorkflowDiff({
                 />
               </div>
               <div className="min-w-0">
-                <span className="sm:hidden block text-[9px] font-bold uppercase tracking-wider text-indigo-500 mb-0.5">
+                <span className="sm:hidden block text-[9px] font-bold uppercase tracking-wider text-gray-700 dark:text-gray-200 mb-0.5">
                   {toLabel}
                 </span>
                 <StepCell
@@ -317,7 +317,7 @@ export function WorkflowDiff({
           </button>
           <button
             onClick={onApply}
-            className="px-3.5 py-1.5 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700"
+            className="px-3.5 py-1.5 rounded-lg text-sm font-medium bg-accent text-on-accent hover:bg-accent-hover"
           >
             {applyLabel}
           </button>

@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Server, RefreshCw, AlertTriangle, CalendarClock, Table2, ImagePlus, X, Layers, Plus, Pencil, Trash2 } from 'lucide-react';
+import { Server, RefreshCw, AlertTriangle, CalendarClock, Table2, ImagePlus, X, Layers, Plus, Pencil, Trash2, LayoutTemplate, Link2 } from 'lucide-react';
+import PairDevice from '@/components/PairDevice';
+import Link from 'next/link';
 import { confirmDialog, notify, promptDialog } from '@ivoryos/shared-ui';
 import DeviceAvatar, { toThumbnail } from '@/components/DeviceAvatar';
 
@@ -85,12 +87,12 @@ function DevicePicture({ device, onChanged }: { device: Overview; onChanged: () 
       <button
         onClick={() => input.current?.click()} disabled={busy}
         title={device.imageVersion ? 'Change picture' : 'Add a picture of this device'}
-        className="relative block rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-60"
+        className="relative block rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-60"
       >
         {device.imageVersion
           ? <DeviceAvatar id={device.id} version={device.imageVersion} size={52} className="rounded-lg" />
           : (
-            <span className="flex h-[52px] w-[52px] items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 hover:border-indigo-400 hover:text-indigo-500 dark:border-white/15">
+            <span className="flex h-[52px] w-[52px] items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 hover:border-gray-400 dark:hover:border-white/30 hover:text-gray-700 dark:hover:text-gray-200 dark:border-white/15">
               <ImagePlus className="h-5 w-5" />
             </span>
           )}
@@ -122,6 +124,15 @@ export default function DevicesPage() {
     loadPlatforms();
     fetch('/api/devices/claim').then((r) => (r.ok ? r.json() : null)).then((b) => { if (b && b.allowed) setClaim(b.devices || []); }).catch(() => {});
   }, [loadPlatforms]);
+
+  // Pairing opens over this page rather than leaving it, so there is always a way back.
+  const [pairing, setPairing] = useState(false);
+  useEffect(() => {
+    if (!pairing) return;
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setPairing(false); };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [pairing]);
 
   const load = useCallback(async () => {
     try {
@@ -182,13 +193,32 @@ export default function DevicesPage() {
   const removeDevice = async (d: Overview) => {
     const ok = await confirmDialog(
       `Remove "${d.name}" from Cloud? It stops syncing and can no longer run Cloud tasks; if it is running, it forgets this Cloud. `
-      + 'Its past runs and results stay. Pairing it again brings it back.',
+      + 'Its past runs, results and workflows stay in Cloud as a record. Pairing it again adds it as a new device.',
       { title: 'Remove this device?', confirmLabel: 'Remove', tone: 'danger' },
     );
     if (!ok) return;
     const res = await fetch(`/api/devices/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
     if (!res.ok) await notify((await res.json().catch(() => ({}))).error || 'Could not remove the device.', { tone: 'error' });
     load();
+  };
+
+  // The name is the label shown everywhere in Cloud; the id underneath is its identity and does
+  // not change. A taken name is refused by the route and asked for again.
+  const renameDevice = async (d: Overview) => {
+    let current = d.name;
+    for (;;) {
+      const name = await promptDialog(
+        `Shown in the toolbox, on the canvas and in every list instead of its id (${d.id}). Unique in this workspace.`,
+        { title: 'Rename device', defaultValue: current, confirmLabel: 'Rename' },
+      );
+      if (!name || !name.trim() || name.trim() === d.name) return;
+      const res = await fetch(`/api/devices/${encodeURIComponent(d.id)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+      });
+      if (res.ok) { load(); return; }
+      await notify((await res.json().catch(() => ({}))).error || 'Could not rename the device.', { tone: 'error' });
+      current = name.trim();
+    }
   };
 
   const renderDevice = (d: Overview) => {
@@ -202,8 +232,11 @@ export default function DevicesPage() {
                   <DevicePicture device={d} onChanged={load} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${paused ? 'bg-indigo-400' : !online ? 'bg-gray-400' : d.busy ? 'bg-amber-400' : 'bg-green-500'}`} />
+                      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${paused ? 'bg-gray-500' : !online ? 'bg-gray-400' : d.busy ? 'bg-amber-400' : 'bg-green-500'}`} />
                       <h2 className="text-base font-bold truncate" title={d.id !== d.name ? `Device id: ${d.id}` : undefined}>{d.name}</h2>
+                      <button onClick={() => renameDevice(d)} title="Rename" className="rounded p-1 hover-bg" style={{ color: 'var(--text-secondary)' }}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
                       <button onClick={() => removeDevice(d)} title="Remove from Cloud" className="ml-auto rounded p-1 hover-bg" style={{ color: 'var(--text-secondary)' }}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -280,6 +313,16 @@ export default function DevicesPage() {
                       last result {Number.isNaN(edgeTime(d.lastResult.at)) ? '' : ago(new Date(edgeTime(d.lastResult.at)).toISOString())}
                     </a>
                   )}
+                  {/* The sequence editor works on one device's library, so this is where it opens
+                      from (the top bar has no entry for it). */}
+                  <Link
+                    href={`/edge-sequence?deviceId=${encodeURIComponent(d.id)}`}
+                    title={`Open ${d.name}'s workflows in the sequence editor`}
+                    className="ml-auto inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-medium ring-1 ring-inset ring-gray-200 dark:ring-white/10 hover-bg"
+                    style={{ color: 'var(--text-primary)' }}
+                  >
+                    <LayoutTemplate className="h-3.5 w-3.5" /> Sequences
+                  </Link>
                 </div>
               </div>
             );
@@ -287,8 +330,26 @@ export default function DevicesPage() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <header className="glass-header flex shrink-0 items-center justify-between px-6">
-        <div className="flex items-center gap-2">
+      {pairing && (
+        <div
+          className="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto bg-black/40 p-4 pt-[8vh] backdrop-blur-sm"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setPairing(false); }}
+        >
+          <div role="dialog" aria-modal="true" aria-label="Pair a device" className="w-full max-w-xl rounded-2xl p-6 shadow-2xl"
+            style={{ background: 'var(--panel-bg-solid, var(--panel-bg))', border: '1px solid var(--panel-border)', color: 'var(--text-primary)' }}>
+            <div className="mb-4 flex items-center gap-2">
+              <Link2 className="h-5 w-5 text-gray-500 dark:text-gray-300" />
+              <h2 className="text-lg font-semibold">Pair a device</h2>
+              <button type="button" onClick={() => setPairing(false)} title="Close" className="ml-auto rounded p-1.5 hover-bg" style={{ color: 'var(--text-secondary)' }}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <PairDevice onApproved={load} onClose={() => setPairing(false)} />
+          </div>
+        </div>
+      )}
+      <header data-ivoryos-page-header="mixed" className="glass-header flex shrink-0 items-center justify-between px-6">
+        <div data-ivoryos-page-title className="flex items-center gap-2">
           <Server className="h-5 w-5" />
           <h1 className="text-lg font-semibold">Devices</h1>
           <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
@@ -296,9 +357,9 @@ export default function DevicesPage() {
           </span>
         </div>
         <div className="flex items-center gap-1">
-          <a href="/pair" title="Approve a device showing a pairing code" className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium hover-bg" style={{ color: 'var(--text-secondary)' }}>
+          <button type="button" onClick={() => setPairing(true)} title="Approve a device showing a pairing code" className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium hover-bg" style={{ color: 'var(--text-secondary)' }}>
             <Plus className="h-3.5 w-3.5" /> Pair a device
-          </a>
+          </button>
           <button onClick={newPlatform} title="Group edges that work together" className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium hover-bg" style={{ color: 'var(--text-secondary)' }}>
             <Plus className="h-3.5 w-3.5" /> New platform
           </button>
@@ -315,12 +376,12 @@ export default function DevicesPage() {
             <span className="flex-1">
               {claim.length} device{claim.length === 1 ? ' was' : 's were'} paired before Cloud had sign-in and {claim.length === 1 ? 'is' : 'are'} in no workspace: {claim.join(', ')}.
             </span>
-            <button onClick={claimAll} className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white bg-blue-500 hover:bg-blue-600">Add to this workspace</button>
+            <button onClick={claimAll} className="rounded-lg px-3 py-1.5 text-xs font-semibold text-on-accent bg-accent hover:bg-accent-hover">Add to this workspace</button>
           </div>
         )}
         {loaded && devices.length === 0 && claim.length === 0 && (
           <div className="rounded-xl border border-dashed p-8 text-center text-sm" style={{ borderColor: 'var(--panel-border)', color: 'var(--text-secondary)' }}>
-            No devices yet. <a href="/pair" className="text-blue-400 hover:underline">Pair a device</a> with the code it shows.
+            No devices yet. <button type="button" onClick={() => setPairing(true)} className="font-medium text-accent-fg underline-offset-2 hover:underline">Pair a device</button> with the code it shows.
           </div>
         )}
         {groups.map((g) => (

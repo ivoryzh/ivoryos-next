@@ -90,6 +90,9 @@ def _check_params(where, entry, params, issues, known_vars, instrument, method):
         if "default" in info:
             continue
         value = params.get(name)
+        # `Optional[int]` with no default: None is the value the annotation invites, not a gap.
+        if name in params and value is None and info.get("optional"):
+            continue
         if value is None or (isinstance(value, str) and value.strip() == ""):
             issues.append(_issue(
                 "error", where,
@@ -130,6 +133,10 @@ def _check_params(where, entry, params, issues, known_vars, instrument, method):
                 ))
             continue
 
+        # Nothing given: either reported as missing above (required) or "leave the default" /
+        # a deliberate None (optional). Neither is a number to check.
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            continue
         type_name = str(info.get("type", "")).lower()
         if ("int" in type_name or "float" in type_name) and not _numeric_ok(value):
             issues.append(_issue(

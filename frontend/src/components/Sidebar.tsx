@@ -1,13 +1,16 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 
-import { useEffect, useRef, useState } from 'react';
-import { Settings, LayoutDashboard, Library, Workflow, Play, History, Database, ListTodo, PanelLeftClose, PanelLeftOpen, Settings2, Plug, PanelRight, Gauge, Menu, Cloud, HandHelping, Minimize2 } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PanelRight, Gauge, Menu, HandHelping, Minimize2 } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { isPanelPlugin, openInPanel, setPanel, usePanel } from '@/pluginPanel';
+import { inDesktopApp, useNavPlacement, TopNavBar, TopNavBrand, TopNavItem, TopNavButton, TopNavIconLink, TopNavDivider, topNavPill, BRAND_MARK , notify } from '@ivoryos/shared-ui';
 import { lastRunTabHref, runTabForPath, samePath } from './RunTabs';
+import RunDecision from './RunDecision';
+import RunNotifier from './RunNotifier';
 
 // The theme is not chosen here: every page follows one setting (ThemeSync in the root layout; in
 // the desktop app, the app's own Settings). See packages/shared-ui/src/theme.tsx.
@@ -24,6 +27,11 @@ export default function Sidebar() {
   const [runHref, setRunHref] = useState('/execution');
   const pathname = usePathname();
   const panel = usePanel();
+  // Sidebar or top bar (shared-ui navPlacement.tsx): the same entries, laid out along the other axis.
+  const [placement] = useNavPlacement();
+  // Inside the desktop app the top bar leaves out the wordmark. Read after mount, like the rest.
+  const [desktop, setDesktop] = useState(false);
+  useEffect(() => { setDesktop(inDesktopApp()); }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem('ivoryos_sidebar_expanded');
@@ -114,9 +122,11 @@ export default function Sidebar() {
   const submitWaitingInput = async () => {
     if (!waitingRun) return;
     let value: any = inputValue;
-    if (waitingRun.inputType === 'int' || waitingRun.inputType === 'float') {
+    if (waitingRun.inputType === 'none') {
+      value = null; // a pause: nothing was asked
+    } else if (waitingRun.inputType === 'int' || waitingRun.inputType === 'float') {
       if (inputValue.trim() === '' || isNaN(Number(inputValue))) {
-        alert(`This step expects a ${waitingRun.inputType === 'int' ? 'whole number' : 'number'}.`);
+        notify(`This step expects a ${waitingRun.inputType === 'int' ? 'whole number' : 'number'}.`, { title: 'Not a number', tone: 'error' });
         return;
       }
       value = waitingRun.inputType === 'int' ? parseInt(inputValue, 10) : parseFloat(inputValue);
@@ -148,7 +158,7 @@ export default function Sidebar() {
         title={isOpen ? `Minimize ${p.name}` : `Show ${p.name} beside the page`}
         className={`w-[calc(100%-1.5rem)] flex items-center py-3 rounded-lg overflow-hidden mx-3 text-left ${
           isOpen
-            ? 'bg-indigo-50 dark:bg-white/10 text-indigo-600 dark:text-white'
+            ? 'bg-accent-soft text-accent-fg'
             : 'hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'
         }`}
       >
@@ -170,7 +180,7 @@ export default function Sidebar() {
         title={!isExpanded ? label : undefined}
         className={`flex items-center py-3 rounded-lg overflow-hidden mx-3 ${
           isActive 
-            ? 'bg-indigo-50 dark:bg-white/10 text-indigo-600 dark:text-white' 
+            ? 'bg-accent-soft text-accent-fg'
             : 'hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'
         }`}
       >
@@ -182,8 +192,67 @@ export default function Sidebar() {
     );
   };
 
+  // The top bar (shared-ui TopNav.tsx, the same bar Cloud draws): home, the pages you work
+  // through in order, the deck, then plugins. No Queue entry in either placement: the queue is a
+  // drawer (openQueue), opened from the run panel, the run card and the status chip.
+  const isOn = (href: string, alsoActiveOn: string[] = []) =>
+    samePath(href, pathname) || alsoActiveOn.some(p => samePath(p, pathname));
+  const cloudOn = !!edgeStatus?.cloud_connected;
+  // A release of the desktop app that does not offer Cloud yet started this edge: no Cloud entry.
+  const cloudOffered = !edgeStatus?.cloud_coming_soon;
+  const topBar = (
+    <TopNavBar
+      brand={!desktop && <TopNavBrand link={Link} href="/" />}
+      end={
+        <>
+          {cloudOffered && <Link
+            href="/cloud"
+            title={`Cloud Connect: ${cloudOn ? 'Connected' : 'Offline'} (open settings)`}
+            aria-current={isOn('/cloud') ? 'page' : undefined}
+            className={`${topNavPill(isOn('/cloud'))} ring-1 ring-inset ring-gray-200 dark:ring-white/10`}
+          >
+            <span className={`w-2 h-2 rounded-full shrink-0 ring-[3px] ${cloudOn ? 'bg-emerald-500 ring-emerald-500/20' : 'bg-red-500 ring-red-500/20'}`} />
+            <span className="hidden sm:inline">Cloud</span>
+          </Link>}
+          {/* Its settings are theme and layout, which inside the desktop app follow the app. */}
+          {!desktop && <TopNavIconLink link={Link} href="/settings" label="Settings" icon={<Settings className="w-4 h-4 shrink-0" />} active={isOn('/settings')} />}
+        </>
+      }
+    >
+      <TopNavItem link={Link} href="/" label="Home" icon={<LayoutDashboard className="w-4 h-4 shrink-0" />} active={isOn('/')} />
+      <TopNavDivider />
+      <TopNavItem link={Link} href="/library" label="Library" icon={<Library className="w-4 h-4 shrink-0" />} active={isOn('/library')} />
+      <TopNavItem link={Link} href="/designer" label="Designer" icon={<Workflow className="w-4 h-4 shrink-0" />} active={isOn('/designer')} />
+      <TopNavItem link={Link} href={runEntryHref} label="Run" icon={<Play className="w-4 h-4 shrink-0" />} active={isOn(runEntryHref, ['/once', '/execution', '/optimize'])} />
+      <TopNavItem link={Link} href="/data" label="Data" icon={<Table2 className="w-4 h-4 shrink-0" />} active={isOn('/data')} />
+      <TopNavDivider />
+      <TopNavItem link={Link} href="/instruments" label="Instruments" icon={<Gauge className="w-4 h-4 shrink-0" />} active={isOn('/instruments')} />
+      {plugins.length > 0 && <TopNavDivider />}
+      {/* A panel plugin opens beside the page and stays there as you move around (lit while it
+          shows); a tab plugin is a page of its own. */}
+      {plugins.map(p => {
+        if (!isPanelPlugin(p)) {
+          return <TopNavItem key={p.id} link={Link} href={`/plugin?id=${p.id}`} label={p.name} icon={<Plug className="w-4 h-4 shrink-0" />} active={isOn(`/plugin?id=${p.id}`)} labelFrom="lg" />;
+        }
+        const isOpen = panel.open === p.id && !panel.minimized;
+        return (
+          <TopNavButton
+            key={p.id}
+            onClick={() => (isOpen ? setPanel({ minimized: true }) : openInPanel(p.id, p.placement))}
+            title={isOpen ? `Minimize ${p.name}` : `Show ${p.name} beside the page`}
+            label={p.name}
+            icon={<PanelRight className="w-4 h-4 shrink-0" />}
+            active={isOpen}
+          />
+        );
+      })}
+    </TopNavBar>
+  );
+
   return (
     <>
+    <RunDecision />
+    <RunNotifier />
     {waitingRun && !promptMinimized && (
       <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
         <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-pink-200 dark:border-pink-500/30 rounded-2xl shadow-2xl p-6">
@@ -192,7 +261,7 @@ export default function Sidebar() {
               <HandHelping className="w-5 h-5 text-pink-600 dark:text-pink-400" />
             </div>
             <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Input needed to continue</h2>
+              <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">{waitingRun.inputType === 'none' ? 'Paused for you' : 'Input needed to continue'}</h2>
               <p className="text-[11px] text-gray-400 dark:text-gray-500">The workflow is paused and waiting for you</p>
             </div>
             {/* Answering can need a look at the workflow, the data, or the bench first. The run
@@ -205,8 +274,9 @@ export default function Sidebar() {
               <Minimize2 className="w-4 h-4" />
             </button>
           </div>
-          <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">{waitingRun.prompt}</p>
-          {waitingRun.inputType === 'bool' ? (
+          <p className={`text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words ${waitingRun.inputType === 'none' ? 'mb-5' : 'mb-3'}`}>{waitingRun.prompt}</p>
+          {/* A User input with nothing to save (input_type "none") is a pause: only Continue. */}
+          {waitingRun.inputType === 'none' ? null : waitingRun.inputType === 'bool' ? (
             <label className="flex items-center gap-2 mb-4 text-sm text-gray-700 dark:text-gray-300 select-none cursor-pointer">
               <input
                 type="checkbox"
@@ -232,21 +302,23 @@ export default function Sidebar() {
           <button
             onClick={submitWaitingInput}
             disabled={submittingInput}
+            autoFocus={waitingRun.inputType === 'none'}
             className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-pink-600 hover:bg-pink-700 disabled:opacity-50 text-white transition-colors"
           >
-            {submittingInput ? 'Submitting...' : 'Continue Workflow'}
+            {submittingInput ? 'Submitting...' : waitingRun.inputType === 'none' ? 'Continue' : 'Continue Workflow'}
           </button>
         </div>
       </div>
     )}
-    <aside className={`shrink-0 bg-white dark:bg-white/5 backdrop-blur-md border-r border-gray-200 dark:border-white/10 flex flex-col py-6 space-y-6 z-10 overflow-hidden ${isExpanded ? 'w-64' : 'w-[72px]'}`}>
+    {placement === 'top' ? topBar : (
+    <aside data-ivoryos-nav-bar className={`shrink-0 bg-white dark:bg-white/5 backdrop-blur-md border-r border-gray-200 dark:border-white/10 flex flex-col py-6 space-y-6 z-10 overflow-hidden ${isExpanded ? 'w-64' : 'w-[72px]'}`}>
       <div className="flex items-center w-full px-3">
         <button onClick={toggleExpanded} className="w-[44px] h-[44px] text-gray-500 hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 flex items-center justify-center rounded-lg transition-colors">
           <Menu className="w-5 h-5 shrink-0" />
         </button>
         {isExpanded && (
           <div className="flex items-center space-x-3 ml-2">
-            <img src="/favicon.ico" alt="Logo" className="w-8 h-8 shrink-0" />
+            <img src={BRAND_MARK} alt="IvoryOS" className="h-7 w-auto shrink-0" />
             <h1 className="text-xl font-bold tracking-wider">IvoryOS</h1>
           </div>
         )}
@@ -259,9 +331,10 @@ export default function Sidebar() {
         {/* One entry for two routes. Both are "fill in this workflow's open parameters"; the tab
             strip in the page header is what switches between filling them yourself and letting
             the optimizer do it. */}
-        {navItem(runEntryHref, 'Configure', <Settings2 className="w-5 h-5 shrink-0" />, ['/execution', '/optimize'])}
-        {navItem('/queue', 'Queue', <ListTodo className="w-5 h-5 shrink-0" />)}
-        {navItem('/data', 'Data History', <Database className="w-5 h-5 shrink-0" />)}
+        {navItem(runEntryHref, 'Run', <Play className="w-5 h-5 shrink-0" />, ['/once', '/execution', '/optimize'])}
+        {/* No Queue entry: the queue is a drawer beside whatever page is showing, opened from
+            the run panel and the status chip (openQueue in QueueDrawer.tsx). */}
+        {navItem('/data', 'Data History', <Table2 className="w-5 h-5 shrink-0" />)}
         {navItem('/instruments', 'Instruments', <Gauge className="w-5 h-5 shrink-0" />)}
         {plugins.length > 0 && (
             <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">
@@ -282,7 +355,7 @@ export default function Sidebar() {
       </nav>
 
       <div className="flex flex-col space-y-4 w-full">
-        <div className="mx-3">
+        {cloudOffered && <div className="mx-3">
           {/* The whole card opens the cloud settings, so a collapsed sidebar (where only the dot
               shows) still gets there in one click instead of expand-then-click. */}
           <Link
@@ -303,11 +376,12 @@ export default function Sidebar() {
               <Settings2 className="w-4 h-4 ml-2 shrink-0 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-200 transition-colors" />
             )}
           </Link>
-        </div>
+        </div>}
 
         <div className="text-sm font-medium text-gray-600 dark:text-gray-400">{navItem('/settings', 'Settings', <Settings className="w-5 h-5 shrink-0" />)}</div>
       </div>
     </aside>
+    )}
     </>
   );
 }

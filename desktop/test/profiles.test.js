@@ -143,3 +143,10 @@ test('tray preferences default to on, persist, and refuse unknown keys', () => {
     assert.equal(again.windowPref('trayHintShown'), true, 'the hint is shown once, not every launch');
     assert.throws(() => mgr.setWindowPref('launchMissiles', true), /Unknown setting/);
 });
+
+test('a release without Cloud tells the decks it starts, so their own pages do not offer it', () => {
+    const { commandFor, withDefaults } = require('../src/profiles');
+    const profile = withDefaults('/tmp/home', { name: 'Bench', kind: 'deck', port: 8090 });
+    assert.equal(commandFor(profile, { python: 'python', cloudComingSoon: true }).env.IVORYOS_CLOUD_COMING_SOON, '1');
+    assert.equal(commandFor(profile, { python: 'python' }).env.IVORYOS_CLOUD_COMING_SOON, undefined);
+});

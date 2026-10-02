@@ -1,10 +1,11 @@
-import { getStore, resolveMode, resolveBrokerUrl } from '@/lib/store';
+import { getStore, resolveMode, resolveBrokerUrl, usesAwsIot } from '@/lib/store';
 import { provisionDevice } from '@/lib/aws-iot';
+import { newSecret, hashSecret } from '@/lib/brokerAuth';
 
 /**
  * The broker address to hand the device, which is not necessarily the one this Cloud uses itself.
  *
- * In cloud mode it is fixed — AWS_IOT_ENDPOINT, the same for every device, nothing to infer.
+ * On AWS IoT (cloud mode with AWS_IOT_ENDPOINT) it is fixed, the same for every device.
  *
  * In LAN mode the daemon may well be talking to 127.0.0.1, which is meaningless on another
  * machine. But the device just told us a working address for free: whatever host it used to reach
@@ -12,7 +13,7 @@ import { provisionDevice } from '@/lib/aws-iot';
  * from the request rather than asking anyone to configure it.
  */
 function brokerForDevice(req: Request, stored: { host?: string; port?: number } | null | undefined) {
-  if (process.env.AWS_IOT_ENDPOINT) {
+  if (usesAwsIot()) {
     return { protocol: 'aws_iot' as const, endpoint: process.env.AWS_IOT_ENDPOINT, port: 8883 };
   }
 
@@ -63,12 +64,19 @@ export async function issueDeviceCredentials(req: Request, deviceId: string, dev
     // paired again) this issues a new certificate and revokes the old ones.
     token = (await provisionDevice(deviceId)).token;
   } else {
+    // The device's broker password (brokerAuth.js): made here, kept by Cloud only as a hash, and
+    // carried to the edge inside the token it collects once, so nobody ever sees or types it.
+    // Pairing again replaces it, which is what retires the old token.
+    const secret = newSecret();
+    await store.setBrokerCredential(deviceId, hashSecret(secret));
     token = Buffer.from(JSON.stringify({
       protocol: 'mqtt',
       endpoint: broker.endpoint,
       port: broker.port,
       client_id: deviceId,
       topic_prefix: topicPrefix,
+      username: deviceId,
+      password: secret,
     })).toString('base64');
   }
   // Listed at once, as "paired, never seen", rather than only after its first heartbeat.

@@ -29,10 +29,12 @@ const fs = require('fs');
 const {
     TERMINAL_TASK_STATUSES, CLOUD_DEVICE_ID, computeAdvance, evaluateCondition,
 } = require('./src/lib/dag.js');
+const presence = require('./src/lib/presence.js');
 const { runContext } = require('./src/lib/cloudLogic.js');
 const { commandStep } = require('./src/lib/taskCommands.js');
-const { getStore, resolveBrokerUrl } = require('./src/lib/store');
+const { getStore, resolveBrokerUrl, usesAwsIot } = require('./src/lib/store');
 const { startEmbeddedBroker } = require('./src/lib/embedded-broker.js');
+const { DAEMON_USER, newSecret, brokerAuthEnabled } = require('./src/lib/brokerAuth.js');
 const { removeDevice } = require('./src/lib/deviceRemoval.js');
 
 let store;
@@ -50,7 +52,7 @@ const TOPIC_PREFIX = process.env.MQTT_TOPIC_PREFIX || 'ivoryos/edge';
 // Local broker for LAN/dev (mqtt://host:port, no client cert), or AWS IoT Core (mutual TLS) in
 // cloud deployments — same client_id-per-device-per-connection model the edge server itself uses.
 function buildMqttOptions() {
-    if (process.env.AWS_IOT_ENDPOINT) {
+    if (usesAwsIot()) {
         return {
             url: resolveBrokerUrl(),
             options: {
@@ -63,7 +65,12 @@ function buildMqttOptions() {
     }
     return {
         url: resolveBrokerUrl(),
-        options: { clientId: process.env.MQTT_CLIENT_ID || `ivoryos-cloud-daemon-${Date.now()}` }
+        options: {
+            clientId: process.env.MQTT_CLIENT_ID || `ivoryos-cloud-daemon-${Date.now()}`,
+            // An external broker (a mosquitto with a password file, say) takes its own login.
+            // Our built-in broker replaces these with the daemon's per-run secret, below.
+            ...(process.env.MQTT_USERNAME ? { username: process.env.MQTT_USERNAME, password: process.env.MQTT_PASSWORD || '' } : {}),
+        }
     };
 }
 
@@ -77,10 +84,31 @@ const client = mqtt.connect(url, { ...options, manualConnect: true });
 // Resolves on a later tick than this module body, so every handler below is registered before the
 // connection is opened. Held for the shutdown path.
 let embeddedBroker = null;
-startEmbeddedBroker(url).then((result) => {
+// The built-in broker admits each device by the secret it was given at pairing and keeps it to its
+// own topics (brokerAuth.js). The daemon itself signs in with a secret made fresh for this run,
+// which exists only in this process. IVORYOS_BROKER_AUTH=off opens the broker again.
+const daemonSecret = newSecret();
+const refusalLoggedAt = new Map();
+const brokerAuth = brokerAuthEnabled() ? {
+    daemonSecret,
+    prefix: TOPIC_PREFIX,
+    credentialFor: (deviceId) => store.getBrokerCredential(deviceId),
+    // A refused edge retries every few seconds; say so once a minute, not every time.
+    onRefused: (deviceId, reason) => {
+        const last = refusalLoggedAt.get(deviceId) || 0;
+        if (Date.now() - last < 60000) return;
+        refusalLoggedAt.set(deviceId, Date.now());
+        console.warn(`[Broker] Refused ${deviceId}: ${reason}.`);
+    },
+} : null;
+startEmbeddedBroker(url, brokerAuth).then((result) => {
     if (result.started) {
         embeddedBroker = result;
-        console.log(`[Daemon] Embedded broker listening on 0.0.0.0:${result.port} — no mosquitto needed.`);
+        if (result.secured) {
+            client.options.username = DAEMON_USER;
+            client.options.password = daemonSecret;
+        }
+        console.log(`[Daemon] Embedded broker listening on 0.0.0.0:${result.port} — no mosquitto needed. ${result.secured ? 'Devices sign in with the secret from their pairing.' : 'Open to any client (IVORYOS_BROKER_AUTH=off).'}`);
     } else {
         console.log(`[Daemon] Using external broker (${result.reason}).`);
     }
@@ -111,7 +139,7 @@ client.on('reconnect', () => console.log('[Daemon] Reconnecting...'));
 client.on('close', () => { console.log('[Daemon] Connection closed.'); writeHeartbeat(); });
 client.on('offline', () => { console.log('[Daemon] Offline (no connection).'); writeHeartbeat(); });
 
-client.on('message', async (topic, message) => {
+client.on('message', async (topic, message, packet) => {
     const parts = topic.split('/'); // ivoryos/edge/{deviceId}/(status|schema|sequences/{name})
     const deviceId = parts[2];
     const kind = parts[3];
@@ -122,7 +150,12 @@ client.on('message', async (topic, message) => {
     if (message.length === 0) {
         if (kind === 'sequences') {
             const name = parts[4];
+            // A device leaving Cloud clears what it left retained on the broker. That is tidying
+            // up, not deleting its workflows: those are kept as a record (deviceRemoval.js).
+            if (removedDevices.has(deviceId)) return;
             try {
+                // Saved in Cloud and not sent to the device: Cloud's own copy, kept.
+                if (((await store.getSequence(deviceId, name)) || {}).body?.cloud_only) return;
                 const removed = await store.deleteSequence(deviceId, name);
                 if (removed) console.log(`[Daemon] Sequence ${deviceId}/${name} deleted on the device, removed from Cloud.`);
             } catch (e) {
@@ -169,22 +202,29 @@ client.on('message', async (topic, message) => {
     try {
         if (kind === 'status' && payload && payload.paused) {
             // Paused on the device on purpose: kept, shown as paused, sent nothing until it resumes.
-            deviceState.set(deviceId, { online: false, session: null, busy: false, at: Date.now(), idleSince: null });
+            deviceState.set(deviceId, presence.nextState(deviceState.get(deviceId), payload, { retained: !!(packet && packet.retain), now: Date.now() }));
             await store.upsertDeviceStatus(deviceId, 'paused', false);
         } else if (kind === 'status') {
             const prev = deviceState.get(deviceId);
-            // An edge too old to report `busy` is never assumed idle, or its tasks could be failed
-            // as lost while they wait in its queue.
-            const idle = !!payload.online && 'busy' in (payload || {}) && !payload.busy;
-            deviceState.set(deviceId, {
-                online: !!payload.online,
-                session: payload.session || null,
-                busy: !!payload.busy,
-                at: Date.now(),
-                // When it last became idle, for spotting a task that was sent and never arrived.
-                idleSince: idle ? (prev && prev.idleSince) || Date.now() : null,
-            });
-            await store.upsertDeviceStatus(deviceId, payload.online ? 'online' : 'offline', !!payload.busy);
+            // See src/lib/presence.js: a retained "online" is the broker's memory, not proof, so
+            // it is held unconfirmed and the device is asked to speak up.
+            const state = presence.nextState(prev, payload, { retained: !!(packet && packet.retain), now: Date.now() });
+            // A ping also tells an edge still on its 5-second heartbeat that this Cloud does not
+            // need one (asksForQuiet). Asked again at most every 10s while it has not switched.
+            const askQuiet = presence.asksForQuiet(payload) && Date.now() - (askedQuietAt.get(deviceId) || 0) > presence.PING_WAIT_MS;
+            if (presence.needsPing(state) || askQuiet) {
+                // The device echoes the nonce in its answer (`pong`), which is what confirms it.
+                const nonce = Math.random().toString(36).slice(2, 10);
+                if (presence.needsPing(state)) { state.pingedAt = Date.now(); state.pingNonce = nonce; }
+                askedQuietAt.set(deviceId, Date.now());
+                client.publish(`${TOPIC_PREFIX}/${deviceId}/ping`, JSON.stringify({ ts: Date.now() / 1000, nonce }), { qos: 1 });
+            }
+            deviceState.set(deviceId, state);
+            // Shown as online only once confirmed: a device that died while this daemon was away
+            // must not read "online" on the strength of what the broker remembers. Nor does that
+            // memory count as having seen it: `last_seen` only moves on what the device says now.
+            if (state.online && !state.confirmed) await store.markDeviceOffline(deviceId);
+            else await store.upsertDeviceStatus(deviceId, state.online ? 'online' : 'offline', !!payload.busy);
             // Back from offline (or first heard since this process started): tell it what Cloud
             // is holding for it, since it missed every update while away.
             // `session` changes on every edge (re)connect: the retained heartbeat alone cannot
@@ -204,6 +244,14 @@ client.on('message', async (topic, message) => {
             console.log(`[Daemon] ${deviceId} schema synced (${count} instruments)`);
         } else if (kind === 'sequences') {
             const name = parts[4];
+            // A workflow someone saved "in Cloud only" is Cloud's own copy until they send it:
+            // the device's version of the same name must not replace it (that silent revert is
+            // what the choice exists to prevent). It cannot be run from Cloud meanwhile, since
+            // the device would run its own version. Sending it clears the mark.
+            if (((await store.getSequence(deviceId, name)) || {}).body?.cloud_only) {
+                console.log(`[Daemon] Kept the Cloud-only copy of ${deviceId}/${name}; the device's version was not mirrored.`);
+                return;
+            }
             await store.upsertSequence({
                 device_id: deviceId, name, description: payload.description || '', body: payload,
             });
@@ -260,6 +308,19 @@ writeHeartbeat();
 async function handleTaskStatus(payload) {
     const { runId, nodeId, status } = payload;
     if (!runId || !nodeId || !status) return;
+    // A repeated step is one task dispatched many times, so a report must say which run it is
+    // about. QoS 1 redelivers after a reconnect: a second copy of run 2's "completed", arriving
+    // while run 3 is on the device, would otherwise finish run 3 in Cloud and send run 4 early.
+    // An edge too old to number its reports is taken at its word, as before.
+    let repeatState = null;
+    if (Number.isFinite(Number(payload.occurrence))) {
+        repeatState = await store.getTaskRepeat(runId, nodeId);
+        if (repeatState && Number(repeatState.repeat_total) > 1
+            && Number(payload.occurrence) !== (Number(repeatState.repeat_done) || 0) + 1) {
+            console.log(`[Daemon] Ignored '${status}' from run ${payload.occurrence} of ${runId}/${nodeId}; run ${(Number(repeatState.repeat_done) || 0) + 1} is current.`);
+            return;
+        }
+    }
     // A progress update: the task is still running, only how far it has got changed. Stored with
     // the same terminal guard, so one landing after "completed" is dropped like a late "running".
     const progress = payload.progress && typeof payload.progress === 'object' ? payload.progress : undefined;
@@ -290,6 +351,11 @@ async function handleTaskStatus(payload) {
     // return, which left every downstream task sitting at 'blocked' forever — safe (they never
     // ran) but indistinguishable in the UI from a run still making progress.
     if (status === 'completed') {
+        // How long this run took, for telling the device roughly when the rest will be done.
+        if (repeatState && repeatState.dispatched_at) {
+            const took = Date.now() - Date.parse(repeatState.dispatched_at);
+            if (Number.isFinite(took) && took > 0) lastOccurrenceMs.set(`${runId}/${nodeId}`, took);
+        }
         // A node with a cadence is not finished when one occurrence finishes — it is due again
         // later. Scheduling the next occurrence deliberately does NOT advance the run: nothing
         // downstream of a repeating node may start until it has run the number of times it was
@@ -386,16 +452,12 @@ const claimingFor = new Set(); // device ids with a check-and-claim in progress 
 // cannot see. Kept in memory: this process is the only dispatcher and hears every heartbeat, and
 // the retained status replays the moment it (re)subscribes.
 const deviceState = new Map();
-const HEARTBEAT_STALE_MS = 15000;
+// When each device was last pinged to go quiet, so a heartbeat every 5s is not a ping every 5s.
+const askedQuietAt = new Map();
 
-/** Why a task for this device must wait, or null when it may go now. */
+/** Why a task for this device must wait, or null when it may go now (src/lib/presence.js). */
 function deviceNotReady(deviceId) {
-    const state = deviceState.get(deviceId);
-    if (!state) return 'no heartbeat yet';
-    if (!state.online) return 'offline';
-    if (Date.now() - state.at > HEARTBEAT_STALE_MS) return 'heartbeat is stale';
-    if (state.busy) return 'busy';
-    return null;
+    return presence.notReady(deviceState.get(deviceId), Date.now());
 }
 
 async function dispatchTask(task) {
@@ -451,13 +513,23 @@ async function dispatchTask(task) {
     try { runName = (await store.getRun(task.run_id))?.name || ''; } catch { /* the edge has a fallback */ }
     // A paced Iterate node stores one run per row; this firing sends its own row only.
     const paced = task.run && Array.isArray(task.run.paced) ? task.run.paced : null;
-    const run = paced ? paced[Math.min(Number(task.repeat_done) || 0, paced.length - 1)] : task.run;
+    let run = paced ? paced[Math.min(Number(task.repeat_done) || 0, paced.length - 1)] : task.run;
+    // Which run of a repeated step this is ("run 3 of 20"). The device names its run with it,
+    // records it, and echoes the number in its reports, so a report redelivered from run 2 cannot
+    // be taken for run 3's (see handleTaskStatus). A listing that left the count out reads it.
+    let total = Number(task.repeat_total);
+    if (!Number.isFinite(total)) total = Number((await store.getTaskRepeat(task.run_id, task.node_id) || {}).repeat_total) || 0;
+    const occurrence = total > 1 ? { index: (Number(task.repeat_done) || 0) + 1, total } : null;
+    // A paced node's firings are already named by row; a repeated step's runs are named here.
+    const suffix = occurrence && !paced ? ` · run ${occurrence.index} of ${occurrence.total}` : '';
+    if (run && suffix) run = { ...run, name: `${run.name || runName || stepLabel}${suffix}` };
     const execPayload = JSON.stringify(
         run
-            ? { run, runId: task.run_id, nodeId: task.node_id }
+            ? { run, runId: task.run_id, nodeId: task.node_id, ...(occurrence ? { occurrence } : {}) }
             : {
                 block: task.block, runId: task.run_id, nodeId: task.node_id,
-                name: [runName, stepLabel].filter(Boolean).join(' · ') || undefined,
+                name: ([runName, stepLabel].filter(Boolean).join(' · ') + suffix) || undefined,
+                ...(occurrence ? { occurrence } : {}),
             },
     );
     client.publish(execTopic, execPayload, { qos: 1 }, async (err) => {
@@ -736,7 +808,7 @@ async function failLostTasks() {
     for (const task of await store.listTasksByStatus('queued')) {
         const state = deviceState.get(String(task.device_id || ''));
         const sentAt = Date.parse(task.dispatched_at || '') || 0;
-        if (!state || !state.online || !state.idleSince) continue;
+        if (!presence.isUp(state, now) || !state.idleSince) continue;
         if (now - sentAt < LOST_AFTER_DISPATCH_MS || now - state.idleSince < LOST_AFTER_IDLE_MS) continue;
         const moved = await store.updateTaskStatusIfNotTerminal(
             task.run_id, task.node_id, 'error', TERMINAL_TASK_STATUSES,
@@ -775,7 +847,7 @@ async function sendTaskCommands() {
     for (const task of await store.listTaskCommands()) {
         const device = String(task.device_id || '');
         const state = deviceState.get(device);
-        const up = !!state && state.online && Date.now() - state.at <= HEARTBEAT_STALE_MS;
+        const up = presence.isUp(state, Date.now());
         const step = commandStep(task, up);
         if (step === 'clear') {
             await store.updateTaskCommand(task.run_id, task.node_id, null);
@@ -821,12 +893,42 @@ function taskLabel(task) {
     return [task.run_name, step].filter(Boolean).join(' · ') || task.node_id;
 }
 
+// How long each repeating task's last run took (dispatch to "completed"), keyed `run/node`. Only
+// for the rough finish time sent to the device; lost on restart, when the estimate is left out.
+const lastOccurrenceMs = new Map();
+
+/** What is still to come of each repeated step on a device: "run 3 of 20, 17 more, done ~16:40". */
+function repeatSummaries(repeating, deviceId, now) {
+    return repeating.filter(t => String(t.device_id) === deviceId).map((t) => {
+        const total = Number(t.repeat_total) || 0;
+        const done = Number(t.repeat_done) || 0;
+        const waitingForNext = t.status === 'pending';
+        // Runs after the one on the device now (or, between runs, after the next one).
+        const remaining = Math.max(0, total - done - 1);
+        const took = lastOccurrenceMs.get(`${t.run_id}/${t.node_id}`);
+        const every = Number(t.repeat_every_ms) || 0;
+        return {
+            label: taskLabel(t),
+            run: done + 1,
+            of: total,
+            remaining,
+            state: waitingForNext ? 'waiting' : 'running',
+            ...(every ? { everyMs: every } : {}),
+            ...(waitingForNext && t.not_before ? { nextAt: t.not_before } : {}),
+            // Rough: the runs still to go at the pace of the last one, rounded to the minute so
+            // the summary does not change (and get re-sent) every few seconds.
+            ...(took ? { doneBy: new Date(Math.ceil((now + (remaining + 1) * took + remaining * every) / 60000) * 60000).toISOString() } : {}),
+        };
+    });
+}
+
 async function publishCloudQueues() {
     if (!client.connected) return;
     const waiting = await store.listWaitingTasks();
+    const repeating = await store.listRepeatingTasks();
     const schedules = (await store.listSchedules()).filter(s => s.enabled && s.next_fire_at);
     const devices = new Set([...deviceState.keys()].filter(id => deviceState.get(id).online));
-    for (const t of waiting) devices.add(String(t.device_id));
+    for (const t of [...waiting, ...repeating]) devices.add(String(t.device_id));
     // Cloud's own steps wait on no device, and there is no device to tell.
     devices.delete(CLOUD_DEVICE_ID);
 
@@ -847,8 +949,12 @@ async function publishCloudQueues() {
                 ...(t.not_before ? { due: t.not_before } : {}),
             })),
             nextSchedule,
+            // Steps set to run several times: Cloud sends one run at a time, so the device only
+            // ever has the current one; this is how it knows more are coming.
+            repeats: repeatSummaries(repeating, deviceId, Date.now()),
         };
-        const key = JSON.stringify(summary);
+        // `doneBy` moves a little with every estimate; it must not make the summary "change".
+        const key = JSON.stringify({ ...summary, repeats: summary.repeats.map(({ doneBy, ...r }) => r) });
         if (lastCloudQueue.get(deviceId) === key) continue;
         lastCloudQueue.set(deviceId, key);
         client.publish(
@@ -883,7 +989,7 @@ async function watchBrokerConfig() {
         const desired = `mqtt://${cfg.host}:${cfg.port || 1883}`;
         // AWS IoT credentials are file/cert based and cannot be re-pointed by host alone, so a
         // stored host is honoured only where a plain broker URL is meaningful.
-        if (process.env.AWS_IOT_ENDPOINT) return;
+        if (usesAwsIot()) return;
         if (desired === currentBrokerUrl) return;
 
         console.log(`[Daemon] Broker config changed: ${currentBrokerUrl} -> ${desired}. Reconnecting.`);
@@ -908,11 +1014,31 @@ watchBrokerConfig();
 // see it once it reconnects and the retained message replays. This local timeout is a backstop
 // for the daemon-was-connected-the-whole-time case, catching a device that goes silent without
 // even the LWT firing (e.g. the broker itself losing that device's session ungracefully).
+// Now judged per device (src/lib/presence.js): silent for three of the intervals it advertised, or
+// never answered the ping sent for a retained "online". A flat 15s for everyone would call every
+// edge on the slow heartbeat offline.
+const startedAt = Date.now();
+let orphansChecked = false;
 setInterval(async () => {
     try {
-        await store.markStaleDevicesOffline(new Date(Date.now() - 15000).toISOString());
+        const now = Date.now();
+        for (const [deviceId, state] of deviceState) {
+            if (!presence.hasLapsed(state, now)) continue;
+            console.log(`[Daemon] ${deviceId} ${state.confirmed ? 'has gone quiet' : 'did not answer'}; marked offline.`);
+            deviceState.set(deviceId, { ...state, online: false, busy: false, idleSince: null });
+            await store.markDeviceOffline(deviceId);
+        }
+        // A device the store calls online that the broker has said nothing about since this
+        // process started (no retained status at all) cannot be online. Once, after the retained
+        // messages have had time to replay.
+        if (!orphansChecked && client.connected && now - startedAt > 20000) {
+            orphansChecked = true;
+            for (const d of await store.listDevices()) {
+                if (d.status === 'online' && !deviceState.has(String(d.id))) await store.markDeviceOffline(String(d.id));
+            }
+        }
     } catch (e) {
-        console.error('[Daemon] Failed to mark stale devices offline:', e.message);
+        console.error('[Daemon] Failed to mark quiet devices offline:', e.message);
     }
 }, 5000);
 
@@ -945,6 +1071,9 @@ function tellRemoved(deviceId) {
     toldRemovedAt.set(deviceId, Date.now());
     client.publish(`${TOPIC_PREFIX}/${deviceId}/removed`, JSON.stringify({ ts: Date.now() / 1000 }), { qos: 1 });
     console.log(`[Daemon] ${deviceId} was removed from Cloud but is still connected; told it to forget its pairing.`);
+    // Its broker secret went with it, so it cannot sign in again; end the session it still holds
+    // once the notice has had time to arrive.
+    if (embeddedBroker?.kick) setTimeout(() => embeddedBroker.kick(deviceId), 3000);
 }
 
 // Leave a truthful heartbeat behind on a clean exit, so the UI says "backend stopped" straight

@@ -20,7 +20,7 @@
 //   <userData>/git.bin               GitHub/GitLab tokens for private drivers (encrypted)
 //   <userData>/private-packages/     private repositories downloaded at one commit each
 
-const { app, BrowserWindow, WebContentsView, Menu, Tray, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, nativeTheme, safeStorage } = require('electron');
+const { app, BrowserWindow, WebContentsView, Menu, Notification, Tray, dialog, ipcMain, shell, net, protocol, clipboard, nativeImage, nativeTheme, safeStorage } = require('electron');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -33,11 +33,21 @@ const { HubCatalog } = require('./hubCatalog');
 const { GitConnections } = require('./gitRepos');
 const { secretFile } = require('./secrets');
 const { Updates } = require('./updater');
-const { resolveResources } = require('./resources');
+const { resolveResources, REPO_ROOT } = require('./resources');
+const { exampleSource, materializeExample } = require('./example');
 const { validateManifest, mergeIntoDeck, describeInstall, ManifestError } = require('./manifest');
 const { freeName } = require('./deckEdit');
+const report = require('./problemReport');
+const { AttentionWatcher } = require('./attention');
+const { OPTIMIZERS, selectionOf } = require('./optimizers');
+const os = require('node:os');
+const crypto = require('node:crypto');
 
 const SMOKE_TEST = process.argv.includes('--smoke-test');
+// A release build does not offer Cloud yet: its sidebar row asks for early access instead, and the
+// decks it starts hide their Cloud pages. Nothing Cloud is removed. IVORYOS_ENABLE_CLOUD=1 turns it
+// back on in a packaged app; IVORYOS_CLOUD_COMING_SOON=1 shows the release behaviour in development.
+const CLOUD_COMING_SOON = (app.isPackaged && process.env.IVORYOS_ENABLE_CLOUD !== '1') || process.env.IVORYOS_CLOUD_COMING_SOON === '1';
 const LINK_SCHEME = 'ivoryos';
 const APP_SCHEME = 'ivoryos-app';
 const LAUNCHER_URL = `${APP_SCHEME}://ui/launcher/`;
@@ -148,6 +158,41 @@ function keepToOrigin(win, isOwn) {
     });
 }
 
+// --- notifications --------------------------------------------------------------------------------
+
+// Every running deck is watched for what needs a person (attention.js): a User input waiting for an
+// answer, or a failed step waiting for retry, skip or stop. Each becomes one system notification
+// that opens the deck, so a run waiting on someone is noticed with the app in the background, or
+// with no tab open on that deck at all.
+let attention = null;
+const shownNotifications = new Set(); // held until clicked or closed: macOS drops a collected one's click
+
+function watchRunningDecks() {
+    if (!attention) return;
+    attention.sync(manager.list()
+        .filter((p) => p.status.state === 'running' && p.status.url)
+        .map((p) => ({ id: p.id, name: p.name, url: p.status.url })));
+}
+
+function notifyAttention(item) {
+    if (!Notification.isSupported()) return;
+    // Looking at that deck already: its own pop-up says it.
+    if (launcherWindow && !launcherWindow.isDestroyed() && launcherWindow.isFocused() && activeTab === item.deckId) return;
+    const note = new Notification({
+        title: `${item.title} · ${item.deckName}`,
+        body: item.run_name ? `${item.run_name}: ${item.body}` : item.body,
+    });
+    shownNotifications.add(note);
+    const forget = () => shownNotifications.delete(note);
+    note.on('click', () => {
+        forget();
+        showLauncher();
+        openEdgeTab(item.deckId);
+    });
+    note.on('close', forget);
+    note.show();
+}
+
 function showLauncher() {
     if (launcherWindow && !launcherWindow.isDestroyed()) {
         if (launcherWindow.isMinimized()) launcherWindow.restore();
@@ -246,6 +291,20 @@ function openEdgeTab(id, page) {
         view.webContents.loadURL(target);
     }
     showTab(id);
+}
+
+// An edge that was restarted (a deck edit, an install, Restart) comes back as a new process on
+// the same address; its open tab still shows the old page, or a connection error. Reload the tab
+// the moment the edge reports ready, so what the tab shows is always the edge that is running.
+const lastState = new Map();
+function reloadReturnedTabs() {
+    for (const p of manager.list()) {
+        const was = lastState.get(p.id);
+        lastState.set(p.id, p.status.state);
+        if (p.status.state === 'running' && was && was !== 'running' && edgeTabs.has(p.id)) {
+            edgeTabs.get(p.id).webContents.reload();
+        }
+    }
 }
 
 function closeEdgeTab(id) {
@@ -707,6 +766,15 @@ async function importFromGit(profileId, provider, repoId, ref) {
 
 // --- IPC: what the launcher page may ask for ----------------------------------------------------
 
+const REPORT_REPO = 'ivoryzh/ivoryos-next';
+const app_version = () => app.getVersion();
+/** What problem reports mask: the home folder (usually the person's name) and the user name. */
+function reportContext() {
+    let username = null;
+    try { username = os.userInfo().username; } catch { /* no passwd entry */ }
+    return { home: os.homedir(), username };
+}
+
 function fromLauncher(event) {
     const url = event.senderFrame ? event.senderFrame.url : '';
     if (!url.startsWith(`${APP_SCHEME}://`)) throw new Error('Only the launcher can do that.');
@@ -740,6 +808,8 @@ function snapshot() {
         autoUpdate: manager.autoUpdate,
         tray: { available: !!tray, minimizeToTray: manager.windowPref('minimizeToTray'), closeToTray: manager.windowPref('closeToTray') },
         theme: manager.theme,
+        cloudOnly: manager.cloudOnly,
+        cloudComingSoon: CLOUD_COMING_SOON,
         // False where the OS has no keychain: sign-ins then last until the app quits.
         secretsPersist: safeStorage.isEncryptionAvailable(),
     };
@@ -785,6 +855,29 @@ function registerIpc() {
         if (!opts) throw new Error(`Unknown picker: ${kind}`);
         const { canceled, filePaths } = await dialog.showOpenDialog(showLauncher(), opts);
         return canceled ? null : filePaths[0];
+    });
+    // A script profile's code, for the Code tab: the one file, read and written in place. A
+    // script is what the person wrote, so nothing here reformats it or checks it -- Restart does.
+    handle('launcher:script:read', (id) => {
+        const p = manager.get(id);
+        if (p.kind !== 'script' || !p.script) throw new Error('This profile does not run a script.');
+        return fs.readFileSync(p.script, 'utf8');
+    });
+    handle('launcher:script:write', (id, text) => {
+        const p = manager.get(id);
+        if (p.kind !== 'script' || !p.script) throw new Error('This profile does not run a script.');
+        if (typeof text !== 'string') throw new Error('Expected the script text.');
+        fs.writeFileSync(p.script, text);
+    });
+    // "Try the example": the simulated lab as a script profile of its own (example.js).
+    handle('launcher:example', () => {
+        const src = exampleSource({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, repoRoot: REPO_ROOT });
+        if (!src) throw new Error('The example is not bundled with this build.');
+        const existing = manager.list().find((p) => p.kind === 'script' && p.script === path.join(home(), 'example', 'example_lab.py'));
+        if (existing) return existing;
+        const profile = manager.create(materializeExample(home(), src));
+        broadcast('launcher:changed');
+        return manager.list().find((p) => p.id === profile.id);
     });
     handle('launcher:deck', (id) => manager.readDeck(id));
     handle('launcher:instrument:save', (id, originalName, entry) => manager.saveInstrument(id, originalName, entry));
@@ -901,6 +994,74 @@ function registerIpc() {
     });
     handle('app:reveal-data', () => shell.openPath(home()));
     handle('app:set-theme', (theme) => { manager.setTheme(theme); applyTheme(); broadcast('launcher:changed'); });
+    handle('app:set-cloud-only', (on) => { manager.setCloudOnly(on); broadcast('launcher:changed'); });
+    // "Send to IvoryOS" (problemReport.js): prepare gathers and redacts, the person reads and edits
+    // it, send files exactly that (redacted again) in the Hub. Nothing is sent by prepare.
+    // `failure` is what the page knows and the main process may not: this session's log as the
+    // Log tab shows it (not the log file, which holds every earlier session too), and, for a Hub
+    // install that failed, the message and pip output (a new deck that failed is already gone).
+    handle('launcher:report:prepare', async (id, failure = {}) => {
+        let profile = null;
+        try { profile = id ? manager.get(id) : null; } catch { /* removed since */ }
+        const status = profile ? manager.statusOf(id) : { state: 'error', message: failure.message || '' };
+        const runtime = runtimeStatus.state === 'error' ? null : await getRuntime().catch(() => null);
+        const python = profile && profile.kind === 'script' && profile.python ? profile.python : runtime && runtime.python;
+        const [environment, check] = runtime && python
+            ? await Promise.all([runtime.describe(python), runtime.check(python)])
+            : [{ error: runtimeStatus.message || 'The Python environment is not set up.' }, null];
+        const log = typeof failure.log === 'string' ? failure.log : (profile ? manager.logTail(id) : '');
+        // pip's output is not in the edge's log: it is kept on the status (manager.install).
+        const installOutput = failure.output || (/^Install failed/.test(status.message || '') ? status.logTail : null);
+        let deck = null;
+        try { deck = profile && profile.kind === 'deck' ? manager.readDeck(id) : null; } catch { /* no deck file */ }
+        const app = { version: app_version(), platform: process.platform, arch: process.arch, os: os.release() };
+        return {
+            details: report.buildDetails({ app, profile: profile || { kind: 'deck' }, status, log, installOutput, deck, environment, check }, reportContext()),
+            kind: failure.kind || report.kindOf(status),
+            email: (account.describe().user || {}).email || null,
+        };
+    });
+    handle('launcher:report:send', async ({ description, details, kind, contactEmail }) => {
+        const row = report.buildRow({
+            id: crypto.randomUUID(), description, details, contactEmail, kind,
+            app: { version: app_version(), platform: process.platform, arch: process.arch },
+        }, reportContext());
+        try {
+            return await catalog.fileReport(row);
+        } catch (e) {
+            // The person still has a way to send it: a prefilled (public) GitHub issue.
+            throw Object.assign(new Error(e.message), { output: report.githubIssueUrl(REPORT_REPO, row) });
+        }
+    });
+
+    // A deck's optimizer backends (optimizers.js): the tested versions, the deck's choice, and
+    // what the shared environment has installed now.
+    handle('launcher:optimizers', async (id) => {
+        // No id: a deck that does not exist yet (the Hub making a new one) has chosen nothing.
+        const deck = id ? manager.readDeck(id) : { packages: [] };
+        const runtime = await getRuntime().catch(() => null);
+        const env = runtime ? await runtime.describe(runtime.python) : { error: runtimeStatus.message };
+        return { catalog: OPTIMIZERS, selected: selectionOf(deck.packages || []), installed: env.optimizers || {}, error: env.error || null };
+    });
+    handle('launcher:optimizers:set', (id, selection) => manager.setOptimizers(id, selection));
+
+    // "Cloud early access" while Cloud is not offered: a message to the team through the Hub's
+    // contact inquiries. Fails with `output` set to the Hub's contact page as the way round.
+    handle('launcher:early-access', async ({ email, name }) => {
+        const address = String(email || '').trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw new Error('Enter an email address to be told when it opens.');
+        try {
+            await catalog.contactInquiry({
+                name: String(name || '').trim() || 'IvoryOS app user',
+                email: address,
+                message: `Cloud early access (from the IvoryOS app ${app_version()} on ${process.platform}).`,
+            });
+        } catch (e) {
+            throw Object.assign(new Error(e.message), { output: `${manager.hubUrl}/contact` });
+        }
+        return true;
+    });
+
     handle('launcher:reorder', (ids) => manager.reorder(ids));
     // The active edge or Cloud tab, reloaded: for a page that did not pick up a change.
     handle('launcher:reload-tab', () => {
@@ -1088,8 +1249,10 @@ app.whenReady().then(async () => {
     // development run is the stock Electron binary, so set the Dock icon by hand.
     if (process.platform === 'darwin' && app.dock && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
     serveFrontend();
-    manager = new ProfileManager({ home: home(), getRuntime, frontendDir: resources().frontendDir });
-    manager.on('changed', () => { broadcast('launcher:changed'); refreshTray(); });
+    manager = new ProfileManager({ home: home(), getRuntime, frontendDir: resources().frontendDir, cloudComingSoon: CLOUD_COMING_SOON });
+    manager.on('changed', () => { broadcast('launcher:changed'); refreshTray(); reloadReturnedTabs(); watchRunningDecks(); });
+    attention = new AttentionWatcher({ WebSocket: globalThis.WebSocket });
+    attention.on('attention', notifyAttention);
     manager.on('log', (id, line) => broadcast('launcher:log', id, line));
     manager.on('crashed', (id) => closeEdgeTab(id));
     account = new Account({ fetch: (...a) => net.fetch(...a), store: secretFile(path.join(home(), 'account.bin'), safeStorage) });
@@ -1121,12 +1284,13 @@ app.whenReady().then(async () => {
     nativeTheme.on('updated', refreshTitleBar);
     if (!SMOKE_TEST) createTray();
     showLauncher();
-    getRuntime().catch(() => {}); // warm Python up while the launcher draws
+    // Warm Python up while the launcher draws, unless this is a Cloud-only install, which never runs it.
+    if (!manager.cloudOnly) getRuntime().catch(() => {});
 
     if (SMOKE_TEST) return smokeTest();
     updates.schedule();
 
-    for (const p of manager.list().filter((x) => x.autoStart)) manager.start(p.id).catch(() => {});
+    if (!manager.cloudOnly) for (const p of manager.list().filter((x) => x.autoStart)) manager.start(p.id).catch(() => {});
     while (pendingLinks.length) await handleLink(pendingLinks.shift());
 });
 
@@ -1264,6 +1428,7 @@ app.on('window-all-closed', () => {
 // than being orphaned or killed mid-write.
 app.on('before-quit', (event) => {
     exiting = true;
+    if (attention) attention.close();
     if (quitting || !manager || manager.running.size === 0) return;
     event.preventDefault();
     quitting = true;

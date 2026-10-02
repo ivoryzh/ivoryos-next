@@ -36,7 +36,7 @@ export default function ArgsForm({ defs, values, onChange, depth = 0 }: {
         if (def.type === 'bool') {
           return (
             <label key={def.name} className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-              <input type="checkbox" checked={values[def.name] === true} onChange={e => set(e.target.checked)} className="accent-indigo-600" />
+              <input type="checkbox" checked={values[def.name] === true} onChange={e => set(e.target.checked)} className="accent-accent" />
               <span className="font-mono">{def.name}</span>
             </label>
           );

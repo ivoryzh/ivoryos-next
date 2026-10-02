@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
 import { authorize } from '@/lib/auth';
 import { isOwned, ownedKeys } from '@/lib/workspace';
+import { isArchivedId } from '@/lib/deviceRemoval';
 
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +42,18 @@ export async function POST(req: Request) {
   if (!(await isOwned('device', String(deviceId), ws))) {
     return NextResponse.json({ error: 'No such device.' }, { status: 404 });
   }
+  if (isArchivedId(deviceId)) {
+    return NextResponse.json(
+      { error: 'This device was removed from Cloud. Its workflows are kept as a record and cannot be changed.' },
+      { status: 409 },
+    );
+  }
+  // Sending the workflow to its device is a choice (`push`, default yes). Kept in Cloud only, it
+  // is marked so: the device's version of the same name does not replace it (daemon.js), and a
+  // run cannot use it until it is sent, since the device would run its own version.
+  const push = body.push !== false;
+  const content = { ...(body.body || {}) } as Record<string, any>;
+  delete content.cloud_only;
 
   try {
     const store = getStore();
@@ -48,8 +61,9 @@ export async function POST(req: Request) {
       device_id: deviceId,
       name,
       description: body.description || '',
-      body: body.body || {},
+      body: push ? content : { ...content, cloud_only: true },
     });
+    if (!push) return NextResponse.json({ status: 'success', push: 'not sent' });
 
     // Writing Cloud's own copy is not enough, and used to be all this did. The device resolves a
     // workflow against its local WORKFLOWS_DIR, so a sequence that existed only here could never
@@ -62,8 +76,8 @@ export async function POST(req: Request) {
     await store.enqueueSequencePush({
       device_id: deviceId,
       name,
-      body: body.body || {},
-      body_hash: body.body?.body_hash || '',
+      body: content,
+      body_hash: content.body_hash || '',
     });
 
     return NextResponse.json({ status: 'success', push: 'queued' });

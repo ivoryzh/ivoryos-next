@@ -78,11 +78,20 @@ export const userInputValue = (steps: any[], name: string) => {
   return step?.outputs?.result ?? '';
 };
 
+/**
+ * Steps that never ran because the run ended before them (a graceful stop, which skips the rest
+ * of main and maybe the cleanup): skipped with no error of their own. A step skipped after it
+ * failed carries its error and is not "not run". Every row view reads a row of these as 'not_run',
+ * drawn grey: counted as 'completed' it showed green, as if those samples had been measured.
+ */
+export const neverRan = (steps: any[]) => steps.length > 0 && steps.every(s => s.status === 'skipped' && !s.error);
+
 export const aggregateStatus = (steps: any[]) =>
   steps.some(s => s.status === 'error') ? 'error'
     : steps.some(s => s.status === 'running' || s.status === 'waiting_input') ? 'running'
-      : steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped') ? 'completed'
-        : 'pending';
+      : neverRan(steps) ? 'not_run'
+        : steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped') ? 'completed'
+          : 'pending';
 
 export type RunRow = { row: number; status: string; values: unknown[]; details: ReturnType<typeof toDetail>[] };
 
@@ -149,7 +158,7 @@ export function formatRun(r: any): FormattedRun {
       const hasError = iterSteps.some((s: any) => s.status === 'error');
       const isRunning = iterSteps.some((s: any) => s.status === 'running');
       const isPending = iterSteps.every((s: any) => s.status === 'pending');
-      const status = hasError ? 'error' : isRunning ? 'running' : isPending ? 'pending' : 'completed';
+      const status = hasError ? 'error' : isRunning ? 'running' : neverRan(iterSteps) ? 'not_run' : isPending ? 'pending' : 'completed';
 
       // The suggested value for each search-space parameter shows up as a step argument
       // somewhere in this iteration's steps (whichever templated call actually used it).
@@ -237,7 +246,7 @@ export function formatRun(r: any): FormattedRun {
       const hasError = rowSteps.some((s: any) => s.status === 'error');
       const isRunning = rowSteps.some((s: any) => s.status === 'running');
       const isPending = rowSteps.every((s: any) => s.status === 'pending');
-      const status = hasError ? 'error' : isRunning ? 'running' : isPending ? 'pending' : 'completed';
+      const status = hasError ? 'error' : isRunning ? 'running' : neverRan(rowSteps.filter(Boolean)) ? 'not_run' : isPending ? 'pending' : 'completed';
 
       const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
       // Match each returnVar to the step at the same position in the per-row template —
@@ -288,12 +297,13 @@ export const datasheetCsv = (run: { variables: string[]; rows: { values?: unknow
  * recorded it when the run finished (queue.py run_issues) -- `{retried, skipped}` counts, absent
  * when nothing failed. Words only; the counting happens once, on the edge, for every view.
  */
-export type RunIssues = { retried?: number; skipped?: number };
+export type RunIssues = { retried?: number; skipped?: number; stopped_early?: number };
 
 export function issuesLabel(issues?: RunIssues | null): string {
   if (!issues) return '';
   const parts: string[] = [];
   if (issues.retried) parts.push(`${issues.retried} failed attempt${issues.retried === 1 ? '' : 's'} retried`);
   if (issues.skipped) parts.push(`${issues.skipped} failed step${issues.skipped === 1 ? '' : 's'} skipped`);
+  if (issues.stopped_early) parts.push('stopped early');
   return parts.join(', ');
 }

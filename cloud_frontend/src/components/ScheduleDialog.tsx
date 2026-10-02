@@ -18,7 +18,7 @@ interface Props {
   onCreate: (spec: { name: string; everyMinutes: number; maxRuns: number; startAt?: string }) => Promise<any>;
 }
 
-const field = 'w-full rounded border border-gray-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-blue-500 dark:border-gray-600';
+const field = 'w-full rounded border border-gray-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent dark:border-gray-600';
 const label = 'text-[10px] font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400';
 
 export default function ScheduleDialog({ defaultName, onCancel, onCreate }: Props) {
@@ -113,7 +113,7 @@ export default function ScheduleDialog({ defaultName, onCancel, onCreate }: Prop
           <button
             onClick={submit}
             disabled={!valid || busy}
-            className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded-lg bg-accent px-4 py-1.5 text-sm font-semibold text-on-accent disabled:cursor-not-allowed disabled:opacity-40"
           >
             {busy ? 'Creating…' : 'Create schedule'}
           </button>

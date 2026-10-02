@@ -433,7 +433,101 @@ export function summariseDiff(rows: DiffRow[]) {
 /** The output variable names a block writes. `returnVar` holds a comma-separated list — one name
  *  per return pointer (or per tuple element, for a sequence saved before pointers existed). */
 export function returnVarNames(block: SequenceBlock): string[] {
+  // A linked workflow saves what its own steps save, under the names this step gives them.
+  if (block.instrument === LIBRARY_INSTRUMENT && Array.isArray((block.schema as any)?.return_paths)) {
+    return linkOutputBindings(block).map(b => b.var);
+  }
   return String(block.returnVar || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+/** Every name a step saves its result under, in any of the shapes a step arrives in. */
+function savedNames(b: any): string[] {
+  const out = new Set<string>(returnVarNames(b));
+  const p = b?.params || {};
+  // An expanded step (POST /api/workflows/expand) carries them in its params.
+  String(p._return_var || b?.return || '').split(',').map((n: string) => n.trim()).filter(Boolean).forEach((n: string) => out.add(n));
+  (Array.isArray(p._return_bindings) ? p._return_bindings : []).forEach((x: any) => { if (x?.var) out.add(String(x.var).trim()); });
+  (Array.isArray(p._return_aliases) ? p._return_aliases : []).forEach((x: any) => { if (Array.isArray(x) && x[1]) out.add(String(x[1])); });
+  if ((b?.instrument === 'Flow_Control' || b?.instrument === 'Flow Control') && b?.method === 'User_Input' && p.variable_name) {
+    out.add(String(p.variable_name).trim());
+  }
+  return [...out];
+}
+
+/**
+ * The `#names` a run fills in itself: a User input step's answer, or what an earlier step saved
+ * (a linked workflow's outputs included). A `#name` used only after a step that saves it reads
+ * that value when the run gets there, the way the generated Python reads a variable, and the edge
+ * substitutes it then (substitute_workflow_vars). So the Designer's Run/Configure choice,
+ * Configure's columns and Optimize's search space must not ask for it.
+ *
+ * Order decides: a name read before anything saves it is an input, even if a later step saves
+ * the same name (setting `#temperature`, then reading the temperature back as `temperature`).
+ * Run order is prep, main, cleanup; arguments starting with `_` are bookkeeping, not reads.
+ */
+export function runtimeVarNames(prep: any[], main: any[], cleanup: any[]): Set<string> {
+  const produced = new Set<string>();
+  const readFirst = new Set<string>();
+  const reads = (o: any, out: string[]) => {
+    if (typeof o === 'string') {
+      const t = o.trim();
+      if (t.startsWith('#') && t.length > 1) out.push(t.slice(1).trim());
+    } else if (o && typeof o === 'object') {
+      Object.entries(o).forEach(([k, v]) => { if (!k.startsWith('_')) reads(v, out); });
+    }
+  };
+  for (const b of [...(prep || []), ...(main || []), ...(cleanup || [])]) {
+    const names: string[] = [];
+    reads(b?.params, names);
+    names.forEach(n => { if (!produced.has(n)) readFirst.add(n); });
+    savedNames(b).forEach(n => produced.add(n));
+  }
+  return new Set([...produced].filter(n => !readFirst.has(n)));
+}
+
+type OutputLeaf = { path: string; type: string; numeric: boolean };
+
+/**
+ * What a saved workflow saves: every name its steps save a result under, in the order they run,
+ * as the outputs of a step that links it. Each carries the type of the result field it comes from
+ * (`leavesOf` gives an instrument method's return fields, the same `return_paths` a step uses),
+ * so an optimizer can tell a number from a sample id. An output whose source cannot be read is
+ * assumed numeric, the same assumption Optimize makes for an imported sequence.
+ *
+ * Published as a workflow's `return_paths` in the toolbox, so a linked step gets its outputs
+ * through the machinery every instrument step already uses: `path` is the name inside the
+ * workflow, and the step's `returnBindings` say what it is saved as here.
+ */
+export function workflowOutputs(
+  body: SavedWorkflowBody | undefined,
+  leavesOf: (instrument: string, method: string) => OutputLeaf[],
+): OutputLeaf[] {
+  const out: OutputLeaf[] = [];
+  const add = (name: string, leaf?: OutputLeaf) => {
+    if (name && !out.some(o => o.path === name)) out.push({ path: name, type: leaf?.type || 'Any', numeric: leaf ? !!leaf.numeric : true });
+  };
+  flattenSavedBody(body).forEach((b: any) => {
+    const leaves = leavesOf(String(b.instrument || ''), String(b.action || b.method || '')) || [];
+    const bindings = b.return_bindings || b.returnBindings;
+    if (Array.isArray(bindings) && bindings.length) {
+      bindings.forEach((x: any) => add(String(x?.var || '').trim(), leaves.find(l => l.path === x?.path)));
+    } else {
+      String(b.return || b.returnVar || '').split(',').map((n: string) => n.trim()).filter(Boolean)
+        .forEach((n: string, i: number) => add(n, leaves[i]));
+    }
+  });
+  return out;
+}
+
+/**
+ * A linked workflow step's outputs and the name each is saved under here: what its
+ * `returnBindings` say, or the workflow's own name for it. Nothing to store until someone renames
+ * one; the run binds an unrenamed output under its inner name anyway (expand_workflow_blocks,
+ * `_return_aliases`, binds a renamed one under both).
+ */
+export function linkOutputBindings(block: { schema?: any; returnBindings?: { path: string; var: string }[] }): { path: string; var: string }[] {
+  const leaves: OutputLeaf[] = Array.isArray(block.schema?.return_paths) ? block.schema.return_paths : [];
+  return leaves.map(l => ({ path: l.path, var: (block.returnBindings?.find(b => b.path === l.path)?.var || '').trim() || l.path }));
 }
 
 /** Every output variable name already in use across the given blocks. */
@@ -518,4 +612,38 @@ export function groupAt(blocks: SequenceBlock[], index: number): SequenceBlock['
   const after = blocks[index + 1]?.group;
   if (before?.id && before.id === after?.id) return before;
   return undefined;
+}
+
+/**
+ * How a run that repeats its main block (an optimization's trials, a spreadsheet's rows) runs a
+ * linked workflow placed there: its prep once, its main block on every pass, its cleanup once.
+ *
+ * A link stands for the whole saved workflow, prep and cleanup included, which is right for a
+ * single run and wrong for a repeated one: an optimization over a linked colour-match workflow
+ * set its target, made a new data folder and asked for confirmation again in every trial, and a
+ * spreadsheet tared the balance once per row. So each such link is split three ways with
+ * `phases`, which expand_workflow_blocks honours: `['prep']` after the run's own prep, `['script']`
+ * in place, `['cleanup']` before the run's own cleanup. Cloud's runPayload.ts does the same per
+ * node. The prep and cleanup copies keep only literal arguments: a '#name' is filled per trial or
+ * per row, and prep runs before any of them (Optimize splits its resolved template, so Fixed
+ * values are literal by then). A link that already names its phases is left as it is.
+ */
+export function splitRepeatedLinks<T extends { prep: any[]; sequence: any[]; cleanup: any[] }>(seqs: T): T {
+  const whole = (b: any) => b?.instrument === LIBRARY_INSTRUMENT && !Array.isArray(b?.phases);
+  const links = (seqs.sequence || []).filter(whole);
+  if (!links.length) return seqs;
+  const once = (b: any, phase: 'prep' | 'cleanup') => ({
+    ...b,
+    ...(b.id !== undefined ? { id: `${b.id}-${phase}` } : {}),
+    params: Object.fromEntries(Object.entries(b.params || {}).filter(([k, v]) =>
+      !k.startsWith('_') && !(typeof v === 'string' && v.trim().startsWith('#')))),
+    isBatchAction: false,
+    phases: [phase],
+  });
+  return {
+    ...seqs,
+    prep: [...(seqs.prep || []), ...links.map((b) => once(b, 'prep'))],
+    sequence: seqs.sequence.map((b) => (whole(b) ? { ...b, phases: ['script'] } : b)),
+    cleanup: [...links.map((b) => once(b, 'cleanup')), ...(seqs.cleanup || [])],
+  };
 }

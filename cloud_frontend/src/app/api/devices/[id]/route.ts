@@ -4,6 +4,8 @@ import { authorize } from '@/lib/auth';
 import { isOwned } from '@/lib/workspace';
 import { ACTIVE_TASK_STATUSES } from '@/lib/dag';
 import { removeDevice } from '@/lib/deviceRemoval';
+import { cleanDeviceName } from '@/lib/pairing';
+import { deviceNameConflict, nameTakenMessage } from '@/lib/deviceNaming';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,10 +49,40 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // Remembered as removed, its records deleted, and on AWS its certificates revoked and Thing
     // deleted (deviceRemoval.js). A device still running is told by the daemon to forget its
     // pairing, and is never re-registered from its heartbeat; pairing it again brings it back.
-    const { removed, aws } = await removeDevice(store, deviceId);
-    return NextResponse.json({ ok: true, id: deviceId, removed, aws });
+    // Its workflows are kept as a record in this workspace's Library (see deviceRemoval.js).
+    const { removed, aws, archived, workflows } = await removeDevice(store, deviceId);
+    return NextResponse.json({ ok: true, id: deviceId, removed, aws, archived, workflows });
   } catch (error: any) {
     console.error('Failed to delete device:', error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+}
+
+/**
+ * PATCH {name}: rename a device of the signed-in workspace. Only the label changes: the id stays
+ * its MQTT identity, so nothing on the device or the broker is touched, and runs, schedules and
+ * canvases that name it by id keep working. Names are unique within the workspace
+ * (pairing.js nameConflict).
+ */
+export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await authorize();
+  if ('response' in auth) return auth.response;
+  const ws = auth.session.workspace.id;
+  const { id } = await params;
+  const deviceId = decodeURIComponent(id || '').trim();
+  if (!deviceId || !(await isOwned('device', deviceId, ws))) {
+    return NextResponse.json({ error: `No device "${deviceId}" is registered.` }, { status: 404 });
+  }
+  const body = await req.json().catch(() => ({}));
+  const name = cleanDeviceName(body?.name);
+  if (!name) {
+    return NextResponse.json({ error: 'Give the device a name of up to 64 characters, without / + or #.' }, { status: 400 });
+  }
+  if (await deviceNameConflict(ws, name, deviceId)) {
+    return NextResponse.json({ error: nameTakenMessage(name), field: 'name' }, { status: 409 });
+  }
+  if (!(await getStore().renameDevice(deviceId, name))) {
+    return NextResponse.json({ error: `No device "${deviceId}" is registered.` }, { status: 404 });
+  }
+  return NextResponse.json({ ok: true, id: deviceId, name });
 }

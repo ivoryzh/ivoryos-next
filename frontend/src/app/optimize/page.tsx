@@ -1,10 +1,13 @@
 "use client";
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
-import { useState, useEffect } from 'react';
-import { Settings2, Info, Zap, ChevronDown, Plus, X } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Settings2, Info, Zap, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
+import LiveRun from '@/components/LiveRun';
+import { useQueueBusy } from '@/queueBusy';
+import { editRunIdFromUrl, hydrateBlocks, leaveEdit, loadQueuedRun, saveQueuedRun, sourceBlock, type QueuedEdit } from '@/queuedEdit';
 import {
   buildRunName,
   getReturnLeaves,
@@ -14,7 +17,7 @@ import {
   getVarMode as sharedGetVarMode,
   getVarModeType as sharedGetVarModeType,
   isPerIteration as sharedIsPerIteration,
-  getIterationValue as sharedGetIterationValue, useDocumentTheme } from '@ivoryos/shared-ui';
+  getIterationValue as sharedGetIterationValue, useDocumentTheme, LIBRARY_INSTRUMENT, linkOutputBindings, runtimeVarNames, splitRepeatedLinks , confirmDialog , notify } from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
   baybe: 'BayBE',
@@ -25,6 +28,9 @@ const OPTIMIZER_LABELS: Record<string, string> = {
 // A run-on "(needs parameters: a, b, c; objectives: d, e)" sentence is hard to scan — pill tags
 // read at a glance instead, and reuse the same visual language wherever these column names
 // need explaining (the "no compatible runs" message and the CSV upload requirement).
+// The Search Space and Objectives rows: a short field for a number, not a full-width box.
+const compactInput = 'h-7 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-md px-2 text-xs font-mono outline-none focus:border-accent';
+
 const RequiredColumns = ({ params, objectives }: { params: string[]; objectives: string[] }) => (
   <div className="flex flex-wrap items-center gap-1.5">
     <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide shrink-0">Requires</span>
@@ -32,7 +38,7 @@ const RequiredColumns = ({ params, objectives }: { params: string[]; objectives:
       <span key={p} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400">{p}</span>
     ))}
     {objectives.map(o => (
-      <span key={o} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-500/10 text-green-700 dark:text-green-400">{o}</span>
+      <span key={o} title="objective" className="text-[10px] font-mono px-1.5 py-0.5 rounded ring-1 ring-inset ring-gray-300 text-gray-800 dark:ring-white/20 dark:text-gray-200">{o}</span>
     ))}
   </div>
 );
@@ -55,9 +61,17 @@ export default function OptimizePage() {
   const [optimizerSchemas, setOptimizerSchemas] = useState<Record<string, any>>({});
   const [optimizersLoaded, setOptimizersLoaded] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const queueBusy = useQueueBusy();
+  // Editing a queued optimization (?edit=<id>, queuedEdit.ts): its settings, not the last-used
+  // ones, and nothing saved over the person's own while it is shown.
+  const [editing, setEditing] = useState<QueuedEdit | null>(null);
+  const editingRef = useRef(false);
   const [experimentName, setExperimentName] = useState('');
   const [historyRuns, setHistoryRuns] = useState<any[]>([]);
   const [selectedHistoryIds, setSelectedHistoryIds] = useState<number[]>([]);
+  // Past runs to seed from are folded into one line until opened: twenty matching runs as twenty
+  // rows buried the rest of the page.
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [uploadedExistingRows, setUploadedExistingRows] = useState<any[]>([]);
   const [uploadFileName, setUploadFileName] = useState('');
   const [uploadError, setUploadError] = useState('');
@@ -78,7 +92,6 @@ export default function OptimizePage() {
       optimizer: saved.optimizer || '',
       budget: saved.budget ?? 25,
       batch_size: saved.batch_size ?? 1,
-      error_recovery: saved.error_recovery || 'stop',
       bounds: saved.bounds || {},
       objectives: saved.objectives || {},
       optimizer_config: saved.optimizer_config || {},
@@ -88,12 +101,11 @@ export default function OptimizePage() {
   });
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || editingRef.current) return;
     localStorage.setItem('ivoryos_optimize_config', JSON.stringify({
       optimizer: optConfig.optimizer,
       budget: optConfig.budget,
       batch_size: optConfig.batch_size,
-      error_recovery: optConfig.error_recovery,
       bounds: optConfig.bounds,
       objectives: optConfig.objectives,
       optimizer_config: optConfig.optimizer_config,
@@ -159,20 +171,49 @@ export default function OptimizePage() {
       })
       .catch(err => { console.error(err); setOptimizersLoaded(true); });
 
-    // Load sequence and extract variables
+    // Load sequence and extract variables: a queued run being edited, or the Designer's workflow.
+    const editId = editRunIdFromUrl();
     const savedSequence = localStorage.getItem('ivoryos_sequence');
     const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
     const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
-    if (savedSequence) {
+    if (savedSequence || editId) {
+      (async () => {
       try {
-        const parsedSeq = JSON.parse(savedSequence);
+        let parsedSeq: any[];
+        let pSeq: any[];
+        let cSeq: any[];
+        let restoredGlobals: Record<string, string> | null = null;
+        if (editId) {
+          try {
+            const { run, source, instruments } = await loadQueuedRun(editId);
+            parsedSeq = hydrateBlocks(source.sequence, instruments);
+            pSeq = hydrateBlocks(source.prep, instruments);
+            cSeq = hydrateBlocks(source.cleanup, instruments);
+            editingRef.current = true;
+            if (source.optConfig) setOptConfig(source.optConfig);
+            setSelectedHistoryIds(source.selectedHistoryIds || []);
+            setUploadedExistingRows(source.uploaded?.rows || []);
+            setUploadFileName(source.uploaded?.name || '');
+            restoredGlobals = source.globalValues || {};
+            setEditing({ id: run.id, name: run.name });
+          } catch (e: any) {
+            await notify(e.message, { title: 'Cannot edit this run', tone: 'error' });
+            leaveEdit();
+            return;
+          }
+        } else {
+          parsedSeq = JSON.parse(savedSequence!);
+          pSeq = savedPrep ? JSON.parse(savedPrep) : [];
+          cSeq = savedCleanup ? JSON.parse(savedCleanup) : [];
+        }
         setSequence(parsedSeq);
-        const pSeq = savedPrep ? JSON.parse(savedPrep) : [];
-        const cSeq = savedCleanup ? JSON.parse(savedCleanup) : [];
         setPrepSequence(pSeq);
         setCleanupSequence(cSeq);
 
         const vTypes: Record<string, string> = {};
+        // A '#name' the run fills in itself (a User input's answer, or what an earlier step in
+        // the trial saved) is read when its step runs, so it is not something to optimize or fix.
+        const runtimeVars = runtimeVarNames(pSeq, parsedSeq, cSeq);
         const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>) => {
              if (!obj) return;
              Object.entries(obj).forEach(([k, v]) => {
@@ -182,6 +223,7 @@ export default function OptimizePage() {
 
                 if (typeof v === 'string' && v.startsWith('#')) {
                     const varName = v.substring(1);
+                    if (runtimeVars.has(varName.trim())) return;
                     targetSet.add(varName);
                     if (pData?.type) vTypes[varName] = pData.type;
                 } else if (typeof v === 'object' && v !== null) {
@@ -201,7 +243,7 @@ export default function OptimizePage() {
         setGlobalVariables(gVarList);
         setVarTypes(vTypes);
 
-        const savedGlobalValues = localStorage.getItem('ivoryos_global_values');
+        const savedGlobalValues = restoredGlobals ? JSON.stringify(restoredGlobals) : localStorage.getItem('ivoryos_global_values');
         if (savedGlobalValues) {
             setGlobalValues(JSON.parse(savedGlobalValues));
         } else {
@@ -218,7 +260,11 @@ export default function OptimizePage() {
         const otherRet: string[] = [];
         parsedSeq.forEach((block: any) => {
           const leaves = getReturnLeaves(block.schema);
-          const bindings: { path: string; var: string }[] = block.returnBindings?.length
+          // A linked workflow's outputs are kept under their own names unless renamed, so an
+          // empty binding there means "the same name", not "not saved".
+          const bindings: { path: string; var: string }[] = block.instrument === LIBRARY_INSTRUMENT
+            ? linkOutputBindings(block)
+            : block.returnBindings?.length
             ? block.returnBindings
             : String(block.returnVar || '').split(',').map((v: string) => v.trim()).filter(Boolean)
                 .map((v: string, i: number) => ({ path: leaves[i]?.path ?? '', var: v }));
@@ -233,12 +279,17 @@ export default function OptimizePage() {
       } catch (e) {
         console.error("Failed to load sequence", e);
       }
+      })();
     }
   }, []);
 
 
   const startOptimization = async () => {
     if (isStarting) return; // guard against double-click while the request/optimizer init is in flight
+    // Like Run everywhere else: with something queued or under way, this waits behind it, so ask.
+    if (queueBusy && !editing && !await confirmDialog('A task is already running. Add this optimization to the execution queue?', {
+      title: 'Queue this run?', confirmLabel: 'Add to queue',
+    })) return;
     setIsStarting(true);
 
     // Everything from here to the payload — the Optimize/Fixed/Per-Iteration partition, the
@@ -261,24 +312,59 @@ export default function OptimizePage() {
         // Lets the edge time runs of a saved workflow (runtime.py).
         const savedName = unmodifiedSavedWorkflowName();
         if (savedName) parameters.workflow_name = savedName;
+        // A linked workflow in Main runs its own prep once, its main block per trial and its
+        // cleanup once (splitRepeatedLinks). Split after Fixed values are filled in, so they
+        // reach its prep; before this every trial ran the whole workflow, setup included.
+        const split = splitRepeatedLinks({ prep: prepSequence, sequence: parameters.sequence_template, cleanup: cleanupSequence });
+        parameters.sequence_template = split.sequence;
         // Prep/Cleanup run once for the whole campaign, so their #vars come from the Fixed Values
         // panel. Lenient numeric casting here preserves this page's long-standing behaviour —
         // the backend's own cast_arguments has the last word on a value it can't convert.
-        resolvedPrep = prepSequence.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient' }));
-        resolvedCleanup = cleanupSequence.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient' }));
+        const runtime = runtimeVarNames(prepSequence, sequence, cleanupSequence);
+        const skip = (v: string) => runtime.has(v);
+        resolvedPrep = split.prep.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient', skip }));
+        resolvedCleanup = split.cleanup.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient', skip }));
     } catch (err: any) {
-        alert(err.message);
+        // notify, not alert(): the desktop app's webview drops alert() without showing it.
+        await notify(err.message, { title: 'Check the configuration', tone: 'error' });
         setIsStarting(false);
         return;
     }
 
+    // What this page needs to show the run again while it waits (queuedEdit.ts): the workflow as
+    // authored here, the settings, and which existing data was chosen.
+    parameters._source = {
+        page: 'optimize',
+        prep: prepSequence.map(sourceBlock),
+        sequence: sequence.map(sourceBlock),
+        cleanup: cleanupSequence.map(sourceBlock),
+        optConfig,
+        globalValues,
+        selectedHistoryIds,
+        uploaded: uploadedExistingRows.length ? { rows: uploadedExistingRows, name: uploadFileName } : null,
+    };
+    if (editing) delete parameters.workflow_name;
+
     const payload = {
-        name: await buildRunName(`${localStorage.getItem('ivoryos_editing_workflow') || 'Optimization'} Run`, experimentName, API_BASE),
+        // Editing keeps the queued run's name unless a new one is typed.
+        name: editing ? experimentName.trim() : await buildRunName(`${localStorage.getItem('ivoryos_editing_workflow') || 'Optimization'} Run`, experimentName, API_BASE),
         parameters,
         prep: resolvedPrep,
         cleanup: resolvedCleanup,
         sequence: []
     };
+
+    if (editing) {
+        try {
+            await saveQueuedRun(editing.id, payload);
+            await notify(`"${editing.name}" is updated and keeps its place in the queue.`, { title: 'Queued run saved' });
+            leaveEdit();
+        } catch (e: any) {
+            await notify(e.message, { title: 'Could not save the queued run', tone: 'error' });
+            setIsStarting(false);
+        }
+        return;
+    }
 
     try {
         const res = await fetch(`${API_BASE}/api/queue/runs`, {
@@ -288,15 +374,15 @@ export default function OptimizePage() {
         });
         const data = await res.json();
         if (res.ok) {
-            window.location.href = '/queue';
-            // Deliberately leave isStarting true — the page is navigating away, and resetting
-            // it here would let the button flash back to enabled for an instant before that happens.
+            // Stay here: the run shows at the top of this page (LiveRun), which scrolls itself
+            // into view. Going to the Queue page was the trip that panel exists to save.
+            setIsStarting(false);
         } else {
-            alert("Failed: " + data.error);
+            await notify(data.error || 'The edge refused the run.', { title: 'Could not start the optimization', tone: 'error' });
             setIsStarting(false);
         }
     } catch(e: any) {
-        alert("Error: " + e.message);
+        await notify(e.message, { title: 'Could not start the optimization', tone: 'error' });
         setIsStarting(false);
     }
   };
@@ -461,12 +547,20 @@ export default function OptimizePage() {
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto">
+          {editing && (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-gray-300 bg-gray-100 px-4 py-2.5 text-sm text-gray-800 dark:border-white/15 dark:bg-white/10 dark:text-gray-100">
+              <span className="flex-1 min-w-0">
+                Editing the queued optimization <b className="font-semibold">{editing.name}</b>. Save changes to replace it; it keeps its place in the queue.
+              </span>
+              <button type="button" onClick={leaveEdit} className="shrink-0 rounded-md px-2.5 py-1 text-xs font-semibold text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-white/10">Cancel</button>
+            </div>
+          )}
           {variables.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 text-gray-500 dark:text-gray-400 border-2 border-dashed border-gray-300 dark:border-white/10 rounded-2xl relative">
               <div className="flex items-center space-x-2">
                 <p className="text-sm font-medium text-gray-600 dark:text-gray-300">Current workflow doesn't need optimization.</p>
                 <div className="group relative flex items-center">
-                  <Info className="w-4 h-4 text-indigo-500 hover:text-indigo-600 cursor-help transition-colors" />
+                  <Info className="w-4 h-4 text-gray-700 dark:text-gray-200 hover:text-gray-900 dark:hover:text-white cursor-help transition-colors" />
                   <div className="hidden group-hover:block absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 p-3 bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-xs rounded-lg shadow-xl z-50 pointer-events-none">
                     You need to define at least one variable parameter (e.g. #param) in the Designer to use optimization.
                     <div className="absolute left-1/2 -bottom-1 -translate-x-1/2 w-2 h-2 bg-gray-900 dark:bg-white transform rotate-45"></div>
@@ -479,7 +573,7 @@ export default function OptimizePage() {
               <div className="flex items-center space-x-2">
                 <p className="text-sm font-medium text-gray-600 dark:text-gray-300">Current workflow has no output value to optimize toward.</p>
                 <div className="group relative flex items-center">
-                  <Info className="w-4 h-4 text-indigo-500 hover:text-indigo-600 cursor-help transition-colors" />
+                  <Info className="w-4 h-4 text-gray-700 dark:text-gray-200 hover:text-gray-900 dark:hover:text-white cursor-help transition-colors" />
                   <div className="hidden group-hover:block absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 p-3 bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-xs rounded-lg shadow-xl z-50 pointer-events-none">
                     Assign a return variable to at least one step in the Designer — that's the objective the optimizer will maximize or minimize.
                     <div className="absolute left-1/2 -bottom-1 -translate-x-1/2 w-2 h-2 bg-gray-900 dark:bg-white transform rotate-45"></div>
@@ -504,7 +598,7 @@ export default function OptimizePage() {
                          onChange={e => {
                            const updated = {...globalValues, [v]: e.target.value};
                            setGlobalValues(updated);
-                           localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
+                           if (!editingRef.current) localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
                          }}
                          className="w-28 bg-white dark:bg-black/50 border border-amber-300 dark:border-amber-700/50 rounded-md px-2 py-1 text-sm focus:border-amber-500 outline-none"
                       />
@@ -554,18 +648,9 @@ export default function OptimizePage() {
                        className="w-full bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:border-purple-500 outline-none"
                     />
                   </div>
-                  <div>
-                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 block">Error Recovery</label>
-                    <select
-                       value={optConfig.error_recovery}
-                       onChange={e => setOptConfig({...optConfig, error_recovery: e.target.value})}
-                       className="w-full bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm focus:border-purple-500 outline-none"
-                    >
-                      <option value="stop">Stop immediately</option>
-                      <option value="skip">Skip (Continue)</option>
-                      <option value="retry">Retry step</option>
-                    </select>
-                  </div>
+                  {/* No error-recovery setting: a failed step pauses the run and the queue and waits
+                      for a person (retry, skip or stop), as in every other run. An automatic skip
+                      or retry on real hardware is the risky choice. */}
                 </div>
               </div>
 
@@ -613,90 +698,58 @@ export default function OptimizePage() {
                 </div>
               )}
 
+              {/* One parameter per line: name, how it is chosen, its values, Per-Iteration. */}
               <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-white/10 rounded-xl shadow-sm p-4">
-                <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-3">Search Space</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <h3 className="text-sm font-bold text-gray-800 dark:text-white">Search Space</h3>
+                  <div className="group relative flex items-center">
+                    <Info className="w-3.5 h-3.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 cursor-help transition-colors" />
+                    <div className="hidden group-hover:block absolute left-0 top-full mt-2 w-64 p-2.5 bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-xs rounded-lg shadow-xl z-50 pointer-events-none">
+                      Range and Choice are searched by the optimizer; Fixed uses one value every iteration. Per-iteration gives a parameter its own value each iteration, entered in a table below.
+                    </div>
+                  </div>
+                </div>
+                <div className="divide-y divide-gray-100 dark:divide-white/5">
                   {variables.map(v => {
                     const mode = getVarMode(v);
                     const perIter = isPerIteration(v);
+                    const bound = optConfig.bounds[v] || {};
+                    const setBound = (patch: Record<string, any>) => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], ...patch}}});
                     return (
-                    <div key={v} className="bg-gray-50/50 dark:bg-white/[0.02] p-4 rounded-xl border border-gray-100 dark:border-white/5 space-y-3 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                          <span className="font-mono text-base font-bold text-indigo-500 truncate min-w-0">{v}</span>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                              <input
-                                 type="checkbox"
-                                 checked={perIter}
-                                 onChange={e => setPerIteration(v, e.target.checked)}
-                                 className="w-3.5 h-3.5 accent-teal-600"
-                              />
-                              <span className="text-[11px] font-bold text-teal-700 dark:text-teal-400">Per-Iteration</span>
-                            </label>
-                            <div className="group relative flex items-center">
-                              <Info className="w-3.5 h-3.5 text-teal-500 hover:text-teal-600 cursor-help transition-colors" />
-                              <div className="hidden group-hover:block absolute right-0 bottom-full mb-2 w-56 p-2.5 bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-xs rounded-lg shadow-xl z-50 pointer-events-none">
-                                Give this parameter a different value each iteration, entered in a spreadsheet below &mdash; instead of searching over a range or using one fixed value.
-                                <div className="absolute right-3 -bottom-1 w-2 h-2 bg-gray-900 dark:bg-white transform rotate-45"></div>
-                              </div>
-                            </div>
-                          </div>
-                      </div>
-
+                    <div key={v} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 min-w-0">
+                      <span className="w-40 shrink-0 font-mono text-[13px] font-semibold text-gray-800 dark:text-gray-100 truncate" title={v}>{v}</span>
                       {perIter ? (
-                          <p className="text-xs text-teal-600 dark:text-teal-400 italic">Configured in the table below.</p>
+                        <span className="text-xs text-teal-600 dark:text-teal-400 italic">set per iteration, in the table below</span>
                       ) : (
-                      <div className="flex gap-2 min-w-0">
+                        <>
                           <select
                              value={getVarModeType(v)}
                              onChange={e => setVarModeType(v, e.target.value as 'range' | 'choice' | 'fixed')}
-                             className={`shrink-0 w-[90px] border rounded-lg px-2 py-2 text-xs font-bold outline-none ${mode === 'fixed' ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700/40 dark:text-amber-300' : 'bg-indigo-50 border-indigo-200 text-indigo-600 dark:bg-indigo-900/20 dark:border-indigo-700/40 dark:text-indigo-300'}`}
+                             className={`h-7 w-[84px] shrink-0 border rounded-md px-1.5 text-xs font-semibold outline-none ${mode === 'fixed' ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700/40 dark:text-amber-300' : 'bg-gray-50 border-gray-200 text-gray-800 dark:bg-white/5 dark:border-white/15 dark:text-gray-100'}`}
                           >
                              <option value="range">Range</option>
                              <option value="choice">Choice</option>
                              <option value="fixed">Fixed</option>
                           </select>
-
-                          {mode === 'optimize' && optConfig.bounds[v]?.type !== 'choice' && (
-                            <>
-                              <input
-                                 type="text"
-                                 placeholder="Min"
-                                 value={optConfig.bounds[v]?.min || ''}
-                                 onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], min: e.target.value}}})}
-                                 className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
-                              />
-                              <input
-                                 type="text"
-                                 placeholder="Max"
-                                 value={optConfig.bounds[v]?.max || ''}
-                                 onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], max: e.target.value}}})}
-                                 className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
-                              />
-                            </>
+                          {mode === 'optimize' && bound.type !== 'choice' && (
+                            <span className="inline-flex items-center gap-1">
+                              <input type="text" placeholder="min" value={bound.min || ''} onChange={e => setBound({ min: e.target.value })} className={`${compactInput} w-20`} />
+                              <span className="text-xs text-gray-400">to</span>
+                              <input type="text" placeholder="max" value={bound.max || ''} onChange={e => setBound({ max: e.target.value })} className={`${compactInput} w-20`} />
+                            </span>
                           )}
-
-                          {mode === 'optimize' && optConfig.bounds[v]?.type === 'choice' && (
-                            <input
-                               type="text"
-                               placeholder="e.g. 10, 20"
-                               value={optConfig.bounds[v]?.min || ''}
-                               onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], min: e.target.value}}})}
-                               className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-500"
-                            />
+                          {mode === 'optimize' && bound.type === 'choice' && (
+                            <input type="text" placeholder="e.g. 10, 20" value={bound.min || ''} onChange={e => setBound({ min: e.target.value })} className={`${compactInput} w-44`} />
                           )}
-
                           {mode === 'fixed' && (
-                            <input
-                               type="text"
-                               placeholder="Value used every iteration"
-                               value={optConfig.bounds[v]?.fixedValue || ''}
-                               onChange={e => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], fixedValue: e.target.value}}})}
-                               className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-amber-500"
-                            />
+                            <input type="text" placeholder="value" title="Used every iteration" value={bound.fixedValue || ''} onChange={e => setBound({ fixedValue: e.target.value })} className={`${compactInput} w-28 focus:border-amber-500`} />
                           )}
-                      </div>
+                        </>
                       )}
+                      <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none shrink-0" title="A different value each iteration, entered in a table below, instead of a range or one fixed value">
+                        <input type="checkbox" checked={perIter} onChange={e => setPerIteration(v, e.target.checked)} className="w-3.5 h-3.5 accent-teal-600" />
+                        <span className="text-[11px] font-medium text-gray-500 dark:text-gray-400">Per-iteration</span>
+                      </label>
                     </div>
                     );
                   })}
@@ -717,24 +770,24 @@ export default function OptimizePage() {
                       <table className="w-full text-left border-collapse">
                         <thead className="sticky top-0 z-10">
                           <tr className="bg-gray-50 dark:bg-white/5 border-b border-gray-200 dark:border-white/10 text-xs tracking-wider text-gray-500 dark:text-gray-400 font-semibold">
-                            <th className="p-3 w-24 text-center">Iteration</th>
+                            <th className="px-3 py-1.5 w-20 text-center">Iteration</th>
                             {perIterationVars.map(v => (
-                              <th key={v} className="p-3 border-l border-gray-200 dark:border-white/10 font-mono text-teal-600 dark:text-teal-400">{v}</th>
+                              <th key={v} className="px-3 py-1.5 border-l border-gray-200 dark:border-white/10 font-mono text-teal-600 dark:text-teal-400">{v}</th>
                             ))}
                           </tr>
                         </thead>
                         <tbody>
                           {Array.from({ length: budgetCount }).map((_, i) => (
                             <tr key={i} className="border-b border-gray-100 dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/[0.02]">
-                              <td className="p-3 text-center text-sm font-medium text-gray-500 dark:text-gray-400">{i + 1}</td>
+                              <td className="px-3 py-0.5 text-center text-xs font-medium text-gray-500 dark:text-gray-400">{i + 1}</td>
                               {perIterationVars.map(v => (
-                                <td key={v} className="p-2 border-l border-gray-100 dark:border-white/5">
+                                <td key={v} className="px-2 py-0.5 border-l border-gray-100 dark:border-white/5">
                                   <input
                                      type="text"
                                      placeholder={varTypes[v] || `Enter ${v}...`}
                                      value={getIterationValue(v, i)}
                                      onChange={e => setIterationValue(v, i, e.target.value)}
-                                     className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-teal-500 dark:hover:border-white/20 dark:focus:border-teal-500 px-2 py-1 text-sm outline-none transition-colors"
+                                     className="w-full bg-transparent border-b border-transparent hover:border-gray-300 focus:border-teal-500 dark:hover:border-white/20 dark:focus:border-teal-500 px-2 py-1 text-xs font-mono outline-none transition-colors"
                                   />
                                 </td>
                               ))}
@@ -773,38 +826,34 @@ export default function OptimizePage() {
                 {returns.length === 0 ? (
                     <div className="text-sm text-gray-500">No return variables assigned in sequence.</div>
                 ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+                    // One objective per line: name, direction, and an optional early-stop target.
+                    <div className="divide-y divide-gray-100 dark:divide-white/5 mt-1">
                       {returns.map((v: string) => {
-                        const earlyStopOn = !!optConfig.objectives[v]?.earlyStop;
+                        const objective = optConfig.objectives[v] || {};
+                        const earlyStopOn = !!objective.earlyStop;
+                        const setObjective = (patch: Record<string, any>) => setOptConfig({...optConfig, objectives: {...optConfig.objectives, [v]: {...optConfig.objectives[v], ...patch}}});
                         return (
-                        <div key={v} className="bg-gray-50/50 dark:bg-white/[0.02] p-4 rounded-xl border border-gray-100 dark:border-white/5 space-y-3 min-w-0">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="font-mono text-base font-bold text-green-500 truncate min-w-0">{v}</span>
-                            <select
-                               value={optConfig.objectives[v]?.goal || 'maximize'}
-                               onChange={e => setOptConfig({...optConfig, objectives: {...optConfig.objectives, [v]: {...optConfig.objectives[v], goal: e.target.value}}})}
-                               className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-green-500 w-32 shrink-0"
-                            >
-                               <option value="maximize">Maximize</option>
-                               <option value="minimize">Minimize</option>
-                            </select>
-                          </div>
-                          <label className="flex items-center gap-2 cursor-pointer select-none">
-                            <input
-                               type="checkbox"
-                               checked={earlyStopOn}
-                               onChange={e => setOptConfig({...optConfig, objectives: {...optConfig.objectives, [v]: {...optConfig.objectives[v], earlyStop: e.target.checked}}})}
-                               className="w-3.5 h-3.5 accent-purple-600"
-                            />
-                            <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Stop early once this reaches a target</span>
+                        <div key={v} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 min-w-0">
+                          <span className="w-40 shrink-0 font-mono text-[13px] font-semibold text-gray-800 dark:text-gray-100 truncate" title={v}>{v}</span>
+                          <select
+                             value={objective.goal || 'maximize'}
+                             onChange={e => setObjective({ goal: e.target.value })}
+                             className="h-7 w-[100px] shrink-0 bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/15 rounded-md px-1.5 text-xs font-semibold text-gray-800 dark:text-gray-100 outline-none focus:border-accent"
+                          >
+                             <option value="maximize">Maximize</option>
+                             <option value="minimize">Minimize</option>
+                          </select>
+                          <label className="flex items-center gap-1.5 cursor-pointer select-none shrink-0">
+                            <input type="checkbox" checked={earlyStopOn} onChange={e => setObjective({ earlyStop: e.target.checked })} className="w-3.5 h-3.5 accent-gray-900 dark:accent-white" />
+                            <span className="text-xs text-gray-500 dark:text-gray-400">Stop early {objective.goal === 'minimize' ? 'at ≤' : 'at ≥'}</span>
                           </label>
                           {earlyStopOn && (
                             <input
                                type="text"
-                               placeholder={optConfig.objectives[v]?.goal === 'minimize' ? "Target (stop once ≤)" : "Target (stop once ≥)"}
-                               value={optConfig.objectives[v]?.threshold ?? ''}
-                               onChange={e => setOptConfig({...optConfig, objectives: {...optConfig.objectives, [v]: {...optConfig.objectives[v], threshold: e.target.value}}})}
-                               className="w-full bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-purple-500"
+                               placeholder="target"
+                               value={objective.threshold ?? ''}
+                               onChange={e => setObjective({ threshold: e.target.value })}
+                               className={`${compactInput} w-24`}
                             />
                           )}
                         </div>
@@ -826,7 +875,7 @@ export default function OptimizePage() {
                            value={c}
                            onChange={e => updateConstraint(i, e.target.value)}
                            placeholder="e.g. x + y <= 10"
-                           className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm font-mono outline-none focus:border-indigo-500"
+                           className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm font-mono outline-none focus:border-accent"
                         />
                         <button
                            type="button"
@@ -841,7 +890,7 @@ export default function OptimizePage() {
                     <button
                        type="button"
                        onClick={addConstraint}
-                       className="flex items-center gap-1.5 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors"
+                       className="flex items-center gap-1.5 text-xs font-medium text-accent-fg hover:text-accent transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" /> Add constraint
                     </button>
@@ -859,32 +908,57 @@ export default function OptimizePage() {
                   <div className="space-y-4">
                     <div>
                       <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 block">From Data History</label>
-                      {compatibleHistoryRuns.length === 0 ? (
-                        <div className="space-y-1.5">
-                          <p className="text-xs text-gray-400 dark:text-gray-500 italic">No compatible past optimization runs found.</p>
-                          <RequiredColumns params={requiredParamNames} objectives={returns} />
-                        </div>
-                      ) : (
-                        <div className="space-y-1.5 max-h-40 overflow-auto pr-1">
-                          {compatibleHistoryRuns.map((run: any) => {
-                            const checked = selectedHistoryIds.includes(run.id);
-                            const rowCount = extractOptimizationRows(run).length;
-                            return (
-                              <label key={run.id} className="flex items-center gap-2 text-sm cursor-pointer select-none">
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={e => setSelectedHistoryIds(prev => e.target.checked ? [...prev, run.id] : prev.filter(id => id !== run.id))}
-                                  className="w-3.5 h-3.5 accent-purple-600 shrink-0"
-                                />
-                                <span className="truncate min-w-0 flex-1">{run.name || `Run #${run.id}`}</span>
-                                {isSameWorkflow(run) && <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 dark:bg-teal-500/10 text-teal-600 dark:text-teal-400 shrink-0">same workflow</span>}
-                                <span className="text-xs text-gray-400 shrink-0">{rowCount} pt{rowCount === 1 ? '' : 's'}</span>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
+                      {(() => {
+                        // Only runs that would add a point: one with no completed trial is not listed.
+                        const usable = compatibleHistoryRuns
+                          .map((run: any) => ({ run, points: extractOptimizationRows(run).length }))
+                          .filter(x => x.points > 0);
+                        if (usable.length === 0) return (
+                          <div className="space-y-1.5">
+                            <p className="text-xs text-gray-400 dark:text-gray-500 italic">No past optimization runs with data for this search space and these objectives.</p>
+                            <RequiredColumns params={requiredParamNames} objectives={returns} />
+                          </div>
+                        );
+                        const picked = usable.filter(x => selectedHistoryIds.includes(x.run.id));
+                        const pickedPoints = picked.reduce((n, x) => n + x.points, 0);
+                        const allPicked = picked.length === usable.length;
+                        return (
+                          <div className="rounded-lg border border-gray-200 dark:border-white/10">
+                            <button type="button" onClick={() => setHistoryOpen(o => !o)} aria-expanded={historyOpen}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-white/5 rounded-lg">
+                              {historyOpen ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" />}
+                              <span className="flex-1 min-w-0 truncate">
+                                {picked.length
+                                  ? <>{picked.length} of {usable.length} run{usable.length === 1 ? '' : 's'} selected · <span className="text-purple-600 dark:text-purple-400 font-medium">{pickedPoints} point{pickedPoints === 1 ? '' : 's'}</span></>
+                                  : <>{usable.length} past run{usable.length === 1 ? '' : 's'} with data · none selected</>}
+                              </span>
+                            </button>
+                            {historyOpen && (
+                              <div className="border-t border-gray-100 dark:border-white/5 px-3 py-2 space-y-1.5">
+                                <div className="flex items-center gap-3 text-xs">
+                                  <button type="button" onClick={() => setSelectedHistoryIds(allPicked ? [] : usable.map(x => x.run.id))}
+                                    className="font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">{allPicked ? 'Select none' : 'Select all'}</button>
+                                </div>
+                                <div className="space-y-1.5 max-h-56 overflow-auto pr-1">
+                                  {usable.map(({ run, points }) => (
+                                    <label key={run.id} className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedHistoryIds.includes(run.id)}
+                                        onChange={e => setSelectedHistoryIds(prev => e.target.checked ? [...prev, run.id] : prev.filter(id => id !== run.id))}
+                                        className="w-3.5 h-3.5 accent-purple-600 shrink-0"
+                                      />
+                                      <span className="truncate min-w-0 flex-1">{run.name || `Run #${run.id}`}</span>
+                                      {isSameWorkflow(run) && <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 dark:bg-teal-500/10 text-teal-600 dark:text-teal-400 shrink-0">same workflow</span>}
+                                      <span className="text-xs text-gray-400 shrink-0">{points} pt{points === 1 ? '' : 's'}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div>
@@ -913,7 +987,7 @@ export default function OptimizePage() {
 
               <div className="flex flex-col items-end pt-4 gap-2">
                 {optimizersLoaded && Object.keys(optimizerSchemas).length === 0 && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400">No optimizer backends are installed on this edge server (ax-platform, baybe, or nimo).</p>
+                  <p className="text-xs text-amber-600 dark:text-amber-400">No optimizer installed. In the IvoryOS app: this deck&apos;s Settings, Optimizers. Otherwise pip install ax-platform, baybe or nimo.</p>
                 )}
                 <input
                   type="text"
@@ -936,7 +1010,7 @@ export default function OptimizePage() {
                   ) : (
                     <>
                       <Zap className="w-5 h-5" />
-                      <span>Start Optimization</span>
+                      <span>{editing ? 'Save changes' : queueBusy ? 'Add to Queue' : 'Start Optimization'}</span>
                     </>
                   )}
                 </button>
@@ -944,6 +1018,8 @@ export default function OptimizePage() {
             </div>
           )}
         </div>
+        {/* The idle chip, widening into the run bar when the run starts (LiveRun). */}
+        <LiveRun />
       </div>
     </div>
   );

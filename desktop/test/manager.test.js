@@ -112,6 +112,25 @@ test('install writes the deck only after packages install, and a failure leaves 
     assert.equal(mgr.readDeck(deckProfile.id).instruments[0].enabled, false);
 });
 
+test('optimizers install with the rest of the deck, and the deck changes only once they did', async () => {
+    let fail = true;
+    const installs = [];
+    const mgr = new ProfileManager({ home: tmp(), getRuntime: async () => fakeRuntime({
+        ensurePackages: async (reqs) => { installs.push([...reqs]); if (fail) throw Object.assign(new Error('uv pip failed'), { output: 'No solution found' }); },
+    }) });
+    const [deckProfile] = mgr.list();
+    await assert.rejects(mgr.setOptimizers(deckProfile.id, { baybe: '0.15.0' }), /uv pip failed/);
+    assert.deepEqual(mgr.readDeck(deckProfile.id).packages || [], []);
+    assert.match(mgr.statusOf(deckProfile.id).message, /^Install failed/);
+
+    fail = false;
+    const chosen = await mgr.setOptimizers(deckProfile.id, { ax: '1.3.1', baybe: '0.15.0' });
+    assert.deepEqual(chosen, { ax: '1.3.1', baybe: '0.15.0', nimo: null });
+    // One resolution for the deck's whole list, optimizers included.
+    assert.deepEqual(installs.at(-1), ['ax-platform==1.3.1', 'baybe==0.15.0']);
+    assert.deepEqual(mgr.readDeck(deckProfile.id).packages, ['ax-platform==1.3.1', 'baybe==0.15.0']);
+});
+
 test('script profiles have no deck to edit', () => {
     const mgr = new ProfileManager({ home: tmp(), getRuntime: async () => fakeRuntime() });
     const p = mgr.create({ kind: 'script', script: FAKE });
@@ -193,4 +212,14 @@ test('stars are kept per account, deduplicated, and survive a reload', () => {
     assert.deepEqual(again.starred('u1'), ['platform:4']);
     assert.deepEqual(again.starred('u2'), ['plugin:3']);
     assert.deepEqual(again.starred('nobody'), []);
+});
+
+test('Cloud-only mode is kept as saved but not in force while Cloud is not offered', () => {
+    const home = tmp();
+    const first = new ProfileManager({ home, getRuntime: async () => fakeRuntime() });
+    first.setCloudOnly(true);
+    assert.equal(first.cloudOnly, true);
+    const release = new ProfileManager({ home, getRuntime: async () => fakeRuntime(), cloudComingSoon: true });
+    assert.equal(release.cloudOnly, false);
+    assert.equal(release.store.cloudOnly, true);   // still saved for a build that offers Cloud
 });

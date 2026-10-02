@@ -21,7 +21,7 @@ export function Avatar({ account, size = 32 }: { account: AccountInfo; size?: nu
     // eslint-disable-next-line @next/next/no-img-element
     <img src={url} alt="" onError={() => setBroken(true)} style={{ width: size, height: size }} className="rounded-full object-cover shrink-0" />
   ) : (
-    <span style={{ width: size, height: size, fontSize: size * 0.4 }} className="rounded-full shrink-0 bg-gradient-to-br from-indigo-500 to-violet-500 text-white font-semibold flex items-center justify-center">
+    <span style={{ width: size, height: size, fontSize: size * 0.4 }} className="rounded-full shrink-0 bg-gradient-to-br from-accent to-accent-hover text-on-accent font-semibold flex items-center justify-center">
       {account.signedIn ? initials(account) : <UserRound style={{ width: size * 0.55, height: size * 0.55 }} />}
     </span>
   );
@@ -93,7 +93,7 @@ function SignInForm({ api, mode, setMode }: { api: DesktopApi; mode: AuthMode; s
       {(busy === 'github' || busy === 'google') && (
         <div className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2">
           Finish signing in in your browser.
-          <button type="button" className="text-indigo-600 dark:text-indigo-400 hover:underline" onClick={() => api.cancelSignIn()}>Cancel</button>
+          <button type="button" className="text-accent-fg hover:underline" onClick={() => api.cancelSignIn()}>Cancel</button>
         </div>
       )}
       <div className="flex items-center gap-3 text-xs text-gray-400"><span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />or with email<span className="h-px flex-1 bg-gray-200 dark:bg-white/10" /></div>
@@ -114,14 +114,14 @@ function SignInForm({ api, mode, setMode }: { api: DesktopApi; mode: AuthMode; s
       <div className="flex items-center justify-between text-xs">
         {mode === 'sign-in' ? (
           <>
-            <button type="button" className="text-indigo-600 dark:text-indigo-400 hover:underline" onClick={() => { setMode('sign-up'); setError(null); }}>Create an account</button>
+            <button type="button" className="text-accent-fg hover:underline" onClick={() => { setMode('sign-up'); setError(null); }}>Create an account</button>
             <button type="button" className="text-gray-500 hover:underline" disabled={!!busy} onClick={() => attempt('reset', async () => {
               await api.resetPassword(email);
               setSent(`If ${email} has an account, a link to set a new password is on its way.`);
             })}>Forgot password?</button>
           </>
         ) : (
-          <button type="button" className="text-indigo-600 dark:text-indigo-400 hover:underline" onClick={() => { setMode('sign-in'); setError(null); }}>I already have an account</button>
+          <button type="button" className="text-accent-fg hover:underline" onClick={() => { setMode('sign-in'); setError(null); }}>I already have an account</button>
         )}
       </div>
     </div>
@@ -166,7 +166,7 @@ function SignedIn({ api, account, onUpgrade }: { api: DesktopApi; account: Accou
       </div>
 
       <div className={`${cardClass} p-5 flex items-center gap-4`}>
-        <span className={`w-10 h-10 rounded-xl flex items-center justify-center ${pro ? 'bg-gradient-to-br from-indigo-500 to-violet-500 text-white' : 'bg-gray-100 dark:bg-white/10 text-gray-500'}`}><Sparkles className="w-5 h-5" /></span>
+        <span className={`w-10 h-10 rounded-xl flex items-center justify-center ${pro ? 'bg-gradient-to-br from-accent to-accent-hover text-on-accent' : 'bg-gray-100 dark:bg-white/10 text-gray-500'}`}><Sparkles className="w-5 h-5" /></span>
         <div className="flex-1">
           <div className="font-medium">{pro ? 'IvoryOS Pro' : 'Free plan'} <span className="ml-1 text-[10px] font-bold uppercase tracking-wider text-violet-600 dark:text-violet-300">preview</span></div>
           <div className="text-sm text-gray-500 dark:text-gray-400">{pro ? 'Cloud, private drivers and private repositories are on.' : 'Upgrade for Cloud, a private Hub and private repositories.'}</div>
@@ -280,7 +280,7 @@ export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: 
                   )}
                   {error && <div className="text-sm text-red-600 dark:text-red-400">{error}</div>}
                   <div className="flex items-center justify-end gap-2">
-                    <button type="button" className="mr-auto text-xs text-indigo-600 dark:text-indigo-400 hover:underline" onClick={() => { if (signIn) api.gitSignInCancel(c.provider); setUseToken(true); }}>Use a token instead</button>
+                    <button type="button" className="mr-auto text-xs text-accent-fg hover:underline" onClick={() => { if (signIn) api.gitSignInCancel(c.provider); setUseToken(true); }}>Use a token instead</button>
                     <Button small tone="ghost" onClick={() => { if (signIn) api.gitSignInCancel(c.provider); setAdding(null); setError(null); }}>Cancel</Button>
                     {!signIn && <Button small tone="primary" disabled={busy} onClick={() => startSignIn(c.provider)}>Sign in with {c.label}</Button>}
                   </div>
@@ -291,7 +291,7 @@ export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: 
               <div className="mt-2 rounded-lg border border-gray-200 dark:border-white/10 p-3 space-y-2">
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   Create {c.scopes}, then paste it here.{' '}
-                  <button type="button" className="text-indigo-600 dark:text-indigo-400 hover:underline" onClick={() => api.gitTokenPage(c.provider)}>Create a {c.label} token</button>
+                  <button type="button" className="text-accent-fg hover:underline" onClick={() => api.gitTokenPage(c.provider)}>Create a {c.label} token</button>
                 </div>
                 <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="Personal access token" autoFocus className={`${inputClass} font-mono`} />
                 <input value={host} onChange={e => setHost(e.target.value)} placeholder={`Server (optional, for self-hosted ${c.label}): ${c.host}`} className={inputClass} />

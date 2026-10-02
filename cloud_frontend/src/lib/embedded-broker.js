@@ -24,6 +24,9 @@
 // unusual case of binding a specific interface on purpose.
 
 const net = require('net');
+const {
+  DAEMON_USER, secretMatches, devicePublishAllowed, deviceSubscribeAllowed,
+} = require('./brokerAuth');
 
 // Addresses that mean "the broker is on this machine". Note '0.0.0.0' is in here: as a *connect*
 // target it is meaningless, but people write it in config meaning "listen everywhere", and
@@ -36,15 +39,62 @@ function parseBrokerUrl(brokerUrl) {
 }
 
 /**
- * Resolves to { started, port?, reason?, close? }. Never rejects and never throws: a broker we
- * could not start is a thing to report and carry on from (an external one may well be running),
- * not a reason to take the daemon down.
+ * The broker's identity and topic checks (brokerAuth.js). `auth`:
+ *   daemonSecret   the daemon's own secret for this run (it connects as DAEMON_USER)
+ *   credentialFor  async (deviceId) => the stored hash of that device's secret, or null
+ *   prefix         the topic root, e.g. "ivoryos/edge"
+ *   onRefused      (deviceId, reason) => void, for the daemon's log
+ * Without `auth` the broker is open, as it was before devices had secrets.
  */
-async function startEmbeddedBroker(brokerUrl) {
+function guard(auth) {
+  if (!auth) return {};
+  const refuse = (code, message) => Object.assign(new Error(message), { returnCode: code });
+  return {
+    authenticate(client, username, password, done) {
+      const secret = password ? password.toString() : '';
+      if (username === DAEMON_USER) {
+        if (secretMatches(secret, auth.daemonSecretHash)) { client.ivoryos = { daemon: true }; return done(null, true); }
+        return done(refuse(4, 'bad daemon credentials'), false);
+      }
+      // A device signs in as itself: its username is its id, which is also its client id.
+      if (!username || username !== client.id) {
+        auth.onRefused?.(client.id, username ? 'username does not match its client id' : 'no login');
+        return done(refuse(username ? 5 : 4, 'not authorized'), false);
+      }
+      Promise.resolve(auth.credentialFor(username)).then((hash) => {
+        if (hash && secretMatches(secret, hash)) { client.ivoryos = { deviceId: username }; return done(null, true); }
+        auth.onRefused?.(username, hash ? 'wrong secret (an older pairing)' : 'not paired with this Cloud (or removed)');
+        done(refuse(4, 'bad username or password'), false);
+      }, (e) => done(refuse(3, `credential lookup failed: ${e.message}`), false));
+    },
+    authorizePublish(client, packet, done) {
+      // A Last Will goes out after its client has gone, so there may be no client; wills are a
+      // device's own "offline" status, which is all one may hold.
+      if (!client) return done(/\/status$/.test(packet.topic) ? null : new Error('not authorized'));
+      if (client.ivoryos?.daemon) return done(null);
+      const id = client.ivoryos?.deviceId;
+      done(id && devicePublishAllowed(packet.topic, auth.prefix, id) ? null : new Error(`${id || client.id} may not publish to ${packet.topic}`));
+    },
+    authorizeSubscribe(client, sub, done) {
+      if (client.ivoryos?.daemon) return done(null, sub);
+      const id = client.ivoryos?.deviceId;
+      // Refused subscriptions get a failure code back; the connection stays up.
+      done(null, id && deviceSubscribeAllowed(sub.topic, auth.prefix, id) ? sub : null);
+    },
+  };
+}
+
+/**
+ * Resolves to { started, port?, reason?, close?, kick? }. Never rejects and never throws: a
+ * broker we could not start is a thing to report and carry on from (an external one may well be
+ * running), not a reason to take the daemon down. `kick(clientId)` drops a connected client, for
+ * a device that has just been removed.
+ */
+async function startEmbeddedBroker(brokerUrl, auth = null) {
   if (process.env.IVORYOS_EMBEDDED_BROKER === '0') {
     return { started: false, reason: 'disabled by IVORYOS_EMBEDDED_BROKER=0' };
   }
-  if (process.env.AWS_IOT_ENDPOINT) {
+  if (require('./store').usesAwsIot()) {
     return { started: false, reason: 'cloud mode — AWS IoT Core is the broker' };
   }
 
@@ -66,7 +116,7 @@ async function startEmbeddedBroker(brokerUrl) {
     // finished initialising, and it fails silently in the worst way: the TCP connection is
     // accepted and then no CONNACK is ever sent, so every client — including this daemon's own —
     // hangs until its keepalive gives up. It looks exactly like an unreachable broker.
-    aedes = await Aedes.createBroker();
+    aedes = await Aedes.createBroker(guard(auth && { ...auth, daemonSecretHash: require('./brokerAuth').hashSecret(auth.daemonSecret) }));
   } catch (e) {
     return { started: false, reason: `aedes unavailable: ${e.message}` };
   }
@@ -89,7 +139,9 @@ async function startEmbeddedBroker(brokerUrl) {
       resolve({
         started: true,
         port,
+        secured: !!auth,
         close: () => new Promise((done) => server.close(() => aedes.close(done))),
+        kick: (clientId) => { try { aedes.clients[clientId]?.close(); } catch { /* already gone */ } },
       });
     });
   });

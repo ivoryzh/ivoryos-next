@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { workflowSourcesFor } from '@/lib/runSources';
+import { unsentWorkflows, workflowSourcesFor } from '@/lib/runSources';
 import { getStore } from '@/lib/store';
 import { authorize } from '@/lib/auth';
 import { ownedKeys, setOwner } from '@/lib/workspace';
@@ -90,6 +90,13 @@ export async function POST(req: Request) {
     const { errors, tasks } = planRun('__template__', resolved, edges);
     if (errors.length > 0) {
       return NextResponse.json({ error: errors.map(e => e.message).join('\n'), errors }, { status: 400 });
+    }
+    const unsent = await unsentWorkflows(resolved);
+    if (unsent.length) {
+      return NextResponse.json({
+        error: `${unsent.join(', ')} ${unsent.length === 1 ? 'was' : 'were'} saved in Cloud only. `
+          + 'Send it to its device from the sequence editor before scheduling it.',
+      }, { status: 400 });
     }
     const built = buildRunTasks(tasks, resolved, name, await workflowSourcesFor(resolved));
     if (built.problems.length > 0) {

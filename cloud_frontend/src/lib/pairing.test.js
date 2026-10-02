@@ -184,3 +184,24 @@ test('approving late restarts the clock, so the edge still has time to collect',
   assert.ok(new Date(row.expires_at).getTime() > Date.now() + pairing.TTL_MS - 5000);
   assert.ok(await store.claimPairingRequest(hash, now()));
 });
+
+test('a device name is unique within a workspace, read the way a person reads it', () => {
+  const taken = [{ id: 'flow-rig-ab12cd', name: 'Flow rig' }, { id: 'hplc-9z8y7x', name: 'HPLC' }];
+  // Case and spacing do not make a different name.
+  assert.deepStrictEqual(pairing.nameConflict('flow  RIG ', taken), taken[0]);
+  assert.strictEqual(pairing.nameConflict('Flow rig 2', taken), null);
+  // A device keeps its own name when it is paired again or renamed to the same thing.
+  assert.strictEqual(pairing.nameConflict('Flow rig', taken, 'flow-rig-ab12cd'), null);
+  assert.deepStrictEqual(pairing.nameConflict('HPLC', taken, 'flow-rig-ab12cd'), taken[1]);
+  assert.strictEqual(pairing.nameConflict('', taken), null);
+});
+
+test('renaming a device changes its label and leaves its id alone', async (t) => {
+  const store = freshStore(t);
+  await store.upsertDevicePlaceholder('rig-abc123', 'Flow rig');
+  assert.strictEqual(await store.renameDevice('rig-abc123', 'Pump rig'), true);
+  assert.strictEqual(await store.renameDevice('nope', 'x'), false);
+  const [device] = await store.listDevices();
+  assert.strictEqual(device.id, 'rig-abc123');
+  assert.strictEqual(device.name, 'Pump rig');
+});

@@ -185,7 +185,7 @@ export function WorkflowPeek({
                                 {String(method).replace(/_/g, ' ')}
                               </span>
                               {key === 'script' && isBatch && (
-                                <span className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200 dark:bg-teal-500/20 dark:text-teal-300 dark:border-teal-700/40">
+                                <span className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-500/20 dark:text-purple-300 dark:border-purple-700/40">
                                   <Layers className="w-2.5 h-2.5" /> Batch
                                 </span>
                               )}
@@ -196,7 +196,7 @@ export function WorkflowPeek({
                                   const value = resolved(v, params);
                                   const substituted = value !== v;
                                   return (
-                                    <span key={k} className={substituted ? 'text-indigo-600 dark:text-indigo-400' : ''}>
+                                    <span key={k} className={substituted ? 'text-gray-900 dark:text-white' : ''}>
                                       {k}={typeof value === 'object' ? JSON.stringify(value) : String(value)}{' '}
                                     </span>
                                   );
@@ -220,7 +220,7 @@ export function WorkflowPeek({
               <>
                 <button
                   onClick={onEdit}
-                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 dark:bg-white/5 dark:border-indigo-700/40 dark:text-indigo-300 dark:hover:bg-white/10"
+                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-white border border-accent-tint text-accent-fg hover:bg-accent-soft dark:bg-white/5"
                 >
                   <PencilLine className="w-4 h-4" />
                   Edit {target.name} in {editLabel || 'the Designer'}

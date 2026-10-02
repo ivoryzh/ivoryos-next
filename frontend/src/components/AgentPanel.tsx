@@ -335,7 +335,12 @@ export default function AgentPanel({
 
   const renderProposal = (proposal: Proposal, questions: string[] = [], ok?: boolean, raw?: string | null) => {
     const errors = (proposal.issues || []).filter(i => i.severity === 'error');
-    const others = (proposal.issues || []).filter(i => i.severity !== 'error');
+    // "#x, which no earlier step produces" is how a reusable workflow is *supposed* to look: those
+    // are its inputs, filled per sample on the Configure page or by the optimizer. One line
+    // naming them, not one amber box per input shouting the same sentence three times.
+    const inputRe = /reads #(\w+), which no earlier step produces/;
+    const inputs = Array.from(new Set((proposal.issues || []).filter(i => i.severity === 'warning' && inputRe.test(i.message)).map(i => inputRe.exec(i.message)![1])));
+    const others = (proposal.issues || []).filter(i => i.severity !== 'error' && !(i.severity === 'warning' && inputRe.test(i.message)));
     const decided = proposal.status !== 'pending';
     return (
       <div className="mt-2 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-[#141414] overflow-hidden">
@@ -368,6 +373,13 @@ export default function AgentPanel({
           </div>
         )}
 
+        {inputs.length > 0 && (
+          <div className="px-3 py-2 border-b border-gray-100 dark:border-white/5 text-[11px] text-gray-600 dark:text-gray-300">
+            <span className="font-semibold text-gray-700 dark:text-gray-200">Inputs</span>, filled per sample on the Configure page or by the optimizer:{' '}
+            {inputs.map(n => <code key={n} className="font-mono px-1 rounded bg-gray-100 dark:bg-white/10 mr-1">#{n}</code>)}
+          </div>
+        )}
+
         {(errors.length > 0 || others.length > 0) && (
           <div className="px-3 py-2 border-b border-gray-100 dark:border-white/5 space-y-1">
             {[...errors, ...others].slice(0, 8).map((issue, i) => (
@@ -393,7 +405,7 @@ export default function AgentPanel({
             <>
               <button
                 onClick={() => applyToCanvas(proposal)}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30"
+                className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30"
               >
                 <Check className="w-3 h-3" /> Put on canvas
               </button>
@@ -422,7 +434,7 @@ export default function AgentPanel({
   return (
     // Docked on the left, between the app sidebar and the module toolbox. The right edge belongs
     // to the Prep & Cleanup drawer, and a second right-hand column fought it for the same space.
-    <div className="w-[26rem] shrink-0 border-r border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/20 flex flex-col h-full">
+    <div className="w-[26rem] max-w-[42vw] min-w-[18rem] shrink-0 border-r border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/20 flex flex-col h-full">
       <div className="h-16 shrink-0 px-4 flex items-center justify-between border-b border-gray-200 dark:border-white/10 bg-white/80 dark:bg-black/20">
         <div className="flex items-center gap-2 min-w-0">
           <Sparkles className="w-4 h-4 text-purple-500 shrink-0" />
@@ -577,7 +589,7 @@ export default function AgentPanel({
         {turns.map((turn, i) => (
           <div key={i}>
             {turn.role === 'user' && (
-              <div className="ml-6 rounded-xl bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-100 dark:border-indigo-500/20 px-3 py-2 text-xs text-gray-800 dark:text-gray-100 whitespace-pre-wrap">
+              <div className="ml-6 rounded-xl bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-white/15 dark:border-white/20 px-3 py-2 text-xs text-gray-800 dark:text-gray-100 whitespace-pre-wrap">
                 {turn.content}
               </div>
             )}

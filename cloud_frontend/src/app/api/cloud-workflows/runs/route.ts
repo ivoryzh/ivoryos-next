@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { experimentName, workflowSourcesFor } from '@/lib/runSources';
+import { experimentName, unsentWorkflows, workflowSourcesFor } from '@/lib/runSources';
 import { getStore } from '@/lib/store';
 import { authorize } from '@/lib/auth';
 import { ownedKeys, setOwner } from '@/lib/workspace';
@@ -70,6 +70,16 @@ export async function POST(req: Request) {
           { status: 409 },
         );
       }
+    }
+
+    // A workflow saved in Cloud only is not what its device would run (the device has its own
+    // version of that name, or none), so a run cannot use it until it is sent.
+    const unsent = await unsentWorkflows(resolved);
+    if (unsent.length) {
+      return NextResponse.json({
+        error: `${unsent.join(', ')} ${unsent.length === 1 ? 'was' : 'were'} saved in Cloud only. `
+          + 'Open it in the sequence editor and choose "Save and send to device" before running it.',
+      }, { status: 400 });
     }
 
     const name = await experimentName(body.name, body.base);

@@ -5,9 +5,9 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
   <title>IvoryOS</title>
   <style>
-    :root { --bg: #f9fafb; --card: #fff; --text: #111827; --muted: #6b7280; --border: #e5e7eb; --accent: #4f46e5; --danger: #dc2626; --log: #f3f4f6; }
+    :root { --bg: #f9fafb; --card: #fff; --text: #111827; --muted: #6b7280; --border: #e5e7eb; --accent: #4a6280; --on-accent: #fff; --danger: #dc2626; --log: #f3f4f6; }
     @media (prefers-color-scheme: dark) {
-      :root { --bg: #0a0a0a; --card: #141414; --text: #f3f4f6; --muted: #9ca3af; --border: #262626; --accent: #818cf8; --danger: #f87171; --log: #1c1c1c; }
+      :root { --bg: #0a0a0a; --card: #141414; --text: #f3f4f6; --muted: #9ca3af; --border: #262626; --accent: #a9bed5; --on-accent: #0f1a26; --danger: #f87171; --log: #1c1c1c; }
     }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -22,7 +22,7 @@
     pre { background: var(--log); border-radius: 8px; padding: 12px; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 16px 0 0; }
     .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
     button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
-    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     [hidden] { display: none !important; }
   </style>
 </head>

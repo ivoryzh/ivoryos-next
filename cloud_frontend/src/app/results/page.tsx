@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, RefreshCw, Table2, AlertTriangle } from 'lucide-react';
 import { formatRun, datasheetCsv, RunDataTable, SectionTitle, cellText, parseServerTime, issuesLabel } from '@ivoryos/shared-ui';
+import { useDeviceName } from '@/lib/deviceNames';
 
 /**
  * One record per experiment. A Cloud run is a whole experiment however many devices it spans, so
@@ -78,7 +79,7 @@ const timesOf = (sheet: any) => (sheet?.rows?.length || 1);
 
 // One colour per device lane, so two instruments' timelines read apart at a glance. Red, amber
 // and yellow are kept out: they mean error, completed-with-issues and still-running on any lane.
-const LANE_COLORS = ['bg-indigo-500', 'bg-teal-500', 'bg-violet-500', 'bg-sky-500', 'bg-fuchsia-500', 'bg-emerald-600'];
+const LANE_COLORS = ['bg-accent', 'bg-teal-500', 'bg-violet-500', 'bg-sky-500', 'bg-fuchsia-500', 'bg-emerald-600'];
 
 const download = (csv: string, name: string) => {
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
@@ -92,6 +93,7 @@ const download = (csv: string, name: string) => {
 };
 
 export default function ResultsPage() {
+  const deviceName = useDeviceName();
   const [list, setList] = useState<ExperimentSummary[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [focusNode, setFocusNode] = useState<string | null>(null);
@@ -192,8 +194,8 @@ export default function ResultsPage() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <header className="glass-header flex shrink-0 items-center justify-between px-6">
-        <div className="flex items-center gap-2">
+      <header data-ivoryos-page-header="mixed" className="glass-header flex shrink-0 items-center justify-between px-6">
+        <div data-ivoryos-page-title className="flex items-center gap-2">
           <Table2 className="h-5 w-5" />
           <h1 className="text-lg font-semibold">Results</h1>
           <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>one record per experiment</span>
@@ -216,7 +218,7 @@ export default function ResultsPage() {
               <button
                 key={e.runId}
                 onClick={() => { setRunId(e.runId); setFocusNode(null); }}
-                className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${on ? 'border-indigo-300 bg-indigo-50/60 dark:border-indigo-500/40 dark:bg-indigo-500/10' : 'hover-bg'}`}
+                className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${on ? 'border-accent-tint bg-accent-soft' : 'hover-bg'}`}
                 style={on ? undefined : { borderColor: 'var(--panel-border)' }}
               >
                 <div className="text-sm font-semibold truncate" title={e.name}>{e.name}</div>
@@ -251,7 +253,7 @@ export default function ResultsPage() {
                     aside={
                       <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-secondary)' }}>
                         {hoveredSpan
-                          ? `${hoveredSpan.task.label}${hoveredSpan.of > 1 ? ` · run ${hoveredSpan.n} of ${hoveredSpan.of}` : ''} · ${hoveredSpan.task.deviceId} · ${seconds(hoveredSpan.end - hoveredSpan.start)} · +${seconds(hoveredSpan.start - t0)}`
+                          ? `${hoveredSpan.task.label}${hoveredSpan.of > 1 ? ` · run ${hoveredSpan.n} of ${hoveredSpan.of}` : ''} · ${deviceName(hoveredSpan.task.deviceId)} · ${seconds(hoveredSpan.end - hoveredSpan.start)} · +${seconds(hoveredSpan.start - t0)}`
                           : 'hover a step'}
                       </span>
                     }
@@ -263,9 +265,9 @@ export default function ResultsPage() {
                   <div className="min-w-[560px] rounded-xl border p-3 space-y-2" style={{ borderColor: 'var(--panel-border)' }}>
                     {lanes.map((device) => (
                       <div key={device} className="flex items-center gap-3">
-                        <span className="w-28 shrink-0 flex items-center gap-1.5 text-xs font-semibold min-w-0" title={device}>
+                        <span className="w-28 shrink-0 flex items-center gap-1.5 text-xs font-semibold min-w-0" title={`${deviceName(device)} (${device})`}>
                           <span className={`h-2 w-2 shrink-0 rounded-full ${laneColor(device)}`} />
-                          <span className="truncate">{device}</span>
+                          <span className="truncate">{deviceName(device)}</span>
                         </span>
                         <div className="relative h-8 flex-1 rounded-md bg-gray-100/70 dark:bg-white/5">
                           {[25, 50, 75].map((p) => (
@@ -283,7 +285,7 @@ export default function ResultsPage() {
                                 onMouseEnter={() => setHovered(s.key)}
                                 onMouseLeave={() => setHovered(null)}
                                 onClick={() => document.getElementById(`data-${s.task.nodeId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                                className={`absolute top-1 bottom-1 min-w-[3px] overflow-hidden rounded ${color} ${hovered === s.key ? 'ring-2 ring-offset-1 ring-indigo-300' : ''}`}
+                                className={`absolute top-1 bottom-1 min-w-[3px] overflow-hidden rounded ${color} ${hovered === s.key ? 'ring-2 ring-offset-1 ring-accent' : ''}`}
                                 style={{ left: pos(s.start), width: `${Math.max(((s.end - s.start) / total) * 100, 0.4)}%` }}
                               >
                                 {/* One bar per step execution: which step, when, how many times.
@@ -344,8 +346,8 @@ export default function ResultsPage() {
                     {sheets.map(({ task, run }) => (
                       <div key={task.nodeId} id={`data-${task.nodeId}`} className="scroll-mt-4">
                         <div className="flex items-baseline justify-between gap-3 mb-1">
-                          <span className={`text-sm font-semibold ${focusNode === task.nodeId ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
-                            {task.label} <span className="font-normal text-xs" style={{ color: 'var(--text-secondary)' }}>· {task.deviceId} · {task.results.length > 1
+                          <span className={`text-sm font-semibold ${focusNode === task.nodeId ? 'text-accent-fg' : ''}`}>
+                            {task.label} <span className="font-normal text-xs" style={{ color: 'var(--text-secondary)' }}>· {deviceName(task.deviceId)} · {task.results.length > 1
                               ? `${task.results.length} runs (edge #${task.results[0].edgeRunId}–#${task.results[task.results.length - 1].edgeRunId})`
                               : `edge run #${task.results[0].edgeRunId}`}</span>
                           </span>
@@ -367,7 +369,7 @@ export default function ResultsPage() {
                         )}
                         {task.results.filter((r) => r.truncated).map((r) => (
                           <p key={r.edgeRunId} className="mt-1 text-xs text-amber-600">
-                            Too large to send in full; the complete record is on {task.deviceId}, run #{r.edgeRunId}.
+                            Too large to send in full; the complete record is on {deviceName(task.deviceId)}, run #{r.edgeRunId}.
                           </p>
                         ))}
                       </div>
@@ -396,7 +398,7 @@ export default function ResultsPage() {
                       <div key={t.nodeId} className="px-3 py-2 text-xs" style={{ borderColor: 'var(--panel-border)' }}>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                           <span className="font-semibold text-sm">{t.label}</span>
-                          <span style={{ color: 'var(--text-secondary)' }}>{t.deviceId}</span>
+                          <span style={{ color: 'var(--text-secondary)' }} title={t.deviceId}>{deviceName(t.deviceId)}</span>
                           <span className={`font-semibold ${tone(outcome)}`} title={outcome === 'completed with issues' ? `Completed, but ${issuesLabel(issuesOf(results))}` : undefined}>{outcome}</span>
                           {results.length > 1 && (
                             <span className="font-semibold" title={`${results.filter((r) => r.status === 'completed').length} of ${results.length} runs completed`}>

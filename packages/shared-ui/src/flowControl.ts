@@ -53,10 +53,11 @@ export const FLOW_CONTROL_SCHEMAS: Record<string, any> = {
     return_type: 'None',
   },
   User_Input: {
-    description: 'Pause and ask a person to type in a value (human-in-the-loop).',
+    // With no variable_name it only pauses: the message waits for Continue (the original `pause`).
+    description: 'Pause for a person: show a message, and ask for a value if it is saved under a name (human-in-the-loop).',
     parameters: {
       prompt: { type: 'str', required: true },
-      variable_name: { type: 'str', required: true },
+      variable_name: { type: 'str', required: false },
       input_type: { type: 'str', required: false, default: 'str', options: ['str', 'int', 'float', 'bool'] },
     },
     return_type: 'None',
@@ -73,3 +74,17 @@ export function flowControlSchema(instrument: string | undefined, method: string
   if (!isFlowControlInstrument(instrument)) return undefined;
   return FLOW_CONTROL_SCHEMAS[String(method || '')];
 }
+
+/**
+ * What a designer's toolbox offers under Logic, keyed by the entry a person drags in (not what is
+ * stored: `If_Else_Block` expands into If / Else / End_If on drop, see FLOW_CONTROL_SCHEMAS). The
+ * edge Designer and Cloud's sequence editor both offer exactly this; they each kept a copy before,
+ * and Cloud's had lost User input and Comment.
+ */
+export const FLOW_CONTROL_PALETTE: Record<string, any> = {
+  If_Else_Block: { description: 'If / else: run the following steps only when the condition holds', parameters: { condition: { type: 'str', required: true } }, return_type: 'None' },
+  While_Loop: { description: 'While loop: repeat the following steps while the condition holds', parameters: { condition: { type: 'str', required: true } }, return_type: 'None' },
+  Sleep: { description: 'Wait: pause execution for a number of seconds', parameters: { duration_seconds: { type: 'float', required: true } }, return_type: 'None' },
+  User_Input: { description: 'Pause for a person: show a message, and ask for a value if you name where to save it', parameters: { prompt: { type: 'str', required: true }, variable_name: { type: 'str', required: false }, input_type: { type: 'str', required: false, default: 'str', options: ['str', 'int', 'float', 'bool'] } }, return_type: 'None' },
+  Comment: { description: "Add a note to the run log, like Python's print()", parameters: { message: { type: 'str', required: true } }, return_type: 'None' },
+};

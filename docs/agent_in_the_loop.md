@@ -161,3 +161,68 @@ cycle visible.
   A provider that does support tools can be added without changing the contract.
 - **The panel is Designer-only.** `cloud_frontend`'s editor has no equivalent yet.
 - **Proposals are polled** every 5 seconds, not pushed over the existing websocket.
+
+
+## The same assistant in Cloud
+
+The Orchestrator has an **Assistant** button in its header. It is the design above ported to
+Node (`cloud_frontend/src/lib/agent/`), not a call to an edge's `/api/agent`: Cloud has no HTTP
+path to a device, and a Cloud workflow spans several.
+
+What differs:
+
+- **Target first.** The panel asks what you are designing for: all devices, one platform (a
+  device group from the Devices page), or one device. The model is told only about those
+  devices' instruments and saved workflows, which is also what keeps the prompt small.
+- **Workflows are the unit.** A device's saved workflow is offered as one step (`Library
+  Workflows`, its inputs as args, its outputs readable by later steps), and the prompt says to
+  prefer it over spelling out instrument methods. A long task on one device is one node.
+- **The model writes a graph spec, not nodes.** A flat list of steps with `after` dependencies
+  (and a branch name after an `If`). `graphSpec.js` validates every step against the real device
+  schemas, then materializes the spec into the exact node and edge objects a drag-drop makes,
+  laid out by depth, and runs `validateGraph` on the result. Errors go back to the model, three
+  attempts at most, then the draft is handed over with its problems listed.
+- **Settings** (provider, endpoint, key, model) are one row for the whole Cloud in
+  `cloud_settings` (Supabase migration `0013_cloud_settings.sql`; in LAN mode the SQLite table is
+  created on start). Env vars `IVORYOS_LLM_PROVIDER`, `OLLAMA_URL`, `OLLAMA_MODEL`,
+  `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` are the fallback.
+
+What is the same: one JSON object back, the validate-and-retry loop, the progress log, and the
+human gate. "Put on canvas" is the only way a proposal reaches the canvas, and Run is a person's
+click as before.
+
+### Cloud's MCP server and proposals
+
+Cloud has the same two surfaces as the edge. Proposals are stored (`agent_proposals`, migration
+0014), whether they came from the panel's own loop or from outside, and the panel shows the
+outside ones under "Waiting for you". `POST /api/agent/propose` files one (422 with the errors if
+it does not validate, unless `allow_invalid`); `/accept` saves it to the Cloud library (or, with
+`save: false`, records that it was taken onto the canvas); `/reject` dismisses it.
+
+An outside agent authenticates with an **agent token**: Settings -> Agent access mints one
+(`ivc_...`, shown once, hash stored, standing for one workspace). Sent as
+`Authorization: Bearer`, it may read the workspace and file proposals; it cannot accept, run or
+switch workspace. `npm run mcp` in `cloud_frontend` (`scripts/mcp-server.js`) is the stdio MCP
+server, a thin proxy over those routes with `list_lab`, `validate_workflow`, `propose_workflow`
+and `list_proposals`, configured by `IVORYOS_CLOUD_URL` and `IVORYOS_CLOUD_TOKEN`. For Claude
+Desktop:
+
+```json
+{ "mcpServers": { "ivoryos-cloud": { "command": "node", "args": ["<repo>/cloud_frontend/scripts/mcp-server.js"],
+  "env": { "IVORYOS_CLOUD_URL": "https://cloud.ivoryos.app", "IVORYOS_CLOUD_TOKEN": "ivc_..." } } } }
+```
+
+
+## Using Claude
+
+Two different things, easy to confuse:
+
+- **Claude as the panel's model.** Pick the `anthropic` provider in the panel's settings (edge
+  or Cloud). The edge needs `pip install 'ivoryos-edge[claude]'`; Cloud ships the SDK. A key is
+  optional: Anthropic's SDK also reads `ANTHROPIC_API_KEY` or an `ant auth login` profile on the
+  machine the edge runs on. The default model is `claude-opus-5-5`, with the server-side refusal
+  fallback turned on so a declined request is re-run on a fallback model inside the same call.
+- **Claude as the agent, through MCP.** Claude Desktop or Claude Code connects to
+  `python -m ivoryos_edge.agent.mcp_server` (env `IVORYOS_URL`), gets the nine tools, and drives
+  them itself: read the deck, validate, propose, request a run. The proposals land in the same
+  inbox the panel shows, behind the same human gate. This needs no provider setting at all.

@@ -192,18 +192,6 @@ export function batchSizeOf(node: any): number {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0;
 }
 
-/**
- * How many times a Once node runs back to back. A repeat count with no interval is one run of the
- * workflow iterated that many times -- prep once, the body N times, cleanup once -- not N separate
- * runs that each set up and tear down. With an interval the device is free in between, so those
- * stay separate occurrences (`repeatIntervalMs` / `repeatTotal`).
- */
-export function iterationsOf(node: any): number {
-  if (runModeOf(node) !== 'single' || repeatIntervalMs(node) > 0) return 1;
-  const n = Number(runConfigOf(node).schedule?.repeat);
-  return Number.isFinite(n) && n >= 2 ? Math.floor(n) : 1;
-}
-
 /** A run payload in the shape `POST /api/queue/runs` (and the `execute` topic) accepts. */
 export interface EdgeRunPayload {
   name: string;
@@ -259,10 +247,6 @@ export function buildNodeRun(node: any, runName: string, source?: WorkflowSource
       paced: groups.map((rows, i) =>
         buildNodeRun(withRows(node, rows), `${runName} · ${unit} ${i + 1} of ${groups.length}`, source) as EdgeRunPayload),
     };
-  }
-
-  if (mode === 'single' && iterationsOf(node) > 1) {
-    return iteratedRun(node, block, runName, iterationsOf(node));
   }
 
   if (mode === 'single') {
@@ -378,34 +362,6 @@ export function buildNodeRun(node: any, runName: string, source?: WorkflowSource
     prep: [phaseLink(block, settled, 'prep')],
     sequence: [],
     cleanup: [phaseLink(block, settled, 'cleanup')],
-  };
-}
-
-/**
- * A Once node repeated back to back, as one run with N iterations.
- *
- * Shaped as a spreadsheet whose rows differ only in an `iteration` column, which is exactly what
- * it is: Data History then shows one row per iteration with its outputs, the Queue counts
- * iterations, and a linked workflow's prep and cleanup run once around them. The node's values
- * are already literal here (resolveGraphForDispatch), so they ride along as columns for the record.
- */
-function iteratedRun(node: any, block: any, runName: string, n: number): EdgeRunPayload {
-  const values = singleValuesOf(node);
-  const variables = ['iteration', ...Object.keys(values)];
-  const rows: SpreadsheetRow[] = Array.from({ length: n }, (_, i) => ({ ...values, iteration: String(i + 1) }));
-  const sequence = expandSpreadsheet({ sequence: [block], rows, variables });
-  const isLinked = String(block?.instrument || '') === LIBRARY_INSTRUMENT;
-  const params = Object.fromEntries(Object.entries(block.params || {}).filter(([k]) => !k.startsWith('_')));
-  return {
-    name: runName,
-    parameters: buildSpreadsheetParameters({ variables, rows, sequence: [block] }),
-    prep: isLinked ? [phaseLink(block, params, 'prep')] : [],
-    sequence: sequence.map((s) =>
-      isLinked
-        ? { ...toSubmittedStep(s), phases: ['script'], ...(block.ref ? { ref: block.ref } : {}) }
-        : toSubmittedStep(s),
-    ),
-    cleanup: isLinked ? [phaseLink(block, params, 'cleanup')] : [],
   };
 }
 
@@ -530,12 +486,19 @@ export function repeatIntervalMs(node: any): number {
 }
 
 /**
- * How many times a repeating node is dispatched in total. Only with an interval: back to back is
- * one run with iterations (`iterationsOf`), not separate dispatches.
+ * How many times a repeating node is dispatched in total.
+ *
+ * "Run this 20 times" is 20 whole runs, one after another, with or without a wait between them:
+ * each is sent on its own when the device is free, sets up and cleans up as the workflow says,
+ * is numbered ("run 3 of 20"), and keeps its own record. Cloud decides when each one goes; the
+ * device is only told how many are still to come. A count with no interval used to be folded
+ * into one run with N iterations (prep once, body N times, cleanup once), which is a different
+ * experiment from the one asked for and left nothing for Cloud to pace, stop or report between
+ * runs. Iterating a body inside one run is what Iterate mode is for.
  */
 export function repeatTotal(node: any): number {
   if (isPaced(node)) return firingGroupsOf(node).length;
-  if (runModeOf(node) !== 'single' || repeatIntervalMs(node) === 0) return 0;
+  if (runModeOf(node) !== 'single') return 0;
   const repeat = Number(runConfigOf(node).schedule?.repeat);
-  return Number.isFinite(repeat) && repeat > 0 ? Math.floor(repeat) : 0;
+  return Number.isFinite(repeat) && repeat >= 2 ? Math.floor(repeat) : 0;
 }

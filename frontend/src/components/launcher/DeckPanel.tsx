@@ -1,9 +1,9 @@
 "use client";
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileJson, Package, Pencil, Plus, Store, Trash2 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { Deck, DeckInstrument, DesktopApi, Profile } from '@/desktop';
-import HubBrowser from './HubBrowser';
+import HubBrowser, { type HubKind } from './HubBrowser';
 import InstrumentEditor from './InstrumentEditor';
 import type { InstrumentSeed } from './PrivateRepos';
 import { Button, cardClass } from './ui';
@@ -11,19 +11,26 @@ import { Button, cardClass } from './ui';
 type LoadState = { loaded: Set<string>; errors: Record<string, string> } | null;
 
 /** One deck profile's instruments: what is on it, whether each loaded, and how to change it. */
-export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpenProfile, browsing, setBrowsing }: {
+export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpenProfile, browsing, setBrowsing, hubKind, seed: handedSeed, onSeedTaken }: {
   api: DesktopApi; profile: Profile; hubUrl: string; pro: boolean; onUpgrade: () => void;
+  /** A private-repository class picked in the sidebar's Hub browser before this deck existed: open the form with it. */
+  seed?: InstrumentSeed | null;
+  onSeedTaken?: () => void;
   /** Show another profile, e.g. the deck a Hub platform was just installed as. */
   onOpenProfile: (id: string) => void;
   /** Whether the Hub browser is open: owned by the launcher so its sidebar can open it too. */
   browsing: boolean;
   setBrowsing: (open: boolean) => void;
+  /** The Hub section to open on when the launcher opened the browser. */
+  hubKind?: HubKind;
 }) {
   const [deck, setDeck] = useState<Deck | null>(null);
   const [load, setLoad] = useState<LoadState>(null);
-  const [editing, setEditing] = useState<DeckInstrument | null | 'new'>(null);
-  const [seed, setSeed] = useState<InstrumentSeed | null>(null);
+  // A handed seed opens the form as this panel mounts (the launcher mounts a fresh panel per deck).
+  const [editing, setEditing] = useState<DeckInstrument | null | 'new'>(handedSeed ? 'new' : null);
+  const [seed, setSeed] = useState<InstrumentSeed | null>(handedSeed ?? null);
   const running = profile.status.state === 'running';
+  useEffect(() => { if (handedSeed) onSeedTaken?.(); }, [handedSeed, onSeedTaken]);
 
   const refresh = useCallback(() => {
     api.deck(profile.id).then(setDeck).catch(e => notify(e.message, { tone: 'error' }));
@@ -44,11 +51,22 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpen
     return () => { cancelled = true; };
   }, [running, profile.status.url, deck]);
 
+  // What the Hub added is on disk, not in the edge: a running deck was restarted to load it
+  // (manager.js), a stopped one loads it when started. Say which, so nobody wonders why the
+  // Designer does not list the new instrument yet.
+  const added = () => {
+    refresh();
+    notify(running
+      ? `${profile.name} is restarting to load it. Its page reloads once it is back.`
+      : `It is on the deck now and loads when ${profile.name} starts.`,
+      { title: 'Added to the deck' });
+  };
   const act = async (fn: () => Promise<unknown>) => {
     try { await fn(); refresh(); } catch (e: any) { await notify(e.message, { title: 'Could not change the deck', tone: 'error' }); }
   };
 
   const instruments = deck?.instruments || [];
+  const hubTarget = useMemo(() => ({ id: profile.id, name: profile.name }), [profile.id, profile.name]);
   return (
     <div className="space-y-5">
       <div className="flex items-center gap-2 flex-wrap">
@@ -89,7 +107,7 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpen
                   {!off && error && <div className="mt-1 text-xs text-red-600 dark:text-red-400 break-words">{error}</div>}
                 </div>
                 <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer" title="Switched off instruments stay on the deck but are not loaded, e.g. while unplugged">
-                  <input type="checkbox" checked={!off} onChange={e => act(() => api.setInstrumentEnabled(profile.id, inst.name, e.target.checked))} className="accent-indigo-600" />
+                  <input type="checkbox" checked={!off} onChange={e => act(() => api.setInstrumentEnabled(profile.id, inst.name, e.target.checked))} className="accent-accent" />
                   on
                 </label>
                 <Button small tone="ghost" title="Edit" onClick={() => setEditing(inst)}><Pencil className="w-3.5 h-3.5" /></Button>
@@ -118,9 +136,10 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpen
       )}
       {browsing && (
         <HubBrowser
-          api={api} profileId={profile.id} profileName={profile.name} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade}
+          api={api} profile={hubTarget} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade}
           onPrivatePicked={s => { refresh(); setSeed(s); setEditing('new'); }}
-          onClose={() => setBrowsing(false)} onAdded={refresh} onOpenProfile={onOpenProfile}
+          initialKind={hubKind}
+          onClose={() => setBrowsing(false)} onAdded={added} onOpenProfile={onOpenProfile}
         />
       )}
     </div>

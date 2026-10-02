@@ -162,10 +162,11 @@ function builtInStep(b) {
         return { instrument: FLOW_CONTROL, action: 'Sleep', args: { duration_seconds: Number.isFinite(seconds) ? seconds : statement }, arg_types: { duration_seconds: 'float' } };
     }
     if (instrument === 'pause') {
+        // A User input with no name to save under only pauses: the message, then Continue.
         return {
             instrument: FLOW_CONTROL, action: 'User_Input',
-            args: { prompt: String(statement ?? 'Continue?'), variable_name: 'pause_acknowledged', input_type: 'bool' },
-            arg_types: { prompt: 'str', variable_name: 'str', input_type: 'str' },
+            args: { prompt: String(statement ?? 'Continue?') },
+            arg_types: { prompt: 'str' },
         };
     }
     return null;
@@ -260,6 +261,64 @@ class HubCatalog {
             throw Object.assign(new HubError((body && (body.message || body.error)) || `The Automation Hub answered ${res.status}.`), { code: body && body.code });
         }
         return body || [];
+    }
+
+    /**
+     * A message for the IvoryOS team through the Hub's contact inquiries (the table its website's
+     * contact form writes): {name, email, message}. Used for "Cloud early access" while Cloud is
+     * not offered. Insert only; nothing is read back.
+     */
+    async contactInquiry({ name, email, message }) {
+        const token = await this.token().catch(() => null);
+        let res;
+        try {
+            res = await this.fetch(`${this.url}/rest/v1/contact_inquiries`, {
+                method: 'POST',
+                headers: {
+                    apikey: this.key, Authorization: `Bearer ${token || this.key}`,
+                    'Content-Type': 'application/json', Prefer: 'return=minimal',
+                },
+                body: JSON.stringify({ name, email, message }),
+            });
+        } catch (e) {
+            throw new HubError(`Could not reach IvoryOS (${e.message}).`);
+        }
+        if (res.ok) return true;
+        const text = await res.text().catch(() => '');
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+        throw new HubError((body && (body.message || body.error)) || `IvoryOS answered ${res.status}.`);
+    }
+
+    /**
+     * File a problem report (problemReport.js) in `problem_reports`. Clients may only insert there:
+     * no read policy, so the id is made here and is the reference the person is given. A signed-in
+     * request is tied to its account by the table's own default (auth.uid()), never by a field sent.
+     */
+    async fileReport(row) {
+        const token = await this.token().catch(() => null);
+        let res;
+        try {
+            res = await this.fetch(`${this.url}/rest/v1/problem_reports`, {
+                method: 'POST',
+                headers: {
+                    apikey: this.key, Authorization: `Bearer ${token || this.key}`,
+                    'Content-Type': 'application/json', Prefer: 'return=minimal',
+                },
+                body: JSON.stringify(row),
+            });
+        } catch (e) {
+            throw new HubError(`Could not reach IvoryOS (${e.message}).`);
+        }
+        if (res.ok) return { id: row.id };
+        const text = await res.text().catch(() => '');
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+        // PGRST205 / 42P01: a Hub database without the problem_reports migration.
+        const missing = res.status === 404 || (body && ['PGRST205', '42P01'].includes(body.code));
+        throw Object.assign(new HubError(missing
+            ? 'IvoryOS cannot take reports here yet.'
+            : (body && (body.message || body.error)) || `IvoryOS answered ${res.status}.`), { code: missing ? 'unavailable' : body && body.code });
     }
 
     /**

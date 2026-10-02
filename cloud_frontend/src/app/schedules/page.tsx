@@ -52,10 +52,13 @@ export default function SchedulesPage() {
   const load = useCallback(async () => {
     try {
       const res = await fetch('/api/schedules');
-      setSchedules(await res.json());
+      const body = await res.json().catch(() => null);
+      // An error answer is an object, not a list; rendering it as one threw on `.map`.
+      if (!res.ok || !Array.isArray(body)) throw new Error(body?.error || `HTTP ${res.status}`);
+      setSchedules(body);
       setError('');
-    } catch {
-      setError('Cannot reach the Cloud app.');
+    } catch (e) {
+      setError(e instanceof TypeError ? 'Cannot reach the Cloud app.' : `Could not load schedules: ${(e as Error).message}`);
     } finally {
       setLoaded(true);
     }
@@ -91,12 +94,12 @@ export default function SchedulesPage() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <header className="glass-header flex shrink-0 items-center justify-between px-6">
-        <div className="flex items-center gap-2">
+      <header data-ivoryos-page-header="mixed" className="glass-header flex shrink-0 items-center justify-between px-6">
+        <div data-ivoryos-page-title className="flex items-center gap-2">
           <CalendarClock className="h-5 w-5" />
           <h1 className="text-lg font-semibold">Schedules</h1>
           <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-            {schedules.length} standing trigger{schedules.length === 1 ? '' : 's'}
+            {loaded ? `${schedules.length} standing trigger${schedules.length === 1 ? '' : 's'}` : ''}
           </span>
         </div>
         <button
@@ -112,7 +115,11 @@ export default function SchedulesPage() {
       <div className="flex-1 overflow-y-auto p-6">
         {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
 
-        {loaded && schedules.length === 0 ? (
+        {/* Nothing until the first answer: drawing the table first and then swapping it for
+            "Nothing is scheduled" flashed column headers for a list that was never there. */}
+        {!loaded ? (
+          <p className="py-8 text-center text-sm" style={{ color: 'var(--text-secondary)' }}>Loading schedules…</p>
+        ) : schedules.length === 0 ? (
           <div className="rounded-xl border border-dashed p-8 text-center text-sm" style={{ borderColor: 'var(--panel-border)', color: 'var(--text-secondary)' }}>
             <p className="font-medium">Nothing is scheduled.</p>
             <p className="mt-1">

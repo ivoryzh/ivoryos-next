@@ -285,3 +285,57 @@ test('a skipped task does not keep its device busy', async (t) => {
   await store.insertTasks([task({ status: 'skipped' })]);
   assert.strictEqual(await store.deviceHasActiveTask('dev1'), false);
 });
+
+
+test('agent tokens stand for one workspace and proposals move pending -> decided once', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ivoryos-store-'));
+  const store = createSqliteStore(path.join(dir, 'test.db'));
+  await store.createAgentToken({ token_hash: 'h'.repeat(64), workspace_id: 'user:a', user_id: 'alice', label: 'laptop' });
+  assert.deepStrictEqual((await store.resolveAgentToken('h'.repeat(64))).workspace_id, 'user:a');
+  assert.strictEqual((await store.resolveAgentToken('h'.repeat(64))).user_id, 'alice', 'a token acts for its minter');
+  assert.strictEqual(await store.resolveAgentToken('nope'), null);
+  assert.strictEqual((await store.listAgentTokens('user:a'))[0].label, 'laptop');
+  assert.ok((await store.listAgentTokens('user:a'))[0].last_used_at, 'resolving marks last use');
+  await store.deleteAgentToken('h'.repeat(64), 'user:b'); // another workspace cannot revoke it
+  assert.strictEqual((await store.listAgentTokens('user:a')).length, 1);
+  await store.deleteAgentToken('h'.repeat(64), 'user:a');
+  assert.strictEqual((await store.listAgentTokens('user:a')).length, 0);
+
+  await store.insertAgentProposal({ id: 'prop_1', workspace_id: 'org:lab', user_id: 'alice', name: 'Lesson', summary: 's', source: 'mcp:test', spec: { steps: [{ id: 'x' }] }, graph: { nodes: [], edges: [] }, issues: [], questions: ['q'] });
+  const pending = await store.listAgentProposals('org:lab', 'alice', 'pending');
+  assert.strictEqual(pending.length, 1);
+  assert.deepStrictEqual(pending[0].spec, { steps: [{ id: 'x' }] });
+  assert.deepStrictEqual(pending[0].questions, ['q']);
+  // A colleague in the same organization workspace does not see it: accepting is personal.
+  assert.strictEqual((await store.listAgentProposals('org:lab', 'bob', 'pending')).length, 0, 'scoped to the person');
+  assert.strictEqual((await store.listAgentProposals('user:b', 'alice', 'pending')).length, 0, 'scoped to the workspace');
+  await store.decideAgentProposal('prop_1', { status: 'accepted', result: 'saved' });
+  assert.strictEqual((await store.listAgentProposals('org:lab', 'alice', 'pending')).length, 0);
+  assert.strictEqual((await store.getAgentProposal('prop_1')).status, 'accepted');
+  assert.strictEqual((await store.listAgentProposals('org:lab', 'alice', 'all')).length, 1);
+});
+
+test('the mode decides the broker: a LAN Cloud never uses AWS IoT, even with AWS settings present', () => {
+  const { usesAwsIot, resolveBrokerUrl } = require('./store/index.js');
+  const keys = ['IVORYOS_CLOUD_MODE', 'SUPABASE_URL', 'AWS_IOT_ENDPOINT', 'MQTT_BROKER_URL'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    process.env.AWS_IOT_ENDPOINT = 'example-ats.iot.us-west-2.amazonaws.com';
+    process.env.MQTT_BROKER_URL = 'mqtt://10.0.0.5:1883';
+    // Left over from a hosted setup, but this Cloud runs on the LAN.
+    process.env.IVORYOS_CLOUD_MODE = 'local';
+    process.env.SUPABASE_URL = 'https://example.supabase.co';
+    assert.strictEqual(usesAwsIot(), false);
+    assert.strictEqual(resolveBrokerUrl(), 'mqtt://10.0.0.5:1883');
+    // Hosted: AWS IoT.
+    process.env.IVORYOS_CLOUD_MODE = 'cloud';
+    assert.strictEqual(usesAwsIot(), true);
+    assert.strictEqual(resolveBrokerUrl(), 'mqtts://example-ats.iot.us-west-2.amazonaws.com:8883');
+    // Hosted without AWS: a plain broker, as before.
+    delete process.env.AWS_IOT_ENDPOINT;
+    assert.strictEqual(usesAwsIot(), false);
+    assert.strictEqual(resolveBrokerUrl(), 'mqtt://10.0.0.5:1883');
+  } finally {
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+});

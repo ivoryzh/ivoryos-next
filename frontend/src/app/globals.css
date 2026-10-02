@@ -1,6 +1,22 @@
 @import "tailwindcss";
+@import "../../../packages/shared-ui/src/accent.css";
 @source "../../../packages/shared-ui/src";
 @custom-variant dark (&:is(.dark *));
+
+/* Every page frames itself as a flex row: the navigation, then the page. With the navigation
+   on top (shared-ui navPlacement.tsx sets the attribute) that same frame is a column. */
+html[data-ivoryos-nav="top"] :has(> [data-ivoryos-nav-bar]) { flex-direction: column; }
+/* A column's children keep `min-height: auto`, so a page taller than the window grew the frame
+   past the screen and its own scroll area never activated: nothing could scroll at all. */
+html[data-ivoryos-nav="top"] :has(> [data-ivoryos-nav-bar]) > * { min-height: 0; }
+/* With the bar on top the current page is already named there, so a header that only carries
+   the page title is dropped, and one that also holds controls keeps the controls and loses the
+   title (and some height). Pages mark theirs with data-ivoryos-page-header / -page-title. */
+html[data-ivoryos-nav="top"] [data-ivoryos-page-header="title"] { display: none; }
+html[data-ivoryos-nav="top"] [data-ivoryos-page-header="mixed"] { height: 3rem; justify-content: flex-end; }
+html[data-ivoryos-nav="top"] [data-ivoryos-page-title] { display: none; }
+
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

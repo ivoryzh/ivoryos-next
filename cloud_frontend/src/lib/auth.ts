@@ -17,7 +17,7 @@
  * the Hub (organization_members). A Hub without organizations yet simply yields the personal one.
  */
 import crypto from 'node:crypto';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
 
@@ -41,6 +41,8 @@ export type Session = {
   user: SessionUser;
   workspace: Workspace;
   workspaces: Workspace[];
+  /** True for an agent token (src/lib/agent/tokens.ts): read and propose, never accept or run. */
+  agent?: boolean;
 };
 
 type Tokens = { access_token: string; refresh_token: string; expires_in?: number; expires_at?: number; user?: any };
@@ -210,9 +212,27 @@ export async function currentSession(): Promise<Session | null> {
  * For an API route: the session, or the 401 to return. Use as
  *   const auth = await authorize(); if ('response' in auth) return auth.response;
  */
+/**
+ * An outside agent (an MCP client, a script) has no browser cookie; it sends
+ * `Authorization: Bearer ivc_...`, a token minted in Settings that stands for one workspace
+ * (src/lib/agent/tokens.ts). The session it yields can read that workspace and file proposals;
+ * it cannot switch workspace, and nothing it files runs without a person's click.
+ */
+async function tokenSession(): Promise<Session | null> {
+  const header = (await headers()).get('authorization') || '';
+  const m = /^Bearer\s+(ivc_[A-Za-z0-9_-]+)$/.exec(header.trim());
+  if (!m) return null;
+  const { hashAgentToken } = await import('./agent/tokens');
+  const row = await getStore().resolveAgentToken(hashAgentToken(m[1])).catch(() => null);
+  if (!row) return null;
+  const workspace: Workspace = { id: row.workspace_id, kind: row.workspace_id.startsWith('org:') ? 'org' : 'personal', name: row.label || 'agent' };
+  // The agent acts for the person who minted the token: what it files is theirs to accept.
+  return { id: `token:${row.token_hash.slice(0, 12)}`, user: { id: row.user_id || 'agent', email: null, name: row.label || 'agent' }, workspace, workspaces: [workspace], agent: true };
+}
+
 export async function authorize(): Promise<{ session: Session } | { response: NextResponse }> {
-  const session = await currentSession();
-  if (!session) return { response: NextResponse.json({ error: 'Sign in to Cloud first.' }, { status: 401 }) };
+  const session = (await currentSession()) || (await tokenSession());
+  if (!session) return { response: NextResponse.json({ error: 'Sign in to Cloud first, or send an agent token as `Authorization: Bearer ivc_...`.' }, { status: 401 }) };
   return { session };
 }
 

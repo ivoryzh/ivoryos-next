@@ -43,8 +43,8 @@ function PluginContent() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden bg-white dark:bg-transparent">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
-          <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">
+        <header data-ivoryos-page-header="mixed" className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+          <h2 data-ivoryos-page-title className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300">
              {plugin ? plugin.name : 'Loading Plugin...'}
           </h2>
           {plugin && (
@@ -62,7 +62,7 @@ function PluginContent() {
         <div className="flex-1 overflow-hidden relative bg-white dark:bg-[#0a0a0a]">
             {loading ? (
                 <div className="flex items-center justify-center h-full">
-                    <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+                    <Loader2 className="w-8 h-8 animate-spin text-gray-700 dark:text-gray-200" />
                 </div>
             ) : plugin ? (
                 <iframe
@@ -84,7 +84,7 @@ function PluginContent() {
 
 export default function PluginPage() {
     return (
-        <Suspense fallback={<div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-[#0a0a0a]"><Loader2 className="w-8 h-8 animate-spin text-indigo-500" /></div>}>
+        <Suspense fallback={<div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-[#0a0a0a]"><Loader2 className="w-8 h-8 animate-spin text-gray-700 dark:text-gray-200" /></div>}>
             <PluginContent />
         </Suspense>
     );

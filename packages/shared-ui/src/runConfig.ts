@@ -112,7 +112,7 @@ export function toWireBlock(b: any) {
     returnVar: b.returnVar,
     ...(b.returnBindings?.length ? { returnBindings: b.returnBindings } : {}),
     batch_action: !!b.isBatchAction,
-    ...(b.ref ? { ref: b.ref } : {}),
+    ...linkKeysOf(b),
   };
 }
 
@@ -123,7 +123,17 @@ export interface ResolvedStep {
   params: Record<string, any>;
   returnVar?: string;
   returnBindings?: any;
+  /** A link's pinned version. Dropped, the edge ran the newest saved version instead. */
+  ref?: any;
+  /** Which of a linked workflow's phases this step stands for (splitRepeatedLinks). */
+  phases?: string[];
 }
+
+/** A link's pin and phases, copied onto a step rebuilt from it. */
+export const linkKeysOf = (b: any) => ({
+  ...(b?.ref ? { ref: b.ref } : {}),
+  ...(Array.isArray(b?.phases) ? { phases: b.phases } : {}),
+});
 
 /**
  * Which of a block's arguments are `#name` references, as `{argument: name}`.
@@ -150,20 +160,23 @@ export function dynamicArgumentsOf(block: any, skip?: (name: string) => boolean)
 export function resolveFixedBlock(
   block: any,
   values: Record<string, any>,
-  opts: { numeric?: 'strict' | 'lenient'; describe?: (v: string) => string } = {},
+  opts: { numeric?: 'strict' | 'lenient'; describe?: (v: string) => string; skip?: (v: string) => boolean } = {},
 ): ResolvedStep {
   const params = resolveBlockParams(block, {
     lookup: (v) => values[v],
     describe: opts.describe ?? ((v) => `'${v}' in Fixed Values`),
     onMissing: 'throw',
     numeric: opts.numeric ?? 'strict',
+    // A name the run fills in itself (runtimeVarNames) is left for the edge to substitute.
+    skip: opts.skip,
   });
-  const vars = dynamicArgumentsOf(block);
+  const vars = dynamicArgumentsOf(block, opts.skip);
   return {
     instrument: block.instrument,
     method: block.method,
     params: Object.keys(vars).length ? { ...params, _vars: vars } : params,
     returnVar: block.returnVar,
     ...(block.returnBindings ? { returnBindings: block.returnBindings } : {}),
+    ...linkKeysOf(block),
   };
 }

@@ -14,7 +14,7 @@
  * backend.
  */
 
-import { RunConfigError, resolveBlockParams, ResolvedStep } from './runConfig';
+import { RunConfigError, resolveBlockParams, type ResolvedStep, linkKeysOf } from './runConfig';
 
 /** Per-variable search-space configuration, keyed by the `#name` without its `#`. */
 export interface VarBound {
@@ -45,7 +45,8 @@ export interface OptimizeConfig {
   optimizer: string;
   budget: number;
   batch_size: number;
-  error_recovery: string;
+  /** No longer used: a failed step always waits for a person. Older saved configs may carry it. */
+  error_recovery?: string;
   bounds: Record<string, VarBound>;
   objectives: Record<string, ObjectiveConfig>;
   optimizer_config: Record<string, any>;
@@ -57,7 +58,6 @@ export const emptyOptimizeConfig = (): OptimizeConfig => ({
   optimizer: '',
   budget: 25,
   batch_size: 1,
-  error_recovery: 'stop',
   bounds: {},
   objectives: {},
   optimizer_config: {},
@@ -212,6 +212,7 @@ export function buildOptimizationParameters(opts: BuildOptimizationOptions): Rec
     }),
     returnVar: block.returnVar,
     returnBindings: block.returnBindings,
+    ...linkKeysOf(block),
   }));
 
   return {
@@ -219,7 +220,6 @@ export function buildOptimizationParameters(opts: BuildOptimizationOptions): Rec
     optimizer: config.optimizer,
     budget: config.budget,
     batch_size: Math.max(1, config.batch_size || 1),
-    error_recovery: config.error_recovery,
     optimizer_config: config.optimizer_config,
     parameter_space: buildParameterSpace(config, optimizedVars),
     objective_config: returns.map((v) => ({

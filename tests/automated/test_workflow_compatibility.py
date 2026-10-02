@@ -53,6 +53,45 @@ def test_a_workflow_that_still_fits_the_deck_is_quiet():
     assert check("ok", body, _schema(), "fp1")["status"] == "ok"
 
 
+def test_none_for_an_optional_number_is_a_value_not_a_gap():
+    """`Optional[int]` invites None; the check used to flag it as missing (no default) or as
+    "expects a number but got None". Blank for a parameter with a default means the default."""
+    from typing import Optional
+    from ivoryos_edge.introspection import inspect_device_module
+
+    class Probe:
+        def scan(self, points: Optional[int], settle_s: float = 1.0):
+            return points
+
+    schema = {"probe": inspect_device_module(Probe())}
+    assert schema["probe"]["scan"]["parameters"]["points"].get("optional") is True
+    body = _body([_step("probe", "scan", {"points": None, "settle_s": ""})])
+    verdict = check("optional", body, schema, "fp1")
+    assert verdict["status"] == "ok", verdict
+    # A real wrong value is still wrong.
+    body = _body([_step("probe", "scan", {"points": "many"})])
+    assert check("bad", body, schema, "fp1")["status"] != "ok"
+
+
+def test_a_workflow_that_calls_a_broken_one_is_broken_too():
+    """Linked workflows run inside the caller, so the caller cannot be greener than its callee.
+    It used to be: the child showed broken and the parent showed ok, and every run of the parent
+    failed inside the child."""
+    good = _body([_step("pump", "dispense", {"volume_ml": 1.0})], "child-ok")
+    bad = _body([_step("pump", "dispense", {"volume_millilitres": 1.0})], "child-bad")
+    parent = _body([_step("Library Workflows", "child", {})], "parent")
+    names = ["parent", "child"]
+
+    verdict = check("parent", parent, _schema(), "fp1", names, resolve_workflow={"child": bad}.get)
+    assert verdict["status"] == "broken"
+    assert any("Calls 'child'" in e["message"] for e in verdict["errors"]), verdict
+    # The parent's body did not change, but its callee did: the cached verdict must not stick.
+    verdict = check("parent", parent, _schema(), "fp1", names, resolve_workflow={"child": good}.get)
+    assert verdict["status"] == "ok", verdict
+    # Without a resolver (an older caller) the link is only checked for existence, as before.
+    assert check("parent", parent, _schema(), "fp1", names)["status"] == "ok"
+
+
 def test_a_renamed_parameter_is_what_this_is_for():
     """The change that used to be invisible: the driver still has the method, the workflow still
     has a value for it, and the name no longer matches."""

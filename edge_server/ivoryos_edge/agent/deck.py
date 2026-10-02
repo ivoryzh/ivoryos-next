@@ -25,13 +25,14 @@ FLOW_CONTROL_METHODS = {
     },
     "User_Input": {
         "description": (
-            "Stop and ask a person for a value, then continue. The value is saved under "
-            "`variable_name` and later steps read it as #variable_name. Use this for anything "
-            "the deck cannot measure or decide on its own."
+            "Stop for a person, then continue. With `variable_name` it asks for a value, saved "
+            "under that name for later steps to read as #variable_name: use this for anything "
+            "the deck cannot measure or decide on its own. Without it, it only shows `prompt` and "
+            "waits for the person to continue (load the vials, check the bench)."
         ),
         "parameters": {
             "prompt": {"type": "str", "required": True},
-            "variable_name": {"type": "str", "required": True},
+            "variable_name": {"type": "str", "required": False},
             "input_type": {"type": "str", "required": False, "options": ["str", "int", "float", "bool"]},
         },
     },

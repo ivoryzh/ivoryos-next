@@ -24,6 +24,7 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
     is_object = False
     is_numeric = False
     fields = {}
+    nullable = False
     _seen = set() if _seen is None else _seen
 
     if annotation != inspect.Parameter.empty:
@@ -106,8 +107,12 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
         # dataclass loses its fields, and an Optional[float] return stops looking numeric.
         if options is None and not is_object:
             try:
-                args = [a for a in get_args(annotation) if a is not type(None)]
+                all_args = get_args(annotation)
+                args = [a for a in all_args if a is not type(None)]
                 if get_origin(annotation) is not None and len(args) == 1:
+                    # A None arm was stripped: the parameter accepts None, and a validator must
+                    # not call a deliberate None "missing" or "not a number".
+                    nullable = len(args) < len(all_args)
                     inner = extract_type_info(args[0], inspect.Parameter.empty, _depth, _seen)
                     if inner.get("options") is not None:
                         options = inner["options"]
@@ -125,6 +130,8 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
         "type": param_type,
         "required": default == inspect.Parameter.empty
     }
+    if nullable:
+        param_data["optional"] = True
     if options is not None:
         param_data["options"] = options
     if is_object:
@@ -879,8 +886,13 @@ def serialize_result(value):
     manual-execute path, which is why running a method by hand from the Instruments page
     reported nothing back.
 
-    Unknown objects are returned unchanged rather than forced: the caller may still be able to
-    encode them, and mangling a value into its repr would lose more than it saves.
+    Every value this returns is something `json.dumps` accepts. It used to hand an unknown
+    object back unchanged, on the theory that the caller might still encode it; but the caller
+    is a SQLAlchemy JSON column with no encoder of its own, so a driver returning a
+    `pathlib.Path` (a data folder it just created) failed the flush, poisoned the session, and
+    crashed the whole execution loop -- not just that step. Paths, dates, sets, bytes, Decimals
+    and numpy values have natural JSON forms; anything else becomes its `str`, which loses
+    less than losing the run.
     """
     import dataclasses
 
@@ -901,4 +913,35 @@ def serialize_result(value):
         return {k: serialize_result(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [serialize_result(v) for v in value]
-    return value
+    if isinstance(value, (set, frozenset)):
+        return [serialize_result(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    import datetime as _dt
+    import decimal
+    import pathlib
+    if isinstance(value, pathlib.PurePath):
+        return str(value)
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        return value.isoformat()
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "replace")
+    # numpy scalars and arrays (and anything else with the same shape) without importing numpy.
+    if hasattr(value, "tolist") and callable(value.tolist):
+        try:
+            return serialize_result(value.tolist())
+        except Exception:
+            pass
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return serialize_result(value.item())
+        except Exception:
+            pass
+    import json
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)

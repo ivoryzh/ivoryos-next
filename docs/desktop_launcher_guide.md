@@ -252,7 +252,11 @@ A driver's Hub entry decides which settings the launcher asks for. If it is miss
 error says `missing 1 required positional argument: 'port'`), add it on the instrument with
 **Edit → Add argument**, and consider fixing the entry on the Hub.
 
-"Add from Hub" offers four kinds of thing, each added to the deck it was opened from:
+"Add from Hub" offers four kinds of thing, each added to the deck it was opened from. The
+sidebar's **Automation Hub** entry opens the same browser (on its Platforms section) for the
+selected deck (or the first one); with no deck at all it still opens, and the first thing you add asks for a deck name and
+starts that deck (a platform's own form already offers "As a new deck"). Cancel the name, or an
+install that fails, and no deck is left behind.
 
 | Kind | What adding it does |
 |---|---|

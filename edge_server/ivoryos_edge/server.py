@@ -19,7 +19,7 @@ from .introspection import inspect_device_module
 from .plugins import Plugin, PluginFiles, start_plugin
 from .models import init_db, async_session, WorkflowRun
 from sqlalchemy import func, select
-from .queue import WorkflowQueueManager
+from .queue import WorkflowQueueManager, unproduced_references
 from . import deck
 from . import runtime
 from . import workflows as wf
@@ -49,6 +49,28 @@ CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
 # Paired, but paused by a person: keep the pairing, stay off Cloud until resumed. In .env, so a
 # restart does not quietly reconnect a device someone took offline on purpose.
 CLOUD_PAUSED = os.getenv("CLOUD_PAUSED", "") == "1"
+# Whether this edge's saved workflows are mirrored to Cloud: "always" (on connect and on every
+# save, the behaviour before this was a choice) or "manual" (only when a person presses Sync now
+# on the Cloud Connect page). The instrument schema is always sent: Cloud cannot script a device
+# without it. A workflow Cloud itself sent here is always echoed back (that echo is its
+# acknowledgement), and a delete always clears the workflow's retained copy, whatever the mode.
+SYNC_MODES = ("always", "manual")
+CLOUD_SYNC_WORKFLOWS = os.getenv("CLOUD_SYNC_WORKFLOWS", "always")
+if CLOUD_SYNC_WORKFLOWS not in SYNC_MODES:
+    CLOUD_SYNC_WORKFLOWS = "always"
+# When workflows were last sent to Cloud in this process (epoch seconds), for the page.
+cloud_last_workflow_sync = None
+# The backstop heartbeat, seconds. Presence does not depend on it (see status_loop); it only
+# bounds how long a status lost in transit can stay wrong. Stated in every status so Cloud knows
+# how much silence is normal.
+STATUS_INTERVAL_S = max(30.0, float(os.getenv("IVORYOS_STATUS_INTERVAL_S", "300") or 300))
+# Whether the Cloud on the other end has said it follows presence the new way (it pings; see
+# handle_broker_message). Until it has, this edge keeps the 5-second heartbeat an older Cloud
+# needs: that one calls a device offline after 15 seconds of silence, so an edge that simply went
+# quiet would read "offline" there two minutes after connecting. Per connection setup, since a
+# new pairing can be a different Cloud.
+cloud_quiet = False
+LEGACY_HEARTBEAT_S = 5
 global_broker = None
 global_topic_prefix = None
 global_client_id = None
@@ -119,7 +141,39 @@ def get_cloud_settings():
         # Paired but paused on purpose (POST .../pause), and this device's lasting Cloud identity.
         "paused": bool(CLOUD_TOKEN) and CLOUD_PAUSED,
         "device_id": global_client_id or cloud_pairing.read_env(ENV_PATH).get("CLOUD_DEVICE_ID"),
+        # Whether saved workflows go to Cloud by themselves ("always") or only on Sync now.
+        "sync_workflows": CLOUD_SYNC_WORKFLOWS,
+        "last_workflow_sync": cloud_last_workflow_sync,
+        "workflow_count": len(wf.list_workflow_names(WORKFLOWS_DIR)),
     }
+
+
+class CloudSyncRequest(BaseModel):
+    mode: str
+
+
+@app.post("/api/cloud-settings/sync-mode")
+def set_cloud_sync_mode(req: CloudSyncRequest):
+    """Choose whether saved workflows are mirrored to Cloud automatically. Survives a restart."""
+    global CLOUD_SYNC_WORKFLOWS
+    if req.mode not in SYNC_MODES:
+        return JSONResponse(status_code=400, content={"error": f"Choose one of: {', '.join(SYNC_MODES)}."})
+    CLOUD_SYNC_WORKFLOWS = req.mode
+    cloud_pairing.set_env(ENV_PATH, CLOUD_SYNC_WORKFLOWS=req.mode)
+    # Switching to automatic means "Cloud should have what is here": send it now rather than at
+    # the next save or reconnect.
+    if req.mode == "always" and global_broker and global_topic_prefix and global_client_id:
+        publish_sequences(global_broker, global_topic_prefix, global_client_id, force=True)
+    return get_cloud_settings()
+
+
+@app.post("/api/cloud-settings/sync-now")
+def sync_workflows_now():
+    """Send every saved workflow to Cloud once, whatever the sync mode."""
+    if not (global_broker and global_topic_prefix and global_client_id and global_broker.client.is_connected()):
+        return JSONResponse(status_code=409, content={"error": "This edge is not connected to Cloud right now."})
+    sent = publish_sequences(global_broker, global_topic_prefix, global_client_id, force=True)
+    return {**get_cloud_settings(), "sent": sent}
 
 
 def _deck_instrument_names() -> list:
@@ -325,15 +379,26 @@ async def _say_goodbye() -> bool:
             goodbye = broker
             _detach(broker)  # no heartbeat may follow the goodbye
         base = f"{prefix}/{client_id}"
-        # What this device left retained (heartbeat, schema, identity, workflows), cleared so a
-        # Cloud starting up later does not find the device again in what the broker replays.
-        topics = [f"{base}/status", f"{base}/schema", f"{base}/presence"]
-        topics += [f"{base}/sequences/{name}" for name in wf.list_workflow_names(WORKFLOWS_DIR)]
-        for topic in topics:
-            broker.clear_retained(topic)
+        # "Leaving" first, the tidying after. Cloud keeps this device's workflows as a record when
+        # it leaves; clearing a retained sequence topic reads as "this workflow was deleted", so
+        # in the old order (clear, then leave) Cloud had deleted every one of them by the time it
+        # learned the device was leaving and there was nothing left to keep.
         info = broker.publish(f"{base}/leave", {"ts": time.time()}, qos=1)
         await asyncio.to_thread(_wait_sent, info, 5.0)
-        return bool(info.is_published())
+        told = bool(info.is_published())
+        # What this device left retained (status, schema, identity, workflows), cleared so a
+        # Cloud starting up later does not find the device again in what the broker replays.
+        # Best effort: on AWS, Cloud revokes this device's certificate on `leave`, which can cut
+        # the connection before the last of these is through; Cloud ignores a removed device's
+        # retained messages either way.
+        topics = [f"{base}/status", f"{base}/schema", f"{base}/presence"]
+        topics += [f"{base}/sequences/{name}" for name in wf.list_workflow_names(WORKFLOWS_DIR)]
+        last = None
+        for topic in topics:
+            last = broker.clear_retained(topic)
+        if last is not None:
+            await asyncio.to_thread(_wait_sent, last, 3.0)
+        return told
     except Exception as e:
         print(f"Could not tell Cloud this edge is leaving: {e}")
         return False
@@ -365,7 +430,7 @@ _published_runtime: dict = {}
 
 def republish_changed_runtimes():
     """Re-send the retained sequence message of every workflow whose timing changed."""
-    if not (global_broker and global_topic_prefix and global_client_id):
+    if not (global_broker and global_topic_prefix and global_client_id) or CLOUD_SYNC_WORKFLOWS != "always":
         return
     try:
         current = runtime.workflow_runtimes()
@@ -398,6 +463,7 @@ def published_sequence(name, body):
             getattr(app.state, "instrument_schemas", {}),
             getattr(app.state, "schema_fingerprint", ""),
             wf.list_workflow_names(WORKFLOWS_DIR),
+            resolve_workflow=lambda target: wf.ensure_versioned(WORKFLOWS_DIR, target),
         )
     except Exception as e:
         # A verdict is a courtesy; failing to compute one must not stop the body syncing.
@@ -457,6 +523,12 @@ async def handle_sequence_push(payload: dict):
             print(f"Applied '{name}' but failed to echo it back: {e}")
 
 
+# The run of a repeated Cloud step now on this device, by (cloud run, node): its number goes out
+# with every report (see handle_cloud_task). In memory only: after a restart a report carries no
+# number, and Cloud takes it for the current run, as it did before runs were numbered.
+_cloud_occurrence: dict = {}
+
+
 def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, error: str = None,
                         progress: dict = None, reliable: bool = False, issues: dict = None):
     """Report a cloud-originated task's state back to Cloud.
@@ -468,7 +540,11 @@ def publish_task_status(cloud_run_id: str, cloud_node_id: str, status: str, erro
     """
     if not (global_broker and global_topic_prefix):
         return
-    payload = {"runId": cloud_run_id, "nodeId": cloud_node_id, "status": status}
+    # `ts` is this device's own clock at the moment of the report: Cloud's record of when a step
+    # started and ended is then the bench's, not the time the message happened to arrive.
+    payload = {"runId": cloud_run_id, "nodeId": cloud_node_id, "status": status, "ts": time.time()}
+    if (cloud_run_id, cloud_node_id) in _cloud_occurrence:
+        payload["occurrence"] = _cloud_occurrence[(cloud_run_id, cloud_node_id)]
     if error:
         payload["error"] = error
     if progress:
@@ -499,7 +575,9 @@ def publish_task_result(cloud_run_id: str, cloud_node_id: str, record: dict):
     try:
         global_broker.publish(
             f"{global_topic_prefix}/{global_broker.client_id}/task-result",
-            {"runId": cloud_run_id, "nodeId": cloud_node_id, "result": record}, qos=1,
+            {"runId": cloud_run_id, "nodeId": cloud_node_id, "result": record, "ts": time.time(),
+             **({"occurrence": _cloud_occurrence[(cloud_run_id, cloud_node_id)]}
+                if (cloud_run_id, cloud_node_id) in _cloud_occurrence else {})}, qos=1,
         )
     except Exception as e:
         print(f"Failed to send results for {cloud_node_id}: {e}")
@@ -537,6 +615,15 @@ async def handle_cloud_task(payload: dict):
     parameters = dict(run.get("parameters") or {})
     parameters["cloud_run_id"] = run_id
     parameters["cloud_node_id"] = node_id
+    # Which run of a repeated step this is ({index, total}): "run 3 of 20". Cloud sends them one
+    # at a time; the number is recorded with the run and echoed in every report about it, so a
+    # report redelivered from one run is never taken for the next one's.
+    occurrence = payload.get("occurrence")
+    if isinstance(occurrence, dict) and isinstance(occurrence.get("index"), int):
+        parameters["cloud_occurrence"] = {"index": occurrence["index"], "total": occurrence.get("total")}
+        _cloud_occurrence[(run_id, node_id)] = occurrence["index"]
+    else:
+        _cloud_occurrence.pop((run_id, node_id), None)
 
     try:
         await start_run(
@@ -589,6 +676,14 @@ async def handle_broker_message(topic: str, payload: dict):
         )
         print(f"Cloud '{payload.get('action')}' for {payload.get('nodeId')}: {outcome}")
         return
+    if topic.rsplit("/", 1)[-1] == "ping":
+        # Only a Cloud that follows presence the new way pings, so this is also its word that the
+        # 5-second heartbeat is no longer needed (see cloud_quiet). The answer says so.
+        global cloud_quiet
+        cloud_quiet = True
+        nonce = payload.get("nonce") if isinstance(payload, dict) else None
+        await publish_status(pong=str(nonce) if nonce else None)
+        return
     if topic.rsplit("/", 1)[-1] == "removed":
         # Cloud's Devices page removed this device. Cloud already forgot it (and on AWS revoked its
         # certificate), so there is no one to tell: just stop and forget the pairing here.
@@ -604,8 +699,8 @@ def _safe_optimizer_catalog():
 
     Guarded because this is called from the schema publish: an optimizer backend whose import or
     `get_schema()` blows up must cost Cloud the optimizer list, not the entire instrument schema.
-    The registry's own import is already wrapped in a bare except (see optimizer/registry.py), so
-    a broken backend is absent rather than fatal there too.
+    The registry already catches a backend that fails to import (optimizer/registry.py keeps the
+    reason in OPTIMIZER_ERRORS and logs it), so a broken backend is absent rather than fatal there too.
     """
     try:
         return get_optimizers()
@@ -658,12 +753,19 @@ def publish_schema(broker, topic_prefix, client_id):
     }
     broker.publish(f"{topic_prefix}/{client_id}/schema", schema, retain=True, qos=1)
 
-def publish_sequences(broker, topic_prefix, client_id):
+def publish_sequences(broker, topic_prefix, client_id, force: bool = False) -> int:
     """Retained, one message per saved workflow, republished on every (re)connect — this is the
     whole 'sync on reconnect' mechanism: a subscriber that comes online (or was already
     subscribed) always receives the latest retained body for every topic the moment it
     (re)subscribes, with no polling or explicit sync request needed on either side. See
-    publish_schema's docstring for the IoT policy permission retained publishing needs."""
+    publish_schema's docstring for the IoT policy permission retained publishing needs.
+
+    Does nothing when workflow sync is "manual" unless `force` (Sync now). Returns how many
+    workflows were sent."""
+    global cloud_last_workflow_sync
+    if CLOUD_SYNC_WORKFLOWS != "always" and not force:
+        return 0
+    sent = 0
     try:
         # list_workflow_names, not a raw listdir: the directory also holds dot-prefixed bookkeeping
         # (.versions/, .meta.json), and a raw "*.json" sweep would publish `.meta` as if it were a
@@ -675,10 +777,13 @@ def publish_sequences(broker, topic_prefix, client_id):
                     f"{topic_prefix}/{client_id}/sequences/{name}", published_sequence(name, data),
                     retain=True, qos=1,
                 )
+                sent += 1
             except Exception as e:
                 print(f"Failed to publish sequence '{name}': {e}")
+        cloud_last_workflow_sync = time.time()
     except Exception as e:
         print(f"Failed to list workflows for sync: {e}")
+    return sent
 
 # Run states in which this device is not free to take another run: something is executing,
 # paused mid-run, waiting on a person, or already queued here.
@@ -720,21 +825,43 @@ async def device_busy() -> bool:
 global_session: str = ""
 
 
-async def publish_status():
-    """The small retained heartbeat: `{online, busy, ts}`. One boolean more than before, so the
-    per-message cost on AWS IoT is unchanged."""
-    if not (global_broker and global_topic_prefix and global_client_id):
+def status_payload(busy: bool) -> dict:
+    """`{online, busy, ts, session, quiet, interval}`: small on purpose. `interval` is how often
+    the backstop heartbeat comes once this edge has gone quiet, so Cloud knows how much silence is
+    normal for it; without one, the edge is still speaking every 5s."""
+    payload = {"online": True, "busy": busy, "ts": time.time(), "session": global_session,
+               # False says "I can go quiet, ask me": a Cloud that follows presence the new way
+               # answers with a ping, and an older one ignores it and keeps getting its heartbeat.
+               "quiet": cloud_quiet}
+    if cloud_quiet:
+        payload["interval"] = STATUS_INTERVAL_S
+    return payload
+
+
+async def publish_status(pong: Optional[str] = None):
+    """Say where this device stands, now. Sent when something changes (connected, a run queued
+    or finished, Cloud asked), not on a timer.
+
+    QoS 1: with no 5-second repeat behind it, a lost "no longer busy" would leave Cloud holding
+    this device's next task until the backstop heartbeat, minutes later."""
+    broker = global_broker
+    if not (broker and global_topic_prefix and global_client_id):
         return
-    global_broker.publish(
-        f"{global_topic_prefix}/{global_client_id}/status",
-        {"online": True, "busy": await device_busy(), "ts": time.time(), "session": global_session},
-        retain=True, qos=0,
-    )
+    busy = await device_busy()
+    if broker is not global_broker:
+        return  # detached while asking (pause, remove): an "online" now would undo it
+    payload = status_payload(busy)
+    if pong:
+        # The nonce of the ping this answers: Cloud's proof that the status is live, not the
+        # broker's memory of an earlier one.
+        payload["pong"] = pong
+    broker.publish(f"{global_topic_prefix}/{global_client_id}/status", payload, retain=True, qos=1)
 
 
 def notify_status_changed():
-    """Send the heartbeat now instead of on the next 5s tick -- called when a run is queued or
-    finishes, so Cloud neither sends into a queue that just filled nor waits to use a free device."""
+    """Send the status now -- called when a run is queued or finishes, so Cloud neither sends
+    into a queue that just filled nor waits to use a free device. With no frequent heartbeat this
+    is the only way Cloud learns of it promptly."""
     try:
         asyncio.get_running_loop().create_task(publish_status())
     except RuntimeError:
@@ -742,48 +869,58 @@ def notify_status_changed():
 
 
 async def status_loop(broker, topic_prefix, client_id):
-    """A cheap, frequent liveness signal — deliberately just {online, ts}, not the schema. Kept
-    small on purpose: at a 5s interval this is what actually gets billed per-message on AWS IoT,
-    and 'online' is also covered by the LWT for the ungraceful-disconnect case (see setup_broker).
+    """What this device says about itself after connecting, and when.
 
-    Also re-publishes schema/sequences on a decaying schedule after each (re)connect — NOT just
-    once the way setup_broker's initial calls do, and no longer forever either.
+    There is no frequent heartbeat any more. It used to publish `status` every 5 seconds forever
+    (about 17,000 messages per device per day, nearly all of an idle device's bill on AWS IoT) to
+    carry a fact the broker already tracks: MQTT keep-alive tells the broker within seconds that a
+    client is gone, and the broker then publishes that client's Last Will ("offline") for it. So:
 
-    Why it repeats at all: those initial calls are one-shot QoS-1 publishes with no retry, and a
-    real, reproduced bug was AWS IoT's connection needing a few rapid client-initiated reconnects
-    to settle right after startup (root cause of *that* churn still open), which raced the
-    one-shot schema/sequences publish and silently dropped it — status itself never showed a
-    symptom because it's QoS-0 and re-sent every 5s regardless, so it just self-healed on the next
-    tick. Confirmed directly: 284 'status' messages arrived at the daemon during testing, zero
-    'schema' or 'sequences' ones, from the exact same connection.
+      - `status` goes out on connect and on every reconnect (see _on_reconnected), whenever
+        `busy` changes (notify_status_changed), and when Cloud pings (handle_broker_message);
+      - the Last Will says "offline" when the connection dies, a clean shutdown says it itself;
+      - a slow backstop repeats `status` every STATUS_INTERVAL_S, which only bounds how long a
+        status lost in transit can stay wrong. Cloud reads the interval from the status itself.
 
-    Why it now stops: that failure is a *connect-time race*, so repeating past the settling window
-    buys nothing and is not free. Measured on a 7-instrument device with 11 saved workflows, the
-    old every-60s republish shipped 36KB (1 schema + 11 retained sequence bodies) every minute
-    forever — 50MB and ~20k messages per device per day, none of it changed since the last one,
-    beside a `status` payload deliberately kept tiny for exactly that metering reason.
+    It starts out speaking every 5 seconds all the same, and goes quiet when Cloud pings: only a
+    Cloud that follows presence this way pings, and an older one would call a quiet edge offline
+    after 15 seconds. So an edge can be updated before its Cloud is.
 
-    So: republish at ~5s, 10s, 20s, 40s, 80s and 160s after connect, then stop until the next
-    reconnect. That covers the racy window several times over with the same self-healing property,
-    and drops steady-state traffic to zero. Nothing is lost on the Cloud side either: these are
-    retained publishes, so a subscriber that appears later still receives the latest body
-    immediately, and a save publishes its own sequence straight away (see the save route)."""
+    Right after each (re)connect it also repeats status, schema and (when workflow sync is
+    automatic) sequences on a decaying schedule: ~5s, 10s, 20s, 40s, 80s, 160s, then stops.
+    That exists for a real, reproduced bug: AWS IoT's connection needing a few rapid reconnects
+    to settle right after startup, which raced the one-shot QoS-1 publishes and silently dropped
+    them (284 status messages reached the daemon in one test session, zero schema or sequences,
+    from the same connection). It is a *connect-time* race, so repeating past the settling window
+    buys nothing: the old every-60s republish shipped 36KB a minute forever on a 7-instrument
+    device with 11 workflows, none of it changed since the last one."""
     # Tick indices (5s apart) at which to re-publish: 1, 2, 4, 8, 16, 32 -> ~5s..160s after
     # connect. A set, not a modulus, is what makes this terminate.
     RESYNC_TICKS = {1, 2, 4, 8, 16, 32}
+    SETTLED = max(RESYNC_TICKS)
     tick = 0
+    connects = getattr(broker, "_connects", 0)
+    last_status = time.time()
     # Ends when this connection is replaced or dropped on purpose (re-pair, pause, remove). It used
     # to run forever, so every reconnect left one more loop publishing into a closed connection.
     while broker is global_broker:
         try:
-            busy = await device_busy()
-            if broker is not global_broker:
-                break  # detached while asking (pause, remove): an "online" now would undo it
-            broker.publish(
-                f"{topic_prefix}/{client_id}/status",
-                {"online": True, "busy": busy, "ts": time.time(), "session": global_session},
-                retain=True, qos=0,
-            )
+            # A reconnect starts the settling schedule again: schema and workflows are re-sent
+            # ~5s after it, once the connection has had a moment (status went at once).
+            now_connects = getattr(broker, "_connects", connects)
+            if now_connects != connects:
+                connects, tick = now_connects, 0
+            # Until Cloud has asked for quiet (cloud_quiet), every tick: the heartbeat an older
+            # Cloud depends on, at the QoS it always had.
+            due = (tick == 0 or tick in RESYNC_TICKS or not cloud_quiet
+                   or time.time() - last_status >= STATUS_INTERVAL_S)
+            if due:
+                busy = await device_busy()
+                if broker is not global_broker:
+                    break  # detached while asking (pause, remove): an "online" now would undo it
+                broker.publish(f"{topic_prefix}/{client_id}/status", status_payload(busy), retain=True,
+                               qos=1 if cloud_quiet else 0)
+                last_status = time.time()
             if tick in RESYNC_TICKS:
                 publish_schema(broker, topic_prefix, client_id)
                 publish_sequences(broker, topic_prefix, client_id)
@@ -795,8 +932,18 @@ async def status_loop(broker, topic_prefix, client_id):
                                     "The device restarted before this finished.")
         except Exception as e:
             print(f"Error publishing status: {e}")
-        tick += 1
-        await asyncio.sleep(5)
+        if tick <= SETTLED:
+            tick += 1
+        await asyncio.sleep(LEGACY_HEARTBEAT_S)
+
+
+async def _on_reconnected(broker):
+    """The connection came back. The broker told Cloud this device was offline when the old one
+    died (its Last Will), so say "online" again at once; schema and workflows follow from
+    status_loop a few seconds later."""
+    if broker is global_broker:
+        await publish_status()
+
 
 def _broker_from_token(token: str):
     """The broker a Cloud token describes, not yet connected: (broker, topic_prefix, client_id, url)."""
@@ -818,7 +965,8 @@ def _broker_from_token(token: str):
     url = f"{'mqtts' if protocol == 'aws_iot' else 'mqtt'}://{endpoint}:{port}"
 
     if protocol == "mqtt":
-        broker = LocalMQTTBroker(client_id, endpoint, port)
+        broker = LocalMQTTBroker(client_id, endpoint, port,
+                                 username=token_data.get("username"), password=token_data.get("password"))
     elif protocol == "aws_iot":
         # Written exactly as issued and readable by this user only (cloud_pairing.py); an
         # incomplete token is refused here with a message rather than as a TLS error later.
@@ -839,6 +987,9 @@ async def _wait_connected(broker, seconds: float = 5.0):
     for _ in range(int(seconds * 10)):
         if broker.client.is_connected():
             return
+        if getattr(broker, "refused_credentials", lambda: False)():
+            raise PermissionError("Cloud's broker did not accept this device's login; it may have been "
+                                  "removed from Cloud. Pair it again.")
         await asyncio.sleep(0.1)
     raise TimeoutError("Timed out waiting to connect — check the endpoint and, for AWS IoT, that the certificate is registered and its policy allows this Thing to connect.")
 
@@ -863,6 +1014,8 @@ async def setup_broker():
 
     cloud_connection_state = "connecting"
     cloud_connection_error = None
+    global cloud_quiet
+    cloud_quiet = False  # this Cloud has not said yet which way it follows presence
 
     try:
         global global_topic_prefix, global_client_id
@@ -877,6 +1030,7 @@ async def setup_broker():
             # whole connection if the Last Will is retained. Only a client already subscribed at
             # the moment we drop sees this live; the periodic retained status_loop publish plus
             # daemon.js's staleness sweep is what catches everyone else.
+            global_broker.on_reconnected = _on_reconnected
             global_broker.set_will(f"{topic_prefix}/{client_id}/status", {"online": False, "ts": time.time()}, retain=False)
             global_broker.connect()
             await _wait_connected(global_broker)
@@ -901,6 +1055,9 @@ async def setup_broker():
             global_broker.subscribe(f"{topic_prefix}/{client_id}/task-control")
             # Cloud removed this device (its Devices page): forget the pairing here too.
             global_broker.subscribe(f"{topic_prefix}/{client_id}/removed")
+            # Cloud asking "are you there?": after it restarts, all it has is the retained status
+            # the broker remembers, which a device that died meanwhile would also have left.
+            global_broker.subscribe(f"{topic_prefix}/{client_id}/ping")
 
             # Republish current state on every (re)connect — this IS the sync mechanism: a
             # subscriber (Cloud) always receives the latest retained schema/sequence bodies the
@@ -934,6 +1091,27 @@ class ExecuteRequest(BaseModel):
 active_tasks: Dict[str, asyncio.Task] = {}
 # Dictionary to store completed/failed task results
 task_results: Dict[str, Any] = {}
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stopping on purpose: tell Cloud, then hang up.
+
+    A clean disconnect sends no Last Will (that is only for a connection that dies), so without
+    this the retained "online" stayed on the broker and Cloud kept showing a stopped edge as
+    online until its next status never came."""
+    broker, prefix, client_id = global_broker, global_topic_prefix, global_client_id
+    if not (broker and prefix and client_id):
+        return
+    _detach(broker)  # ends status_loop; no "online" may follow
+    try:
+        if broker.client.is_connected():
+            info = broker.publish(f"{prefix}/{client_id}/status", {"online": False, "ts": time.time()},
+                                  retain=True, qos=1)
+            await asyncio.to_thread(_wait_sent, info, 2.0)
+        broker.disconnect()
+    except Exception as e:
+        print(f"Could not tell Cloud this edge is stopping: {e}")
 
 @app.on_event("startup")
 async def startup_event():
@@ -997,6 +1175,8 @@ def get_status():
         "active_tasks": list(active_tasks.keys()),
         "active_workflow_id": queue_manager.active_run_id,
         "queue_paused": queue_manager.paused,
+        # Started by a release of the desktop app that does not offer Cloud yet: the pages hide it.
+        "cloud_coming_soon": os.environ.get("IVORYOS_CLOUD_COMING_SOON") == "1",
         "cloud_queue": queue_manager.cloud_queue,
         # Instruments the deck file lists that did not load (deck_config.py), so the Instruments
         # page can say "pump_2: could not open COM4" instead of the pump silently not existing.
@@ -1124,18 +1304,10 @@ def _per_row_template(sequence):
     ]
 
 
-async def start_run(name: str, parameters: dict, prep: list, sequence: list, cleanup: list) -> int:
-    """Expand a run's links and hand it to the queue. The single entry point for starting a run.
-
-    Deliberately not inlined in the HTTP route any more: a run can now arrive two ways — from a
-    browser via POST /api/queue/runs, or from Cloud over the `execute` MQTT topic — and those two
-    have to mean exactly the same thing. Cloud dispatching a spreadsheet or optimization run is
-    the *same* run as one started at the bench, arriving by a different door, so both callers go
-    through this function rather than the MQTT path growing its own reduced notion of what a run
-    is (which is what it had: a single block, no prep/cleanup, no parameters at all).
-
-    Returns the new run's id; raises WorkflowError for an unresolvable link.
-    """
+def prepare_run(parameters: dict, prep: list, sequence: list, cleanup: list):
+    """What a run will execute: links expanded, the deck version stamped, references checked.
+    Returns (parameters, steps). Shared by start_run and by editing a queued run, so a run changed
+    while it waits is checked exactly as a new one. Raises WorkflowError for what cannot run."""
     # Every link followed while flattening is recorded and persisted onto the run, so a finished
     # run can state exactly which body of each subworkflow it executed. Without this, editing a
     # linked workflow silently made past runs unreproducible with nothing in the record to show it.
@@ -1162,11 +1334,17 @@ async def start_run(name: str, parameters: dict, prep: list, sequence: list, cle
         if resolved_links:
             parameters["resolved_links"] = resolved_links
 
-        # Send empty sequence because loop handles the sequence_template
-        return await queue_manager.submit_sequence(name, [], parameters)
+        # No steps: the budget loop builds each trial from the sequence_template
+        return parameters, []
 
     if resolved_links:
         parameters["resolved_links"] = resolved_links
+
+    # A '#name' no earlier step saves would stop the run at that step, after everything before
+    # it had already moved (queue.unproduced_references). Refused here instead, before anything runs.
+    unproduced = unproduced_references(prep + sequence + cleanup)
+    if unproduced:
+        raise WorkflowError(" ".join(unproduced) + " Nothing was run.")
 
     if parameters.get("type") == "Spreadsheet":
         # Rebuilt from the expanded steps rather than trusted from the caller -- see
@@ -1176,7 +1354,23 @@ async def start_run(name: str, parameters: dict, prep: list, sequence: list, cle
             parameters["sequence_template"] = rebuilt
 
     # Flatten everything into a single sequence
-    return await queue_manager.submit_sequence(name, prep + sequence + cleanup, parameters)
+    return parameters, prep + sequence + cleanup
+
+
+async def start_run(name: str, parameters: dict, prep: list, sequence: list, cleanup: list) -> int:
+    """Expand a run's links and hand it to the queue. The single entry point for starting a run.
+
+    Deliberately not inlined in the HTTP route any more: a run can now arrive two ways — from a
+    browser via POST /api/queue/runs, or from Cloud over the `execute` MQTT topic — and those two
+    have to mean exactly the same thing. Cloud dispatching a spreadsheet or optimization run is
+    the *same* run as one started at the bench, arriving by a different door, so both callers go
+    through this function rather than the MQTT path growing its own reduced notion of what a run
+    is (which is what it had: a single block, no prep/cleanup, no parameters at all).
+
+    Returns the new run's id; raises WorkflowError for an unresolvable link.
+    """
+    parameters, steps = prepare_run(parameters, prep, sequence, cleanup)
+    return await queue_manager.submit_sequence(name, steps, parameters)
 
 
 @app.post("/api/queue/runs")
@@ -1197,6 +1391,22 @@ async def create_run(req: Request):
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.put("/api/queue/runs/{run_id}")
+async def edit_queued_run(run_id: int, req: Request):
+    """Replace a queued run with a changed one (new spreadsheet values, a new optimization
+    configuration): the same body as POST /api/queue/runs, checked the same way. It keeps its
+    place in the queue. Refused once the run has started."""
+    data = await req.json()
+    try:
+        parameters, steps = prepare_run(data.get("parameters", {}), data.get("prep", []), data.get("sequence", []), data.get("cleanup", []))
+        await queue_manager.replace_pending_run(run_id, data.get("name"), steps, parameters)
+    except LookupError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"status": "updated", "run_id": run_id}
+
 
 @app.get("/api/queue/runs/{run_id}")
 async def get_run(run_id: int):
@@ -1346,6 +1556,41 @@ async def resume_run(run_id: int):
         queue_manager.resume()
         return {"status": "running"}
     return JSONResponse(status_code=400, content={"error": "Workflow not active"})
+
+@app.post("/api/queue/runs/{run_id}/graceful-stop")
+async def graceful_stop_run(run_id: int, req: Request):
+    """Finish the iteration the run is in (a row or batch, an optimization trial, or for a plain
+    run the current step), skip the rest, then run the cleanup or not (`cleanup`) and go on with
+    the queue or hold it (`continue_queue`). Refused while a failed step waits for a decision:
+    that one is answered with retry, skip or stop first."""
+    if queue_manager.active_run_id != run_id:
+        return JSONResponse(status_code=400, content={"error": "Workflow not active"})
+    if queue_manager.awaiting_decision == run_id:
+        return JSONResponse(status_code=409, content={"error": "A failed step is waiting for retry, skip or stop."})
+    data = await req.json() if (await req.body()) else {}
+    queue_manager.request_graceful_stop(data.get("cleanup", True), data.get("continue_queue", True))
+    await queue_manager.broadcast_global_queue()
+    return {"status": "stopping"}
+
+
+@app.post("/api/queue/pause")
+async def pause_queue():
+    """Hold the queue: the run under way pauses before its next step and nothing new starts."""
+    queue_manager.pause()
+    await queue_manager.broadcast_global_queue()
+    return {"queue_paused": True}
+
+
+@app.post("/api/queue/resume")
+async def resume_queue():
+    """Let the queue go on, after a pause or the hold that follows a stop or an error. A failed
+    step waiting for a decision is not resumed by this; it is answered with retry, skip or stop."""
+    if queue_manager.awaiting_decision is not None:
+        return JSONResponse(status_code=409, content={"error": "A failed step is waiting for retry, skip or stop."})
+    queue_manager.resume()
+    await queue_manager.broadcast_global_queue()
+    return {"queue_paused": False}
+
 
 @app.post("/api/queue/runs/{run_id}/cancel")
 async def cancel_run(run_id: int):
@@ -1564,6 +1809,7 @@ def list_workflows():
                 getattr(app.state, "instrument_schemas", {}),
                 getattr(app.state, "schema_fingerprint", ""),
                 names,
+                resolve_workflow=bodies.get,
             )
             summaries.append(summary)
         return {"workflows": summaries, "tags": wf.all_tags(WORKFLOWS_DIR)}
@@ -1748,8 +1994,9 @@ async def save_workflow(name: str, req: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
     # Push the change up immediately rather than waiting for the next reconnect — a saved
-    # workflow should show up in Cloud right away, not just after a restart.
-    if global_broker and global_topic_prefix and global_client_id:
+    # workflow should show up in Cloud right away, not just after a restart. Not when workflow
+    # sync is manual: then it goes with the next Sync now.
+    if CLOUD_SYNC_WORKFLOWS == "always" and global_broker and global_topic_prefix and global_client_id:
         try:
             global_broker.publish(
                 f"{global_topic_prefix}/{global_client_id}/sequences/{name}",

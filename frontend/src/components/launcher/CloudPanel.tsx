@@ -52,8 +52,10 @@ export function useCloudLinks(profiles: Profile[]): Record<string, CloudLink> {
       }));
       if (!cancelled) setLinks(next);
     };
+    // Every 20s, not 5: this shows up as a request line in each running edge's log, and a pairing
+    // state changes rarely; a pairing made through the launcher refreshes the page anyway.
     poll();
-    const t = setInterval(poll, 5000);
+    const t = setInterval(poll, 20000);
     return () => { cancelled = true; clearInterval(t); };
   }, [key]);
   return links;
@@ -101,23 +103,23 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
-      <div className="rounded-2xl p-6 bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm">
-        <div className="flex items-center gap-2 text-sm font-medium text-indigo-100">
+      <div className="rounded-2xl p-6 bg-gradient-to-br from-accent to-accent-hover text-on-accent shadow-sm">
+        <div className="flex items-center gap-2 text-sm font-medium text-on-accent/80">
           <Cloud className="w-4 h-4" /> Cloud
-          <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/15">Early access</span>
+          <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-on-accent/15">Early access</span>
         </div>
         <h2 className="mt-2 text-2xl font-semibold">Manage every deck from one place</h2>
-        <p className="mt-1 text-sm text-indigo-100 max-w-2xl">
+        <p className="mt-1 text-sm text-on-accent/80 max-w-2xl">
           Everything here keeps working on this computer without an account. Cloud adds the view across decks, computers and labs.
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-2">
-          <button type="button" disabled={reach?.reachable === false} onClick={() => run(() => api.openCloud())} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-indigo-700 text-sm font-semibold hover:bg-indigo-50 disabled:opacity-60 disabled:cursor-not-allowed">
+          <button type="button" disabled={reach?.reachable === false} onClick={() => run(() => api.openCloud())} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-on-accent text-accent text-sm font-semibold hover:bg-on-accent/90 disabled:opacity-60 disabled:cursor-not-allowed">
             <Cloud className="w-3.5 h-3.5" /> Open Cloud
           </button>
-          <button type="button" disabled={reach?.reachable === false} title="Open it in your web browser instead" onClick={() => run(() => api.openCloudInBrowser())} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 text-white text-sm font-medium hover:bg-white/25 disabled:opacity-60 disabled:cursor-not-allowed">
+          <button type="button" disabled={reach?.reachable === false} title="Open it in your web browser instead" onClick={() => run(() => api.openCloudInBrowser())} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-on-accent/15 text-on-accent text-sm font-medium hover:bg-on-accent/25 disabled:opacity-60 disabled:cursor-not-allowed">
             <ExternalLink className="w-3.5 h-3.5" /> Browser
           </button>
-          <span className="text-xs text-indigo-100">
+          <span className="text-xs text-on-accent/80">
             {reach === null ? 'Checking the Cloud address…' : reach.reachable ? `Opens ${cloudUrl.replace(/^https?:\/\//, '')} as a tab here, beside your decks.` : 'Not reachable right now: see below.'}
           </span>
         </div>
@@ -167,7 +169,7 @@ export default function CloudPanel({ api, profiles, links, cloudUrl, run }: {
       <div className="grid sm:grid-cols-2 gap-3">
         {BENEFITS.map(b => (
           <div key={b.title} className={`${cardClass} p-4 flex gap-3`}>
-            <span className="w-9 h-9 shrink-0 rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300 flex items-center justify-center"><b.icon className="w-4 h-4" /></span>
+            <span className="w-9 h-9 shrink-0 rounded-lg bg-gray-100 dark:bg-white/10 text-gray-900 dark:text-white dark:bg-white/10 dark:text-white flex items-center justify-center"><b.icon className="w-4 h-4" /></span>
             <div>
               <div className="text-sm font-semibold">{b.title}</div>
               <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{b.text}</div>
@@ -214,8 +216,8 @@ function LinkState({ running, link }: { running: boolean; link?: CloudLink }) {
   const base = 'inline-flex items-center gap-1.5 text-xs';
   if (!running) return <span className={`${base} text-gray-400`}>Start the deck to see its link</span>;
   if (!link) return <span className={`${base} text-gray-400`}><Loader2 className="w-3 h-3 animate-spin" /> Checking</span>;
-  if (link.paused) return <span className={`${base} text-indigo-600 dark:text-indigo-400`}>Paused</span>;
-  if (link.pairing?.state === 'waiting') return <span className={`${base} text-indigo-600 dark:text-indigo-400`}><Loader2 className="w-3 h-3 animate-spin" /> Waiting for approval · <span className="font-mono">{link.pairing.code}</span></span>;
+  if (link.paused) return <span className={`${base} text-gray-900 dark:text-white`}>Paused</span>;
+  if (link.pairing?.state === 'waiting') return <span className={`${base} text-gray-900 dark:text-white`}><Loader2 className="w-3 h-3 animate-spin" /> Waiting for approval · <span className="font-mono">{link.pairing.code}</span></span>;
   if (!link.paired) return <span className={`${base} text-gray-500 dark:text-gray-400`}>Not connected</span>;
   if (link.connection_state === 'connected') return <span className={`${base} text-green-700 dark:text-green-400`}><CheckCircle2 className="w-3.5 h-3.5" /> Connected{link.client_id ? ` as ${link.client_id}` : ''}</span>;
   if (link.connection_state === 'error') return <span title={link.connection_error || ''} className={`${base} text-red-600 dark:text-red-400`}><AlertTriangle className="w-3.5 h-3.5" /> Paired, cannot reach Cloud</span>;

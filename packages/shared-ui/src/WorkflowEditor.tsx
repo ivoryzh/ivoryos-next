@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { GripVertical, Trash2, Settings2, ChevronDown, ChevronUp, AlertTriangle, Eye, EyeOff, Info, PanelRightClose, PanelRightOpen, ChevronsDownUp, ChevronsUpDown, ChevronRight, Search, Hash, Layers, Link2, Copy, Scissors, ListChecks } from 'lucide-react';
+import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, Scissors, ListChecks, MoreHorizontal, Wrench, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   LIBRARY_INSTRUMENT,
   collectReturnVars,
@@ -12,6 +12,7 @@ import {
   newGroupId,
   diffSteps,
   flattenSavedBody,
+  returnVarNames,
   reuseWorkflow,
   scanDynamicParams,
   uniquifyReturnVars,
@@ -22,6 +23,9 @@ import { confirmDialog, notify, promptDialog } from './dialogs';
 import { ExtraArguments } from './ExtraArguments';
 import { WorkflowPeek, type WorkflowPeekTarget } from './WorkflowPeek';
 import { WorkflowDiff } from './WorkflowDiff';
+import { SuggestInput } from './SuggestInput';
+import { AutoFillToggle, LOGIC_TOOLS, ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, logicStepLook } from './Toolbox';
+import { FLOW_CONTROL_INSTRUMENTS } from './flowControl';
 
 // One named variable bound to one addressable leaf of a step's return value. `path` is the
 // dotted pointer the backend's introspection published in `schema.return_paths`
@@ -282,20 +286,6 @@ export default function WorkflowEditor({
     });
   };
 
-  const expandAll = () => {
-    const expandList = (list: SequenceBlock[]) => list.map(b => ({ ...b, isExpanded: true }));
-    setSequence(expandList(sequence));
-    setPrepSequence(expandList(prepSequence));
-    setCleanupSequence(expandList(cleanupSequence));
-  };
-
-  const collapseAll = () => {
-    const collapseList = (list: SequenceBlock[]) => list.map(b => ({ ...b, isExpanded: false }));
-    setSequence(collapseList(sequence));
-    setPrepSequence(collapseList(prepSequence));
-    setCleanupSequence(collapseList(cleanupSequence));
-  };
-
   useEffect(() => {
     // Initialize toolbox state (all collapsed) when statusData changes
     if (statusData && statusData.instruments) {
@@ -443,6 +433,8 @@ export default function WorkflowEditor({
               newBlock.instrument = "Flow_Control"; // standardise the instrument name for backend
           }
           destList.splice(dropAt, 0, newBlock);
+          // Dropped to be filled in: it opens, and whatever was open closes.
+          if (!isFlowControlBlock || method === 'User_Input') setOpenStep({ listId: destId, id: newBlock.id });
       }
 
       setSequenceList(destId, destList);
@@ -552,8 +544,74 @@ export default function WorkflowEditor({
     });
   };
 
+  // A linked workflow's outputs: every one is kept, under the workflow's own name unless one is
+  // typed here (an empty entry keeps the default). returnVar lists the names in effect, which is
+  // what Optimize, Data History and later steps' #name suggestions read.
+  const handleLinkOutputChange = (blockId: string, leaves: ReturnLeaf[], path: string, value: string, listId: string) => {
+    updateBlock(listId, blockId, block => {
+      const current = (p: string) => block.returnBindings?.find(b => b.path === p)?.var || '';
+      const bindings = leaves.map(l => ({ path: l.path, var: l.path === path ? value : current(l.path) }));
+      return { ...block, returnBindings: bindings, returnVar: bindings.map(b => b.var.trim() || b.path).join(', ') };
+    });
+  };
+
+  // A linked step placed before workflows listed their outputs has none in its snapshot; take the
+  // toolbox's list, so its outputs show here and reach Optimize. Not an edit (the signature
+  // ignores the schema snapshot), so nothing turns "Unsaved".
+  useEffect(() => {
+    const live = statusData?.instruments?.[LIBRARY_INSTRUMENT] || {};
+    const patch = (list: SequenceBlock[]) => {
+      let changed = false;
+      const next = list.map(b => {
+        if (b.instrument !== LIBRARY_INSTRUMENT || Array.isArray((b.schema as any)?.return_paths)) return b;
+        const paths = live[b.method]?.return_paths;
+        if (!Array.isArray(paths)) return b;
+        changed = true;
+        return { ...b, schema: { ...(b.schema || {}), return_paths: paths } };
+      });
+      return changed ? next : null;
+    };
+    const p = patch(prepSequence), m = patch(sequence), c = patch(cleanupSequence);
+    if (p) setPrepSequence(p);
+    if (m) setSequence(m);
+    if (c) setCleanupSequence(c);
+  }, [statusData, prepSequence, sequence, cleanupSequence]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // One step is open for editing at a time; every other step shows its one-line summary. A
+  // click anywhere outside the open step closes it (see the effect below), so finishing an edit
+  // never needs a hunt for the fold control. This is editor state, not the step's: the old
+  // per-step `isExpanded` flag let any number stay open and gave a step with nothing but an output
+  // (Balance.tare) no way to close at all.
+  const [openStep, setOpenStep] = useState<{ listId: string; id: string } | null>(null);
+  const isOpenStep = (listId: string, blockId: string) => openStep?.listId === listId && openStep.id === blockId;
   const toggleExpand = (blockId: string, listId: string) => {
-    updateBlock(listId, blockId, block => ({ ...block, isExpanded: !block.isExpanded }));
+    setOpenStep(prev => (prev?.listId === listId && prev.id === blockId ? null : { listId, id: blockId }));
+  };
+  useEffect(() => {
+    if (!openStep) return;
+    const close = (e: Event) => {
+      const t = e.target as Element | null;
+      if (!t || typeof t.closest !== 'function') return;
+      if (t.closest(`[data-step-key="${openStep.listId}:${openStep.id}"]`)) return;
+      // A suggestion list or a dialog opened from this step is part of editing it.
+      if (t.closest('[data-ivoryos-popover], [role="dialog"]')) return;
+      setOpenStep(null);
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) setOpenStep(null); };
+    document.addEventListener('mousedown', close, true);
+    document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('mousedown', close, true); document.removeEventListener('keydown', key); };
+  }, [openStep]);
+
+  // A folded step lists its arguments; clicking one opens the step on that field.
+  const paramFieldId = (listId: string, blockId: string, paramKey: string) => `param-${listId}-${blockId}-${paramKey}`;
+  const editParam = (blockId: string, listId: string, paramKey: string) => {
+    setOpenStep({ listId, id: blockId });
+    setTimeout(() => {
+      const el = document.getElementById(paramFieldId(listId, blockId, paramKey)) as HTMLInputElement | null;
+      el?.focus();
+      el?.select?.();
+    }, 30);
   };
 
   const toggleHideBlock = (blockId: string, listId: string) => {
@@ -822,7 +880,7 @@ export default function WorkflowEditor({
         title={on ? 'Leave select mode' : 'Select several steps to put them in a group'}
         className={`flex items-center space-x-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
           on
-            ? 'text-indigo-600 dark:text-indigo-400'
+            ? 'text-gray-900 dark:text-white'
             : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'
         }`}
       >
@@ -1032,6 +1090,10 @@ export default function WorkflowEditor({
   const toggleToolbox = (instName: string) => {
     setExpandedToolbox(prev => ({ ...prev, [instName]: !prev[instName] }));
   };
+  // Toolbox groups (Logic, Workflows, Instruments, each instrument) start open; this records the
+  // ones folded away. `expandedToolbox` is the opposite, for things that start closed.
+  const [foldedToolbox, setFoldedToolbox] = useState<Record<string, boolean>>({});
+  const toggleFold = (key: string) => setFoldedToolbox(prev => ({ ...prev, [key]: !prev[key] }));
 
   const removeBlock = (index: number, listId: string) => {
     const list = Array.from(getSequenceList(listId));
@@ -1111,9 +1173,7 @@ export default function WorkflowEditor({
     blocks.slice(0, upTo).forEach(b => {
       const isUserInput = (b.instrument === 'Flow_Control' || b.instrument === 'Flow Control') && b.method === 'User_Input';
       if (isUserInput && b.params?.variable_name) out.push(String(b.params.variable_name).trim());
-      if (b.returnVar) {
-        String(b.returnVar).split(',').map(v => v.trim()).filter(Boolean).forEach(v => out.push(v));
-      }
+      returnVarNames(b).forEach(v => out.push(v));
     });
     return out;
   };
@@ -1149,14 +1209,14 @@ export default function WorkflowEditor({
         const info = selectionInfo(listId);
         const count = selection.ids.length;
         return (
-          <div className="mb-2 flex items-center flex-wrap gap-2 px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/70 dark:bg-indigo-900/20 text-[11px]">
-            <span className="font-semibold text-indigo-800 dark:text-indigo-300">
+          <div className="mb-2 flex items-center flex-wrap gap-2 px-2.5 py-1.5 rounded-lg border border-accent-tint/60 bg-accent-soft text-[11px]">
+            <span className="font-semibold text-gray-900 dark:text-white">
               {count > 0
                 ? `${count} step${count === 1 ? '' : 's'} selected`
                 : 'Tick the steps you want to group'}
             </span>
             {info && !info.contiguous && (
-              <span className="text-indigo-700/70 dark:text-indigo-400/70">
+              <span className="text-gray-900/70 dark:text-white/70">
                 not next to each other — grouping will move them together
               </span>
             )}
@@ -1165,7 +1225,7 @@ export default function WorkflowEditor({
               <button
                 type="button"
                 onClick={() => groupSelection(listId, info.neighbour)}
-                className="px-2 py-0.5 rounded border text-[10px] font-bold bg-white border-indigo-300 text-indigo-700 hover:bg-indigo-50 dark:bg-white/5 dark:border-indigo-700/40 dark:text-indigo-300"
+                className="px-2 py-0.5 rounded border text-[10px] font-bold bg-white border-accent-tint text-accent-fg hover:bg-accent-soft dark:bg-white/5"
               >
                 Add to {info.neighbour.name}
               </button>
@@ -1174,7 +1234,7 @@ export default function WorkflowEditor({
               <button
                 type="button"
                 onClick={() => groupSelection(listId)}
-                className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-600 text-white hover:bg-indigo-700"
+                className="px-2 py-0.5 rounded text-[10px] font-bold bg-accent text-on-accent hover:bg-accent-hover"
               >
                 Group
               </button>
@@ -1195,7 +1255,7 @@ export default function WorkflowEditor({
           <div 
             ref={provided.innerRef}
             {...provided.droppableProps}
-            className={`min-h-[100px] border-2 border-dashed rounded-xl p-2 transition-colors ${snapshot.isDraggingOver ? 'bg-blue-50/50 border-blue-300 dark:bg-white/[0.02] dark:border-blue-500/50' : 'border-gray-200 dark:border-white/10'}`}
+            className={`min-h-[100px] border-2 border-dashed rounded-xl p-2 transition-colors ${snapshot.isDraggingOver ? 'bg-gray-100/50 dark:bg-white/10 border-gray-300 dark:border-white/20 dark:bg-white/[0.02] dark:border-white/30' : 'border-gray-200 dark:border-white/10'}`}
           >
             {sequenceList.length === 0 ? (
               <div className="h-24 flex flex-col items-center justify-center text-gray-400 dark:text-gray-500">
@@ -1206,11 +1266,12 @@ export default function WorkflowEditor({
                 {(() => {
                   // Pre-compute nesting depth for each block
                   const nestColors = [
-                    'border-l-blue-500', 'border-l-purple-500', 'border-l-amber-500',
+                    // No purple: on a step it means "once per batch".
+                    'border-l-blue-500', 'border-l-lime-500', 'border-l-amber-500',
                     'border-l-emerald-500', 'border-l-rose-500', 'border-l-cyan-500'
                   ];
                   const nestBgs = [
-                    'bg-blue-50/30 dark:bg-blue-900/10', 'bg-purple-50/30 dark:bg-purple-900/10',
+                    'bg-gray-100/30 dark:bg-white/10', 'bg-lime-50/30 dark:bg-lime-900/10',
                     'bg-amber-50/30 dark:bg-amber-900/10', 'bg-emerald-50/30 dark:bg-emerald-900/10',
                     'bg-rose-50/30 dark:bg-rose-900/10', 'bg-cyan-50/30 dark:bg-cyan-900/10'
                   ];
@@ -1274,7 +1335,7 @@ export default function WorkflowEditor({
 
                   const index = row.index;
                   const block = sequenceList[index];
-                  const isExpanded = block.isExpanded !== false;
+                  const isExpanded = isOpenStep(listId, block.id);
                   const inExpandedGroup = !!row.group;
                   const blockDepth = depths[index] || 0;
                   const nestColor = blockDepth > 0 ? nestColors[(blockDepth - 1) % nestColors.length] : '';
@@ -1375,9 +1436,23 @@ export default function WorkflowEditor({
                   // Everything this step's return value can be pointed at. A structured result
                   // (dataclass/Pydantic model, or anything nested) gets its own Outputs panel
                   // in the expanded body rather than a row of unlabeled boxes in the header.
-                  const returnLeaves = (isFlowBlock || listId === 'prep' || listId === 'cleanup')
+                  const linkPaths = isLibraryBlock
+                    ? ((block.schema as any)?.return_paths ?? statusData.instruments?.[LIBRARY_INSTRUMENT]?.[block.method]?.return_paths)
+                    : undefined;
+                  const returnLeaves: ReturnLeaf[] = (isFlowBlock || listId === 'prep' || listId === 'cleanup')
                     ? []
-                    : getReturnLeaves(block.schema);
+                    : isLibraryBlock ? (Array.isArray(linkPaths) ? linkPaths : []) : getReturnLeaves(block.schema);
+                  // A linked workflow's output is saved under its own name unless renamed here, so an
+                  // empty field means "the same name", shown as the placeholder.
+                  const shownVar = (leaf: ReturnLeaf, leaves: ReturnLeaf[]) => isLibraryBlock
+                    ? (block.returnBindings?.find(b => b.path === leaf.path)?.var || '')
+                    : getBoundVar(block, leaf, leaves);
+                  const savedAs = (leaf: ReturnLeaf, leaves: ReturnLeaf[]) => isLibraryBlock
+                    ? (shownVar(leaf, leaves).trim() || leaf.path)
+                    : getBoundVar(block, leaf, leaves);
+                  const changeSave = (leaves: ReturnLeaf[], path: string, value: string) => isLibraryBlock
+                    ? handleLinkOutputChange(block.id, leaves, path, value, listId)
+                    : handleReturnBindingChange(block.id, leaves, path, value, listId);
                   const usesOutputPanel = returnLeaves.length > 2 || returnLeaves.some(l => l.path.includes('.'));
                   
                   const checkRequiredParams = (schemaObj: any, prefix: string = '') => {
@@ -1396,6 +1471,12 @@ export default function WorkflowEditor({
                           }
 
                           const val = fullKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, block.params);
+                          // A '#' with no name refers to nothing: the run fails on it, and Configure
+                          // cannot offer a column for it. Said here, on the step, where it is fixed.
+                          if (typeof val === 'string' && val.trim() === '#') {
+                              blockWarnings.push(`'${fullKey}' is a # with no variable name after it`);
+                              continue;
+                          }
                           const isDynamicRef = typeof val === 'string' && val.startsWith('#');
 
                           if (pData?.required && !isDynamicRef) {
@@ -1420,36 +1501,13 @@ export default function WorkflowEditor({
                   if (blockWarnings.length > 0) {
                       borderClass = `border-amber-400 dark:border-amber-500/50 shadow-[0_0_0_1px_rgba(251,191,36,0.5)] ${blockDepth > 0 ? 'border-l-4 ' + nestColor : ''}`;
                   }
-                  let flowBgClass = 'bg-stone-50/60 dark:bg-stone-900/20';
-                  let flowTextClass = 'text-stone-700 dark:text-stone-300 font-bold';
-                  let flowInputClass = 'bg-stone-500/10 dark:bg-stone-900/40 border-stone-200 dark:border-stone-800/50 focus:border-stone-400 dark:focus:border-stone-500 text-stone-900 dark:text-stone-100 placeholder-stone-300 dark:placeholder-stone-600/50';
-                  
-                  if (isFlowBlock) {
-                      if (block.method === 'If' || block.method === 'End_If' || block.method === 'Else') {
-                          flowBgClass = 'bg-sky-50/70 dark:bg-sky-900/20';
-                          flowTextClass = 'text-sky-700 dark:text-sky-300 font-bold';
-                          flowInputClass = 'bg-sky-500/10 dark:bg-sky-900/40 border-sky-200 dark:border-sky-800/50 focus:border-sky-400 dark:focus:border-sky-500 text-sky-900 dark:text-sky-100 placeholder-sky-300 dark:placeholder-sky-600/50';
-                      } else if (block.method === 'While' || block.method === 'End_While') {
-                          flowBgClass = 'bg-amber-50/70 dark:bg-amber-900/20';
-                          flowTextClass = 'text-amber-700 dark:text-amber-300 font-bold';
-                          flowInputClass = 'bg-amber-500/10 dark:bg-amber-900/40 border-amber-200 dark:border-amber-800/50 focus:border-amber-400 dark:focus:border-amber-500 text-amber-900 dark:text-amber-100 placeholder-amber-300 dark:placeholder-amber-600/50';
-                      } else if (block.method === 'Sleep') {
-                          flowBgClass = 'bg-violet-50/70 dark:bg-violet-900/20';
-                          flowTextClass = 'text-violet-700 dark:text-violet-300 font-bold';
-                          flowInputClass = 'bg-violet-500/10 dark:bg-violet-900/40 border-violet-200 dark:border-violet-800/50 focus:border-violet-400 dark:focus:border-violet-500 text-violet-900 dark:text-violet-100 placeholder-violet-300 dark:placeholder-violet-600/50';
-                      } else if (block.method === 'User_Input') {
-                          flowBgClass = 'bg-pink-50/70 dark:bg-pink-900/20';
-                          flowTextClass = 'text-pink-700 dark:text-pink-300 font-bold';
-                          flowInputClass = 'bg-pink-500/10 dark:bg-pink-900/40 border-pink-200 dark:border-pink-800/50 focus:border-pink-400 dark:focus:border-pink-500 text-pink-900 dark:text-pink-100 placeholder-pink-300 dark:placeholder-pink-600/50';
-                      } else if (block.method === 'Comment') {
-                          flowBgClass = 'bg-slate-50/70 dark:bg-slate-800/20';
-                          flowTextClass = 'text-slate-600 dark:text-slate-400 font-bold';
-                          flowInputClass = 'bg-slate-500/10 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700/50 focus:border-slate-400 dark:focus:border-slate-500 text-slate-900 dark:text-slate-100 placeholder-slate-300 dark:placeholder-slate-600/50';
-                      }
-                  }
+                  // One colour family per kind of built-in step, shared with the toolbox and with
+                  // Cloud (Toolbox.tsx logicStepLook). None of them is purple: that is "once per batch".
+                  const flowLook = logicStepLook(String(block.method || ''));
+                  const flowInputClass = flowLook.input;
 
                   let bgClass = 'bg-white dark:bg-[#1a1a1a]';
-                  if (isFlowBlock) bgClass = flowBgClass;
+                  if (isFlowBlock) bgClass = flowLook.card;
                   else if (blockDepth > 0) bgClass = `bg-white dark:bg-black/40 ${nestBg}`;
 
                   const indent = blockDepth > 0 ? { marginLeft: `${blockDepth * 20}px` } : {};
@@ -1472,15 +1530,16 @@ export default function WorkflowEditor({
                                     ? { marginLeft: `${(parseInt(String(indent.marginLeft || '0'), 10) || 0) + 10}px` }
                                     : {}),
                                 }}
+                                data-step-key={`${listId}:${block.id}`}
                                 className={`
                                   relative ${bgClass} rounded-lg shadow-sm border
                                   transition-all duration-200 group
                                   ${block.isHidden ? 'opacity-50 border-gray-200 dark:border-gray-800' :
-                                    snapshot.isDragging ? 'border-blue-500 shadow-xl scale-[1.02] z-50' :
+                                    snapshot.isDragging ? 'border-accent shadow-xl scale-[1.02] z-50' :
                                     'border-gray-200 dark:border-white/10 hover:border-gray-300 dark:hover:border-white/20'
                                   }
                                   ${inExpandedGroup ? 'border-l-2 border-l-gray-300 dark:border-l-white/20 rounded-l-none' : ''}
-                                  ${isSelected(listId, block.id) ? 'ring-2 ring-indigo-400 dark:ring-indigo-500' : ''}
+                                  ${isSelected(listId, block.id) ? 'ring-2 ring-accent' : ''}
                                 `}
                               >
                                   {/* The handle wraps the provenance strip *and* the top row, so
@@ -1548,201 +1607,287 @@ export default function WorkflowEditor({
                                     );
                                   })()}
 
-                                  {/* Top Row: Info & Controls */}
-                                  <div
-                                    onClick={() => ((!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock) && toggleExpand(block.id, listId)}
-                                    className={`px-3 py-1.5 flex flex-wrap items-center justify-between gap-y-1.5 ${(!isFlowBlock && (hasBody || usesOutputPanel)) || isUserInputBlock ? 'hover:bg-gray-50/50 dark:hover:bg-white/5 transition-colors' : ''}`}
-                                  >
-                                    {/* The name keeps at least this much room; below it the controls
-                                        wrap onto their own line instead of the name running
-                                        underneath them, which is what a narrow canvas used to do. */}
-                                    <div className="flex items-center min-w-[13rem] flex-1">
-                                      {/* Only in select mode, so the cards stay uncluttered the rest
-                                          of the time. A real checkbox, so drag-and-drop refuses to
-                                          start on it and ticking one never becomes a drag. */}
-                                      {selection.listId === listId && (
-                                        <input
-                                          type="checkbox"
-                                          checked={isSelected(listId, block.id)}
-                                          onChange={() => toggleSelect(listId, block.id)}
-                                          onClick={(e) => e.stopPropagation()}
-                                          title="Select this step"
-                                          className="mr-2 shrink-0 accent-indigo-600 cursor-pointer"
-                                        />
-                                      )}
-                                      <div className={`flex items-center space-x-2 min-w-0 ${!isFlowBlock && !hasParams ? 'ml-1' : ''}`}>
-                                        {!isFlowBlock && (
-                                          <span title={block.instrument.replace(/_/g, ' ')} className="w-28 shrink-0 truncate text-center text-[10px] font-semibold px-2 py-0.5 bg-gray-100 text-gray-600 border border-gray-200 dark:bg-white/10 dark:text-gray-300 dark:border-white/5 rounded-md capitalize">
-                                            {block.instrument.replace(/_/g, ' ')}
-                                          </span>
+                                  {/* One line that reads like the call it makes: the instrument, the
+                                      method and, folded, its arguments as name=value with what it
+                                      saves after an arrow. Compact means no dead space, not small
+                                      type: the tag is as wide as its text, the arguments fill the
+                                      line, and the controls take only what their icons need.
+                                      Folding a card used to hide its arguments entirely, so a step
+                                      still needing configuration looked finished; any argument
+                                      opens the card on that field. */}
+                                  {(() => {
+                                    const valueAt = (path: string) => path.split('.').reduce((acc: any, part: string) => (acc && acc[part] !== undefined ? acc[part] : undefined), block.params);
+                                    const shown = (v: any) => {
+                                      if (typeof v === 'object' && v !== null) return JSON.stringify(v);
+                                      const t = String(v);
+                                      return t === '' || /\s/.test(t) ? `"${t}"` : t;
+                                    };
+                                    type Arg = { key: string; name: string; text: string; tone: 'set' | 'var' | 'default' | 'missing' | 'empty' };
+                                    const args: Arg[] = [];
+                                    const add = (key: string, name: string, pData: any) => {
+                                      const v = valueAt(key);
+                                      if (typeof v === 'string' && v.trim() === '#') args.push({ key, name, text: '#?', tone: 'missing' });
+                                      else if (v !== undefined && v !== '') args.push({ key, name, text: shown(v), tone: typeof v === 'string' && v.startsWith('#') ? 'var' : 'set' });
+                                      else if (pData?.default !== undefined && pData.default !== '' && pData.default !== null) args.push({ key, name, text: shown(pData.default), tone: 'default' });
+                                      else args.push({ key, name, text: pData?.required ? '?' : 'None', tone: pData?.required ? 'missing' : 'empty' });
+                                    };
+                                    const walk = (schemaObj: any, prefix: string) => {
+                                      for (const k of Object.keys(schemaObj || {})) {
+                                        const pData = schemaObj[k];
+                                        const key = prefix ? `${prefix}.${k}` : k;
+                                        if (pData?.is_object && pData?.fields) walk(pData.fields, key);
+                                        else add(key, key, pData);
+                                      }
+                                    };
+                                    if (!isExpanded) {
+                                      if (isUserInputBlock) {
+                                        add('prompt', 'prompt', { required: true });
+                                        // Nothing saved: a pause, with no value and so no type.
+                                        if (String(block.params?.variable_name || '').trim()) add('input_type', 'type', { default: 'str' });
+                                      } else if (!isFlowBlock) {
+                                        walk(Object.fromEntries(visibleParams.map(p => [p, (effectiveSchema as any)[p]])), '');
+                                        for (const [k, v] of Object.entries(extraArgs)) {
+                                          args.push({ key: k, name: k, text: shown(v), tone: typeof v === 'string' && v.startsWith('#') ? 'var' : 'set' });
+                                        }
+                                      }
+                                    }
+                                    const toneClass: Record<Arg['tone'], string> = {
+                                      set: 'text-gray-900 dark:text-gray-100',
+                                      // A #variable is a value to be filled in later: a token on a grey chip, not a hue.
+                                      var: 'rounded bg-gray-100 px-1 text-gray-900 dark:bg-white/10 dark:text-white',
+                                      default: 'text-gray-400 dark:text-gray-500',
+                                      missing: 'text-amber-600 dark:text-amber-400 font-semibold',
+                                      empty: 'text-gray-300 dark:text-gray-600',
+                                    };
+
+                                    // What the step saves. Folded, a summary after an arrow; open, the
+                                    // names are edited in place after the same arrow.
+                                    const saves = (() => {
+                                      if (isUserInputBlock) return { leaves: null as ReturnLeaf[] | null, names: [String(block.params?.variable_name || '')].filter(Boolean) };
+                                      if (isFlowBlock || listId === 'prep' || listId === 'cleanup') return null;
+                                      if (returnLeaves.length === 0 && !block.returnVar) return null;
+                                      const leaves: ReturnLeaf[] = returnLeaves.length
+                                        ? returnLeaves
+                                        : (block.returnVar || '').split(',').map((_, i) => ({ path: String(i), type: 'Any', numeric: false }));
+                                      return { leaves, names: leaves.map(l => savedAs(l, leaves)).filter(Boolean) };
+                                    })();
+                                    // Anything to edit opens: arguments, outputs, or only the name a result is saved under.
+                                    const canExpand = (!isFlowBlock && (hasBody || usesOutputPanel || !!saves)) || isUserInputBlock;
+                                    const arrow = <ArrowRight className="w-3.5 h-3.5 shrink-0 text-gray-400 dark:text-gray-500" />;
+                                    const saveInput = 'w-24 h-6 rounded-md border border-gray-200 bg-white px-1.5 font-mono text-[12px] text-gray-800 placeholder:text-gray-300 focus:outline-none focus:border-accent dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:placeholder:text-gray-600';
+
+                                    return (
+                                      <div
+                                        onClick={() => canExpand && toggleExpand(block.id, listId)}
+                                        className={`px-2.5 py-1.5 flex items-center gap-2 ${canExpand ? 'hover:bg-gray-50/60 dark:hover:bg-white/[0.03] transition-colors' : ''}`}
+                                      >
+                                        {/* Only in select mode, so the cards stay uncluttered the rest
+                                            of the time. A real checkbox, so drag-and-drop refuses to
+                                            start on it and ticking one never becomes a drag. */}
+                                        {selection.listId === listId && (
+                                          <input
+                                            type="checkbox"
+                                            checked={isSelected(listId, block.id)}
+                                            onChange={() => toggleSelect(listId, block.id)}
+                                            onClick={(e) => e.stopPropagation()}
+                                            title="Select this step"
+                                            className="shrink-0 accent-accent cursor-pointer"
+                                          />
                                         )}
-                                        <span
-                                          title={isLibraryBlock ? block.method : block.method.replace(/_/g, ' ')}
-                                          className={`text-[13px] tracking-tight truncate min-w-0 ${isFlowBlock ? '' : 'whitespace-nowrap'} ${isLibraryBlock ? '' : 'capitalize'} ${isFlowBlock ? flowTextClass : 'text-gray-800 dark:text-gray-100 font-medium'}`}
-                                        >
-                                          {isLibraryBlock ? block.method : block.method.replace(/_/g, ' ')}
+                                        <div className="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                          {isFlowBlock ? (
+                                            // A built-in step has no instrument, so its own name is the tag.
+                                            <span title={block.method === 'Sleep' ? 'Wait (Sleep)' : flowLook.label} className={`shrink-0 inline-flex items-center gap-1 h-6 px-1.5 rounded-md border text-[12px] font-semibold ${flowLook.pill}`}>
+                                              <flowLook.icon className="w-3.5 h-3.5 shrink-0" />
+                                              {flowLook.label}
+                                            </span>
+                                          ) : (
+                                            <span title={block.instrument.replace(/_/g, ' ')} className="shrink-0 max-w-[10rem] truncate inline-flex items-center h-6 px-1.5 rounded-md bg-gray-100 text-[12px] font-medium text-gray-600 capitalize dark:bg-white/10 dark:text-gray-300">
+                                              {isLibraryBlock ? 'Workflow' : block.instrument.replace(/_/g, ' ')}
+                                            </span>
+                                          )}
+                                          {!isFlowBlock && (
+                                            <span
+                                              title={isLibraryBlock ? block.method : block.method.replace(/_/g, ' ')}
+                                              className={`text-[13px] font-semibold text-gray-900 dark:text-gray-100 truncate max-w-full ${isLibraryBlock ? '' : 'capitalize'}`}
+                                            >
+                                              {isLibraryBlock ? block.method : block.method.replace(/_/g, ' ')}
+                                            </span>
+                                          )}
                                           {blockWarnings.length > 0 && (
-                                            <span title={blockWarnings.join('\n')} className="inline-flex items-center ml-1.5 cursor-help">
+                                            <span title={blockWarnings.join('\n')} className="inline-flex items-center cursor-help shrink-0">
                                               <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
                                             </span>
                                           )}
-                                        </span>
-                                        {isFlowBlock && !isUserInputBlock && block.schema?.parameters && (
-                                          <div className="flex items-center space-x-2 ml-2">
-                                            {Object.keys(block.schema.parameters).map(paramKey => {
-                                              const pData = block.schema!.parameters[paramKey];
-                                              const val = block.params[paramKey];
-                                              const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
-                                              const hashInvalid = emptyHashFields.has(hashFieldKey(listId, block.id, paramKey));
-                                              return (
-                                                <div key={paramKey} className="relative flex items-center">
-                                                  <input
-                                                    type="text"
-                                                    list={(pData.options || availableVars.length > 0) ? `flow-vars-${block.id}-${paramKey}` : undefined}
-                                                    value={actualVal}
-                                                    placeholder={paramKey.replace(/_/g, ' ')}
-                                                    title={hashInvalid ? "Add a variable name after '#'" : undefined}
-                                                    onChange={(e) => {
-                                                      handleParamChange(block.id, paramKey, e.target.value, pData.type || '', listId);
-                                                      clearHashWarning(listId, block.id, paramKey);
-                                                    }}
-                                                    onBlur={(e) => {
-                                                      if (e.target.value === '' && pData.default !== undefined) {
-                                                        handleParamChange(block.id, paramKey, String(pData.default), pData.type || '', listId);
-                                                      }
-                                                      handleHashBlur(listId, block.id, paramKey, e.target.value);
-                                                    }}
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className={`${(paramKey === 'prompt' || paramKey === 'message') ? 'w-56' : 'w-32'} border rounded px-2 py-1 text-xs focus:outline-none ${hashInvalid ? 'border-red-400 dark:border-red-500 focus:border-red-500' : flowInputClass}`}
-                                                  />
-                                                  {(pData.options || availableVars.length > 0) && (
-                                                    <datalist id={`flow-vars-${block.id}-${paramKey}`}>
-                                                      {(pData.options || []).map((opt: any) => (
-                                                        <option key={`opt-${String(opt)}`} value={String(opt)} />
-                                                      ))}
-                                                      {/* Conditions are evaluated against the run's variables directly, so they take
-                                                          the bare name (e.g. `temperature > 40`), not the '#name' parameter form. */}
-                                                      {!pData.options && availableVars.map((v: string) => (
-                                                        <option key={`var-${v}`} value={v} />
-                                                      ))}
-                                                    </datalist>
-                                                  )}
-                                                </div>
-                                              )
-                                            })}
-                                          </div>
-                                        )}
-                                      </div>
-                                    </div>
-                                    <div className="flex items-center space-x-2 shrink-0 ml-auto pl-4">
-                                      {/* Return Variable Logic */}
-                                      {(() => {
-                                        if (isFlowBlock || listId === 'prep' || listId === 'cleanup') return null;
-                                        const hasLegacyReturn = Boolean(block.returnVar);
-                                        if (returnLeaves.length === 0 && !hasLegacyReturn) return null;
 
-                                        // A structured return has more fields than fit in this
-                                        // row — it gets the Outputs panel in the expanded body
-                                        // instead, and the header just summarizes what's bound.
-                                        if (usesOutputPanel) {
-                                          const bound = returnLeaves.map(l => getBoundVar(block, l, returnLeaves)).filter(Boolean);
-                                          return (
+                                          {/* Folded: the arguments, as the call would be written. */}
+                                          {args.map(a => (
+                                            <button
+                                              key={a.key}
+                                              type="button"
+                                              onClick={(e) => { e.stopPropagation(); editParam(block.id, listId, a.key); }}
+                                              title={`${a.name} = ${a.text}${a.tone === 'default' ? ' (default)' : a.tone === 'missing' ? ' (required, not set)' : ''}. Click to edit.`}
+                                              className="inline-flex items-baseline min-w-0 max-w-full rounded px-0.5 -mx-0.5 font-mono text-[12px] hover:bg-gray-100 dark:hover:bg-white/10"
+                                            >
+                                              <span className="shrink-0 text-gray-500 dark:text-gray-400">{a.name}</span>
+                                              <span className="shrink-0 text-gray-400 dark:text-gray-500">=</span>
+                                              <span className={`truncate max-w-[14rem] ${toneClass[a.tone]}`}>{a.text}</span>
+                                            </button>
+                                          ))}
+
+                                          {/* Built-in steps keep their one or two fields inline, always. */}
+                                          {isFlowBlock && !isUserInputBlock && block.schema?.parameters && Object.keys(block.schema.parameters).map(paramKey => {
+                                            const pData = block.schema!.parameters[paramKey];
+                                            const val = block.params[paramKey];
+                                            const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
+                                            const hashInvalid = emptyHashFields.has(hashFieldKey(listId, block.id, paramKey));
+                                            return (
+                                              <div key={paramKey} className="relative flex items-center min-w-0">
+                                                <SuggestInput
+                                                  id={paramFieldId(listId, block.id, paramKey)}
+                                                  type="text"
+                                                  // Conditions are evaluated against the run's variables directly, so they take
+                                                  // the bare name (e.g. `temperature > 40`), not the '#name' parameter form. A
+                                                  // note or a prompt is free text: nothing to suggest.
+                                                  suggestions={pData.options ? pData.options.map((o: any) => String(o)) : paramKey === 'condition' ? availableVars : []}
+                                                  mode={paramKey === 'condition' ? 'word' : 'value'}
+                                                  value={actualVal}
+                                                  placeholder={paramKey === 'duration_seconds' ? 'seconds' : paramKey.replace(/_/g, ' ')}
+                                                  title={hashInvalid ? "Add a variable name after '#'" : undefined}
+                                                  onChange={(e) => {
+                                                    handleParamChange(block.id, paramKey, e.target.value, pData.type || '', listId);
+                                                    clearHashWarning(listId, block.id, paramKey);
+                                                  }}
+                                                  onBlur={(e) => {
+                                                    if (e.target.value === '' && pData.default !== undefined) {
+                                                      handleParamChange(block.id, paramKey, String(pData.default), pData.type || '', listId);
+                                                    }
+                                                    handleHashBlur(listId, block.id, paramKey, e.target.value);
+                                                  }}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  className={`${(paramKey === 'prompt' || paramKey === 'message') ? 'w-64' : paramKey === 'condition' ? 'w-48' : 'w-24'} max-w-full h-6 border rounded-md px-1.5 font-mono text-[12px] focus:outline-none ${hashInvalid ? 'border-red-400 dark:border-red-500 focus:border-red-500' : flowInputClass}`}
+                                                />
+                                                {paramKey === 'duration_seconds' && <span className="ml-1 text-[12px] text-gray-400">s</span>}
+                                              </div>
+                                            );
+                                          })}
+
+                                          {/* What it saves. Folded: a summary that opens the card on it. */}
+                                          {saves && !isExpanded && saves.names.length > 0 && (
                                             <button
                                               type="button"
-                                              onClick={(e) => { e.stopPropagation(); toggleExpand(block.id, listId); }}
-                                              title={`This step returns ${returnLeaves.length} fields. Name the ones you want to keep — only numbers can be used as an optimization objective.`}
-                                              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] font-bold transition-colors mr-2 ${
-                                                bound.length
-                                                  ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-500/10 dark:border-blue-500/30 dark:text-blue-300'
-                                                  : 'bg-white border-gray-200 text-gray-500 hover:text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-400 dark:hover:text-gray-200'
+                                              onClick={(e) => { e.stopPropagation(); editParam(block.id, listId, isUserInputBlock ? 'variable_name' : `return-${saves.leaves?.[0]?.path ?? '0'}`); }}
+                                              title={`Saves the result as ${saves.names.join(', ')}. Click to edit.`}
+                                              className="inline-flex items-center gap-1 rounded px-0.5 -mx-0.5 font-mono text-[12px] text-gray-900 dark:text-white hover:bg-gray-100 dark:text-white dark:hover:bg-white/10"
+                                            >
+                                              {arrow}
+                                              {saves.names.join(', ')}
+                                            </button>
+                                          )}
+                                          {/* Open: edited in place after the same arrow. A structured
+                                              return lists its fields in the Outputs panel below instead. */}
+                                          {saves && isExpanded && (
+                                            <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                              {arrow}
+                                              {isUserInputBlock ? (
+                                                <input
+                                                  id={paramFieldId(listId, block.id, 'variable_name')}
+                                                  autoComplete="off"
+                                                  type="text"
+                                                  value={block.params?.variable_name ?? ''}
+                                                  placeholder="optional"
+                                                  title="Optional. The answer is stored under this name, for later steps to use as #name. Leave empty to only pause until someone continues."
+                                                  onChange={(e) => handleParamChange(block.id, 'variable_name', e.target.value, 'str', listId)}
+                                                  className={saveInput}
+                                                />
+                                              ) : usesOutputPanel ? (
+                                                <span className="font-mono text-[12px] text-gray-900 dark:text-white" title="Name the fields to keep in Outputs below">
+                                                  {saves.names.length ? saves.names.join(', ') : `${returnLeaves.length} outputs`}
+                                                </span>
+                                              ) : (
+                                                saves.leaves!.map((leaf, i) => (
+                                                  <span key={leaf.path || i} className="inline-flex items-center gap-1">
+                                                    {saves.leaves!.length > 1 && <span className="font-mono text-[11px] text-gray-400">{leaf.path}:</span>}
+                                                    <input
+                                                      id={paramFieldId(listId, block.id, `return-${leaf.path}`)}
+                                                      autoComplete="off"
+                                                      type="text"
+                                                      value={shownVar(leaf, saves.leaves!)}
+                                                      placeholder={isLibraryBlock ? leaf.path : `var_${i + 1}`}
+                                                      title={isLibraryBlock ? `Saved as ${leaf.path}, its name in the workflow. Type to save it under another name.` : 'Save the result under this name, for later steps to use as #name'}
+                                                      onChange={(e) => changeSave(saves.leaves!, leaf.path, e.target.value)}
+                                                      className={saveInput}
+                                                    />
+                                                  </span>
+                                                ))
+                                              )}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {/* Controls: only as wide as their icons. Once-per-batch is the
+                                            exception worth a word, and it is purple wherever it shows. */}
+                                        <div className="flex items-center gap-0.5 shrink-0 self-start">
+                                          {(!isFlowBlock || isUserInputBlock) && listId === 'canvas' && (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => { e.stopPropagation(); toggleBatchAction(block.id, listId); }}
+                                              title={block.isBatchAction ? "Once per batch: runs once for each batch group (set the group size on the Configure page), not once per row. Click to run it for every sample again." : "Runs for every sample (once per spreadsheet row). Click to run it once per batch instead."}
+                                              className={`inline-flex items-center gap-1 h-6 rounded-md text-[12px] font-semibold transition-colors ${
+                                                block.isBatchAction
+                                                  ? 'px-1.5 bg-purple-50 text-purple-700 ring-1 ring-inset ring-purple-200 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-500/30'
+                                                  : 'w-6 justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10'
                                               }`}
                                             >
-                                              <span>Save</span>
-                                              <span className="font-mono font-normal max-w-[10rem] truncate">
-                                                {bound.length ? bound.join(', ') : `${returnLeaves.length} outputs`}
-                                              </span>
+                                              <Layers className="w-3.5 h-3.5 shrink-0" />
+                                              {block.isBatchAction && 'Batch'}
                                             </button>
-                                          );
-                                        }
-
-                                        // Scalar / short-tuple return: the names stay inline.
-                                        const inlineLeaves: ReturnLeaf[] = returnLeaves.length
-                                          ? returnLeaves
-                                          : (block.returnVar || '').split(',').map((_, i) => ({ path: String(i), type: 'Any', numeric: false }));
-                                        return (
-                                          <div className="flex items-center space-x-2 mr-2">
-                                            <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">Save</span>
-                                            <div className="flex space-x-1 items-center">
-                                              {inlineLeaves.map((leaf, i) => (
-                                                <div key={leaf.path || i} className="flex items-center space-x-1">
-                                                  {inlineLeaves.length > 1 && (
-                                                    <span className="text-[10px] text-gray-400 font-mono">{leaf.path}:</span>
-                                                  )}
-                                                  <input
-                                                    type="text"
-                                                    value={getBoundVar(block, leaf, inlineLeaves)}
-                                                    placeholder={`var_${i + 1}`}
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    onChange={(e) => handleReturnBindingChange(block.id, inlineLeaves, leaf.path, e.target.value, listId)}
-                                                    className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
-                                                  />
-                                                </div>
-                                              ))}
+                                          )}
+                                          {/* The rarer actions sit behind one mark, shown on hover or focus. A
+                                              disabled step keeps its eye-off mark in the row, since that state
+                                              must stay visible. */}
+                                          <div className="relative group/more">
+                                            <button
+                                              type="button"
+                                              onClick={(e) => e.stopPropagation()}
+                                              title="More: disable or duplicate this step"
+                                              className={`w-6 h-6 inline-flex items-center justify-center rounded-md hover:bg-gray-100 dark:hover:bg-white/10 transition-colors ${block.isHidden ? 'text-amber-500' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'}`}
+                                            >
+                                              {block.isHidden ? <EyeOff className="w-4 h-4" /> : <MoreHorizontal className="w-4 h-4" />}
+                                            </button>
+                                            <div className="absolute right-0 top-full mt-1 w-44 py-1 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-lg shadow-lg opacity-0 invisible group-hover/more:opacity-100 group-hover/more:visible group-focus-within/more:opacity-100 group-focus-within/more:visible transition-all z-30 text-left">
+                                              <button
+                                                type="button"
+                                                onClick={(e) => { e.stopPropagation(); toggleHideBlock(block.id, listId); }}
+                                                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-white/5"
+                                              >
+                                                {block.isHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                                                {block.isHidden ? 'Enable step' : 'Disable step'}
+                                              </button>
+                                              {!isClosingFlowBlock && (
+                                                <button
+                                                  type="button"
+                                                  onClick={(e) => { e.stopPropagation(); duplicateBlock(index, listId); }}
+                                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-white/5"
+                                                >
+                                                  <Copy className="w-3.5 h-3.5" />
+                                                  {isFlowBlock ? 'Duplicate block' : 'Duplicate step'}
+                                                </button>
+                                              )}
                                             </div>
                                           </div>
-                                        );
-                                      })()}
-
-                                      {isUserInputBlock && (
-                                        <div className="flex items-center space-x-2 mr-2">
-                                          <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">Save</span>
-                                          <input
-                                            type="text"
-                                            value={block.params?.variable_name ?? ''}
-                                            placeholder="variable"
-                                            title="The answer is stored under this name, for later steps to use as #name"
-                                            onClick={(e) => e.stopPropagation()}
-                                            onChange={(e) => handleParamChange(block.id, 'variable_name', e.target.value, 'str', listId)}
-                                            className="w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
-                                          />
-                                        </div>
-                                      )}
-
-                                      {/* Action Buttons */}
-                                      <div className="flex items-center space-x-1 border-l border-gray-200 dark:border-white/10 pl-3">
-                                        {(!isFlowBlock || isUserInputBlock) && listId === 'canvas' && (
                                           <button
                                             type="button"
-                                            onClick={(e) => { e.stopPropagation(); toggleBatchAction(block.id, listId); }}
-                                            title={block.isBatchAction ? "Batch step: runs once per batch group (set the group size on the Configure page), not once per row. Click to make it per-sample again." : "Per-sample step: repeats once per row when run against a spreadsheet. Click to make it a batch step (runs once per batch group instead)."}
-                                            className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-bold transition-colors ${
-                                              block.isBatchAction
-                                                ? 'bg-teal-50 border-teal-300 text-teal-700 dark:bg-teal-500/20 dark:border-teal-700/40 dark:text-teal-300'
-                                                : 'bg-white border-gray-200 text-gray-500 hover:text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-400 dark:hover:text-gray-200'
-                                            }`}
+                                            onClick={(e) => { e.stopPropagation(); removeBlock(index, listId); }}
+                                            title="Delete this step"
+                                            className="w-6 h-6 inline-flex items-center justify-center rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:text-red-300 dark:hover:bg-red-900/30 transition-colors"
                                           >
-                                            <Layers className="w-3.5 h-3.5" />
-                                            <span>{block.isBatchAction ? 'Batch' : 'Per-Sample'}</span>
+                                            <Trash2 className="w-4 h-4" />
                                           </button>
-                                        )}
-                                        <button onClick={(e) => { e.stopPropagation(); toggleHideBlock(block.id, listId); }} title={block.isHidden ? 'Skip this step on the next run (click to re-enable)' : 'Disable this step without deleting it'} className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
-                                          {block.isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                                        </button>
-                                        {!isClosingFlowBlock && (
-                                          <button
-                                            onClick={(e) => { e.stopPropagation(); duplicateBlock(index, listId); }}
-                                            title={isFlowBlock ? 'Duplicate this block and everything inside it' : 'Duplicate this step with its parameters'}
-                                            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors"
-                                          >
-                                            <Copy className="w-4 h-4" />
-                                          </button>
-                                        )}
-                                        <button onClick={(e) => { e.stopPropagation(); removeBlock(index, listId); }} className="p-1.5 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:text-red-300 dark:hover:bg-red-900/30 transition-colors">
-                                          <Trash2 className="w-4 h-4" />
-                                        </button>
+                                        </div>
                                       </div>
-                                    </div>
-                                  </div>
+                                    );
+                                  })()}
                                   </div>
 
                                   {/* What is wrong with this step is not something to click for.
@@ -1753,7 +1898,7 @@ export default function WorkflowEditor({
                                       leaving a warning triangle whose explanation existed only in
                                       a hover tooltip. */}
                                   {!isFlowBlock && blockWarnings.length > 0 && (
-                                    <div className="px-3 pb-2 pt-0">
+                                    <div className="px-2.5 pb-2 pt-0">
                                       <div className="bg-amber-50/50 dark:bg-amber-900/10 border border-amber-200/50 dark:border-amber-500/20 rounded text-amber-700 dark:text-amber-400 text-[10px] px-2 py-1.5 font-medium">
                                           <ul className="list-disc pl-4 space-y-0.5">
                                               {blockWarnings.map((w, idx) => <li key={idx}>{w}</li>)}
@@ -1766,49 +1911,57 @@ export default function WorkflowEditor({
                                     const typeOptions: string[] = block.schema?.parameters?.input_type?.options?.map(String)
                                       || ['str', 'int', 'float', 'bool'];
                                     const currentType = String(block.params?.input_type || 'str');
+                                    const asks = !!String(block.params?.variable_name || '').trim();
                                     return (
-                                      // Same field boxes as a method's arguments (see renderParam below).
-                                      <div className="px-3 pb-2 pt-0 flex flex-wrap gap-2 items-center">
-                                        <div className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1">
-                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 font-medium whitespace-nowrap">prompt</label>
+                                      // name = value, like a method's arguments (see renderParam below).
+                                      <div className="px-2.5 pb-2 flex flex-wrap gap-x-4 gap-y-1.5 items-center font-mono text-[12px]">
+                                        <span className="inline-flex items-center gap-1 min-w-0">
+                                          <label htmlFor={paramFieldId(listId, block.id, 'prompt')} className="text-gray-600 dark:text-gray-300">prompt</label>
+                                          <span className="text-gray-400 dark:text-gray-500">=</span>
                                           <input
+                                            id={paramFieldId(listId, block.id, 'prompt')}
+                                            autoComplete="off"
                                             type="text"
                                             value={block.params?.prompt ?? ''}
-                                            placeholder="str"
+                                            placeholder="What to ask"
                                             onChange={(e) => handleParamChange(block.id, 'prompt', e.target.value, 'str', listId)}
-                                            className="w-44 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700"
+                                            className="w-64 max-w-full h-6 rounded-md border border-gray-200 bg-white px-1.5 font-mono text-[12px] text-gray-900 focus:outline-none focus:border-accent placeholder:text-gray-300 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:placeholder:text-gray-600"
                                           />
-                                        </div>
-                                        <div className="flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1">
-                                          <label className="text-[10px] text-gray-500 dark:text-gray-400 font-medium whitespace-nowrap">type</label>
+                                        </span>
+                                        {asks ? <span className="inline-flex items-center gap-1">
+                                          <label htmlFor={paramFieldId(listId, block.id, 'input_type')} className="text-gray-600 dark:text-gray-300">type</label>
+                                          <span className="text-gray-400 dark:text-gray-500">=</span>
                                           {/* A select, not a datalist: the choices are fixed, and a datalist filters them by
                                               whatever is already typed -- with "str" chosen it offered only "str". */}
                                           <select
+                                            id={paramFieldId(listId, block.id, 'input_type')}
                                             value={typeOptions.includes(currentType) ? currentType : 'str'}
                                             onChange={(e) => handleParamChange(block.id, 'input_type', e.target.value, 'str', listId)}
-                                            className="w-16 bg-transparent border-l border-gray-200 dark:border-white/10 pl-1.5 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none"
+                                            className="h-6 rounded-md border border-gray-200 bg-white px-1 font-mono text-[12px] text-gray-900 focus:outline-none focus:border-accent dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
                                           >
                                             {typeOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                                           </select>
-                                        </div>
+                                        </span> : (
+                                          <span className="font-sans text-[11px] text-gray-400 dark:text-gray-500">Pauses until someone presses Continue. Name a variable after the arrow to ask for a value.</span>
+                                        )}
                                       </div>
                                     );
                                   })()}
 
                                   {/* Bottom Row: Params */}
                                   {isExpanded && !isFlowBlock && (
-                                    <div className="px-3 pb-2 pt-0 flex flex-col space-y-2">
+                                    <div className="px-2.5 pb-2 flex flex-col gap-2">
                                       {(() => {
                                         if (!hasParams) return null;
                                         return (
-                                        <div className="flex flex-wrap gap-2 items-center">
+                                        <div className="flex flex-wrap gap-x-4 gap-y-1.5 items-center">
                                           {visibleParams.map((param) => {
                                             const renderParam = (pData: any, paramKey: string, paramName: string, bId: string, lId: string, paramsObj: any): React.ReactNode => {
                                                 if (pData.is_object && pData.fields) {
                                                     return (
-                                                        <div key={paramKey} className="flex flex-col space-y-1 shrink-0 p-2 border border-gray-200 dark:border-white/10 rounded-lg bg-white dark:bg-[#1a1a1a]">
-                                                            <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider px-1">{paramName}</span>
-                                                            <div className="flex flex-wrap gap-x-2 gap-y-1.5">
+                                                        <div key={paramKey} className="inline-flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-dashed border-gray-200 px-2 py-1 dark:border-white/10">
+                                                            <span className="font-mono text-[12px] text-gray-500 dark:text-gray-400">{paramName}:</span>
+                                                            <div className="contents">
                                                                 {Object.keys(pData.fields).map(subKey => 
                                                                     renderParam(pData.fields[subKey], `${paramKey}.${subKey}`, subKey, bId, lId, paramsObj)
                                                                 )}
@@ -1823,16 +1976,22 @@ export default function WorkflowEditor({
                                                 const hashInvalid = emptyHashFields.has(hashFieldKey(lId, bId, paramKey));
 
                                                 return (
-                                                    <div key={paramKey} className={`flex items-center space-x-2 shrink-0 bg-white dark:bg-[#1a1a1a] border rounded-md px-2 py-1 ${hashInvalid ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}>
-                                                      <label className="text-[10px] text-gray-500 dark:text-gray-400 capitalize font-medium flex items-center whitespace-nowrap">
-                                                        <span>{paramName.replace(/_/g, ' ')}</span>
-                                                        {pData.required && <span className="text-red-500/80 leading-none ml-0.5">*</span>}
+                                                    // name = value, as the call would be written (the folded card reads the same).
+                                                    <div key={paramKey} className="inline-flex items-center gap-1 font-mono text-[12px]">
+                                                      <label htmlFor={paramFieldId(lId, bId, paramKey)} className="whitespace-nowrap text-gray-600 dark:text-gray-300" title={displayType || undefined}>
+                                                        {paramName}
+                                                        {pData.required && <span className="text-red-500/80 ml-0.5">*</span>}
                                                       </label>
-                                                      <input
+                                                      <span className="text-gray-400 dark:text-gray-500">=</span>
+                                                      <SuggestInput
+                                                        id={paramFieldId(lId, bId, paramKey)}
                                                         type="text"
-                                                        list={(pData.options || availableVars.length > 0) ? `datalist-${bId}-${paramKey}` : undefined}
+                                                        suggestions={[
+                                                          ...(pData.options || []).map((o: any) => String(o)),
+                                                          ...availableVars.map((v: string) => ({ value: `#${v}`, label: 'earlier step' })),
+                                                        ]}
                                                         value={actualVal}
-                                                        placeholder={pData.default !== undefined ? `Default: ${pData.default}` : displayType}
+                                                        placeholder={pData.default !== undefined ? String(pData.default) : displayType}
                                                         onChange={(e) => {
                                                           handleParamChange(bId, paramKey, e.target.value, pData.type || '', lId);
                                                           clearHashWarning(lId, bId, paramKey);
@@ -1843,22 +2002,12 @@ export default function WorkflowEditor({
                                                           }
                                                           handleHashBlur(lId, bId, paramKey, e.target.value);
                                                         }}
-                                                        className={`w-28 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700`}
+                                                        className={`w-28 h-6 rounded-md border bg-white px-1.5 font-mono text-[12px] focus:outline-none focus:border-accent dark:bg-white/5 placeholder:text-gray-300 dark:placeholder:text-gray-600 ${typeof actualVal === 'string' && actualVal.startsWith('#') ? 'font-semibold text-gray-900 bg-gray-50 dark:text-white dark:bg-white/10' : 'text-gray-900 dark:text-gray-100'} ${hashInvalid ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}
                                                       />
                                                       {hashInvalid && (
                                                         <span title="Add a variable name after '#'" className="cursor-help shrink-0">
                                                           <AlertTriangle className="w-3 h-3 text-red-500" />
                                                         </span>
-                                                      )}
-                                                      {(pData.options || availableVars.length > 0) && (
-                                                        <datalist id={`datalist-${bId}-${paramKey}`}>
-                                                          {(pData.options || []).map((opt: any) => (
-                                                            <option key={`opt-${String(opt)}`} value={String(opt)} />
-                                                          ))}
-                                                          {availableVars.map((v: string) => (
-                                                            <option key={`var-${v}`} value={`#${v}`} label={`variable from an earlier step`} />
-                                                          ))}
-                                                        </datalist>
                                                       )}
                                                     </div>
                                                 );
@@ -1917,7 +2066,7 @@ export default function WorkflowEditor({
                                                   {leaf.numeric ? (
                                                     <span
                                                       title="A number — this one can be used as an optimization objective."
-                                                      className="ml-1 px-1 rounded bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-400 text-[9px] font-bold uppercase cursor-help"
+                                                      className="ml-1 px-1 rounded bg-gray-100 dark:bg-white/10 text-gray-900 dark:text-white dark:bg-white/10 dark:text-white text-[9px] font-bold uppercase cursor-help"
                                                     >
                                                       {leaf.type}
                                                     </span>
@@ -1932,10 +2081,10 @@ export default function WorkflowEditor({
                                                 </label>
                                                 <input
                                                   type="text"
-                                                  value={getBoundVar(block, leaf, returnLeaves)}
-                                                  placeholder="variable name"
+                                                  value={shownVar(leaf, returnLeaves)}
+                                                  placeholder={isLibraryBlock ? leaf.path : 'variable name'}
                                                   onClick={(e) => e.stopPropagation()}
-                                                  onChange={(e) => handleReturnBindingChange(block.id, returnLeaves, leaf.path, e.target.value, listId)}
+                                                  onChange={(e) => changeSave(returnLeaves, leaf.path, e.target.value)}
                                                   className="w-28 bg-transparent border-l border-gray-200 dark:border-white/10 pl-2 text-gray-800 dark:text-gray-100 text-[11px] focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700"
                                                 />
                                               </div>
@@ -1962,179 +2111,220 @@ export default function WorkflowEditor({
 
   return (
     <DragDropContext onDragEnd={onDragEnd}>
-      <div className="flex-1 flex overflow-hidden">
-        
-        {/* Left Sidebar (Toolbox) */}
+      {/* The header (the workflow's name and its actions) spans the editor, toolbox included, as
+          on Cloud's Orchestrator: it is about the whole document, not the canvas column. */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+      {header}
+      <div className="flex-1 flex overflow-hidden min-h-0">
+
+        {/* Left Sidebar (Toolbox). The same palette as Cloud's Orchestrator (shared-ui Toolbox.tsx):
+            Logic, this deck's saved workflows, then its instruments' methods, each entry one chip. */}
         <div className={`w-72 bg-white dark:bg-[#1a1a1a] flex-col border-r border-gray-200 dark:border-white/10 shrink-0 z-10 ${hideToolbox ? 'hidden' : 'flex'}`}>
-          <div className="h-16 px-4 flex items-center gap-2 border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-black/10 shrink-0">
+          <div className="px-4 pt-4 pb-2 shrink-0 flex items-center gap-2">
              <div className="relative flex-1">
                 <input
                   type="text"
-                  placeholder="Search modules..."
+                  placeholder="Search steps..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 transition-colors shadow-sm"
+                  className="w-full bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:border-accent transition-colors"
                 />
-                <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-gray-400" />
              </div>
-             <button
-                onClick={toggleAutoFillVariables}
-                title={autoFillVariables ? "Auto-fill is ON — new blocks default every param to #paramName, for Optimization. Click to turn off." : "Auto-fill is OFF. Click to make new blocks default every param to #paramName, for Optimization."}
-                className={`shrink-0 flex items-center gap-1 pl-1.5 pr-2 py-2 rounded-lg border text-[11px] font-bold transition-colors ${autoFillVariables
-                  ? 'bg-purple-50 border-purple-200 text-purple-600 dark:bg-purple-500/10 dark:border-purple-500/30 dark:text-purple-400'
-                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-600 dark:bg-white/5 dark:border-white/10 dark:hover:text-gray-300'}`}
-             >
-                <Hash className="w-3.5 h-3.5" />
-                <span>Auto</span>
-             </button>
+             <AutoFillToggle on={autoFillVariables} onToggle={toggleAutoFillVariables} />
           </div>
 
-          <div className="flex-1 overflow-y-auto p-3 space-y-0.5">
-            <Droppable 
-              droppableId="toolbox" 
-              isDropDisabled={true}
-            >
-              {(provided) => (
-                <div ref={provided.innerRef} {...provided.droppableProps} className="space-y-1">
-                  {Object.keys(instruments)
-                    .sort((a, b) => {
-                       const aIsFC = a === 'Flow Control' || a === 'Flow_Control';
-                       const bIsFC = b === 'Flow Control' || b === 'Flow_Control';
-                       if (aIsFC) return -1;
-                       if (bIsFC) return 1;
-                       const aIsLib = a === 'Library Workflows';
-                       const bIsLib = b === 'Library Workflows';
-                       if (aIsLib) return 1;
-                       if (bIsLib) return -1;
-                       return a.localeCompare(b);
-                    })
-                    .map((instrument) => {
-                    const matchesInst = instrument.toLowerCase().includes(searchQuery.toLowerCase());
-                    const isLibraryGroup = instrument === LIBRARY_INSTRUMENT;
-                    const matchingMethods = Object.keys(instruments[instrument]).filter(method =>
-                        (matchesInst || method.toLowerCase().includes(searchQuery.toLowerCase()))
-                        // Never offer the open workflow to itself: `math` inside `math` is a cycle,
-                        // which save_workflow rejects, so listing it only leads somewhere invalid.
-                        && !(isLibraryGroup && currentWorkflowName && method === currentWorkflowName)
-                    );
-                    
-                    if (searchQuery && matchingMethods.length === 0) return null;
+          <div className="flex-1 overflow-y-auto p-4 pt-2">
+            <Droppable droppableId="toolbox" isDropDisabled={true}>
+              {(provided) => {
+                // One running index for the whole palette: it is a single Droppable, and indexes
+                // restarting per instrument made several entries claim the same position.
+                let index = 0;
+                const q = searchQuery.trim().toLowerCase();
+                const hit = (...texts: string[]) => !q || texts.some(t => t.toLowerCase().includes(q));
+                // While searching, every group is open: a match folded out of sight is no match.
+                const isFolded = (key: string) => !q && !!foldedToolbox[key];
+                const chip = (instrument: string, method: string, look: { icon: React.ComponentType<{ className?: string }>; accent: string; label: string }, title: string) => (
+                  <Draggable key={`${instrument}::${method}`} draggableId={`${instrument}::${method}`} index={index++}>
+                    {(p, snapshot) => (
+                      <>
+                        <ToolChip
+                          ref={p.innerRef}
+                          {...p.draggableProps}
+                          {...p.dragHandleProps}
+                          style={p.draggableProps.style}
+                          icon={look.icon}
+                          accent={look.accent}
+                          label={look.label}
+                          title={title}
+                          dragging={snapshot.isDragging}
+                        />
+                        {/* Left in place while the chip is dragged out, so the list does not close up under the pointer. */}
+                        {snapshot.isDragging && <ToolChip ghost icon={look.icon} accent={look.accent} label={look.label} />}
+                      </>
+                    )}
+                  </Draggable>
+                );
 
-                    const isExpanded = searchQuery ? true : expandedToolbox[instrument];
-                    const isFlowControl = instrument === 'Flow Control' || instrument === 'Flow_Control';
-                    const isLibrary = instrument === 'Library Workflows';
-                    const isBuiltin = isFlowControl || isLibrary;
+                const flowKey = FLOW_CONTROL_INSTRUMENTS.find(k => instruments[k]);
+                const logicOrder = Object.keys(LOGIC_TOOLS);
+                const logic = flowKey
+                  ? Object.keys(instruments[flowKey])
+                      .filter(m => hit(m, LOGIC_TOOLS[m]?.label || m, 'logic'))
+                      .sort((a, b) => (logicOrder.indexOf(a) + 1 || 99) - (logicOrder.indexOf(b) + 1 || 99))
+                  : [];
 
-                    let nameClass = "text-[13px] font-semibold capitalize truncate ";
-                    if (isFlowControl) nameClass += "text-sky-700 dark:text-sky-400";
-                    else if (isLibrary) nameClass += "text-emerald-700 dark:text-emerald-400";
-                    else nameClass += "text-gray-700 dark:text-gray-200";
+                const library: Record<string, any> = instruments[LIBRARY_INSTRUMENT] || {};
+                // Never offer the open workflow to itself: `math` inside `math` is a cycle, which
+                // save_workflow rejects, so listing it only leads somewhere invalid.
+                const workflowNames = Object.keys(library)
+                  .filter(name => !(currentWorkflowName && name === currentWorkflowName))
+                  .filter(name => hit(name, 'workflow'));
+                // A workflow the deck says no longer runs is folded away, as on Cloud: dragging it
+                // only builds a step that will be refused, but it should be explainable, not gone.
+                const runnable = workflowNames.filter(name => library[name]?.compatibility?.status !== 'broken');
+                const broken = workflowNames.filter(name => library[name]?.compatibility?.status === 'broken');
 
-                    return (
-                      <div key={instrument} className="flex flex-col">
-                        <button onClick={() => toggleToolbox(instrument)} className="w-full flex items-center justify-between px-2 py-2 rounded-lg transition-colors hover:bg-gray-100 dark:hover:bg-white/5">
-                          <div className="flex items-center space-x-2 min-w-0">
-                             <span className={nameClass}>{instrument.replace(/_/g, ' ')}</span>
-                             {isBuiltin ? (
-                               <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isFlowControl ? 'text-sky-400 dark:text-sky-500' : 'text-emerald-400 dark:text-emerald-500'}`}>Built-in</span>
-                             ) : (
-                               <span className="text-[10px] text-gray-400 dark:text-gray-500 font-medium shrink-0">{Object.keys(instruments[instrument]).length}</span>
-                             )}
+                const instrumentNames = Object.keys(instruments)
+                  .filter(k => k !== LIBRARY_INSTRUMENT && !FLOW_CONTROL_INSTRUMENTS.includes(k))
+                  .sort((a, b) => a.localeCompare(b));
+                const methodsOf = (inst: string) => Object.keys(instruments[inst] || {})
+                  .filter(m => hit(inst, m, m.replace(/_/g, ' ')));
+                const shownInstruments = instrumentNames.filter(inst => methodsOf(inst).length > 0);
+                const methodTotal = instrumentNames.reduce((n, inst) => n + Object.keys(instruments[inst] || {}).length, 0);
+
+                return (
+                  <div ref={provided.innerRef} {...provided.droppableProps} className="space-y-4">
+                    {logic.length > 0 && (
+                      <div>
+                        <ToolboxGroupHeader collapsed={isFolded('logic')} onToggle={() => toggleFold('logic')} title="Built-in steps: waits, prompts, branches and loops">
+                          <ToolboxGroupTitle>Logic</ToolboxGroupTitle>
+                        </ToolboxGroupHeader>
+                        {!isFolded('logic') && (
+                          <div className="space-y-1 mt-1">
+                            {logic.map(m => chip(flowKey!, m,
+                              LOGIC_TOOLS[m] || { icon: Settings2, accent: 'text-gray-400', label: m.replace(/_/g, ' ') },
+                              instruments[flowKey!][m]?.description || m))}
                           </div>
-                          {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-gray-400 shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
-                        </button>
+                        )}
+                      </div>
+                    )}
 
-                        {isExpanded && (
-                          <div className="ml-2 pl-2 border-l border-gray-100 dark:border-white/5 mt-0.5 mb-2 space-y-0.5">
+                    {(LIBRARY_INSTRUMENT in instruments) && (!q || workflowNames.length > 0) && (
+                      <div>
+                        <ToolboxGroupHeader collapsed={isFolded('workflows')} onToggle={() => toggleFold('workflows')} title="Saved workflows, to reuse as one step">
+                          <ToolboxGroupTitle>Workflows</ToolboxGroupTitle>
+                          <span className="ml-auto text-[10px] text-gray-400 shrink-0">{runnable.length}</span>
+                        </ToolboxGroupHeader>
+                        {!isFolded('workflows') && (
+                          <div className="space-y-1 mt-1">
                             {/* How a dragged workflow is brought in. Link is the default: reuse
                                 should keep the saved workflow as one thing, so an edit to it
                                 reaches everywhere. Copy is the deliberate choice to fork, with
                                 the consequence spelled out rather than left implicit. */}
-                            {isLibrary && (
-                              <div className="px-1.5 py-1.5 mb-1">
-                                <div className="flex rounded-md border border-gray-200 dark:border-white/10 overflow-hidden">
-                                  {(['copy', 'link'] as ReuseMode[]).map(mode => (
-                                    <button
-                                      key={mode}
-                                      type="button"
-                                      onClick={() => { if (reuseMode !== mode) toggleReuseMode(); }}
-                                      title={mode === 'copy'
-                                        ? 'Copy: the workflow\'s steps are inlined here and become yours to edit. Later changes to the saved workflow do not affect this one.'
-                                        : 'Link: keeps one reference that resolves when the run starts. Editing the saved workflow WILL change this workflow too.'}
-                                      className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
-                                        reuseMode === mode
-                                          ? (mode === 'copy'
-                                              ? 'bg-gray-100 text-gray-700 dark:bg-white/10 dark:text-gray-200'
-                                              : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300')
-                                          : 'bg-transparent text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
-                                      }`}
-                                    >
-                                      {mode === 'copy' ? <Copy className="w-3 h-3" /> : <Link2 className="w-3 h-3" />}
-                                      {mode}
-                                    </button>
-                                  ))}
-                                </div>
-                                <p className="text-[9px] leading-tight text-gray-400 dark:text-gray-500 mt-1 px-0.5">
-                                  {reuseMode === 'copy'
-                                    ? 'Steps are inlined and editable. The original is left alone.'
-                                    : 'Stays a reference — editing the original changes this workflow too.'}
-                                </p>
+                            <div className="pb-1">
+                              <div className="flex rounded-md border border-gray-200 dark:border-white/10 overflow-hidden">
+                                {(['copy', 'link'] as ReuseMode[]).map(mode => (
+                                  <button
+                                    key={mode}
+                                    type="button"
+                                    onClick={() => { if (reuseMode !== mode) toggleReuseMode(); }}
+                                    title={mode === 'copy'
+                                      ? 'Copy: the workflow\'s steps are inlined here and become yours to edit. Later changes to the saved workflow do not affect this one.'
+                                      : 'Link: keeps one reference that resolves when the run starts. Editing the saved workflow WILL change this workflow too.'}
+                                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+                                      reuseMode === mode
+                                        ? (mode === 'copy'
+                                            ? 'bg-gray-100 text-gray-700 dark:bg-white/10 dark:text-gray-200'
+                                            : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300')
+                                        : 'bg-transparent text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
+                                    }`}
+                                  >
+                                    {mode === 'copy' ? <Copy className="w-3 h-3" /> : <Link2 className="w-3 h-3" />}
+                                    {mode}
+                                  </button>
+                                ))}
+                              </div>
+                              <p className="text-[10px] leading-tight text-gray-400 dark:text-gray-500 mt-1 px-0.5">
+                                {reuseMode === 'copy'
+                                  ? 'Steps are inlined and editable. The original is left alone.'
+                                  : 'Stays a reference — editing the original changes this workflow too.'}
+                              </p>
+                            </div>
+                            {runnable.map(name => chip(LIBRARY_INSTRUMENT, name,
+                              { icon: WorkflowIcon, accent: 'text-gray-700 dark:text-gray-200', label: name },
+                              library[name]?.description || name))}
+                            {workflowNames.length === 0 && (
+                              <p className="text-[11px] text-gray-400 dark:text-gray-500 italic px-1 py-1">No saved workflows yet</p>
+                            )}
+                            {broken.length > 0 && (
+                              <div>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleToolbox('broken-workflows')}
+                                  className="flex items-center gap-1.5 px-1 py-0.5 text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                                  title="Saved workflows that will not run against this deck's current instruments"
+                                >
+                                  <EyeOff className="w-3 h-3" />
+                                  {broken.length} hidden · won&apos;t run on this deck
+                                </button>
+                                {expandedToolbox['broken-workflows'] && (
+                                  <div className="mt-1 space-y-1">
+                                    {broken.map(name => {
+                                      const c = library[name]?.compatibility;
+                                      return (
+                                        <div
+                                          key={`broken-${name}`}
+                                          title={(c?.errors || []).map((er: any) => `${er.where ? `${er.where}: ` : ''}${er.message}`).join('\n') || 'Does not run on this deck'}
+                                          className="flex items-center gap-2 rounded-lg border border-dashed px-2.5 py-1.5 text-xs cursor-not-allowed border-red-300 text-red-500 dark:border-red-500/40 dark:text-red-400"
+                                        >
+                                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                          <span className="min-w-0 flex-1 truncate">{name}</span>
+                                          <span className="shrink-0 text-[10px]">{c?.error_count || ''} {c?.error_count === 1 ? 'problem' : 'problems'}</span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
                               </div>
                             )}
-                            {matchingMethods.length === 0 && (
-                              <p className="text-[11px] text-gray-400 dark:text-gray-500 italic px-2 py-1.5">
-                                {isLibrary ? 'No saved workflows yet' : 'No modules'}
-                              </p>
-                            )}
-                            {matchingMethods.map((method, idx) => (
-                              <Draggable key={`${instrument}::${method}`} draggableId={`${instrument}::${method}`} index={idx}>
-                              {(provided, snapshot) => (
-                                <React.Fragment>
-                                  <div
-                                    ref={provided.innerRef}
-                                    {...provided.draggableProps}
-                                    {...provided.dragHandleProps}
-                                    className={`group/item pl-1.5 pr-2 py-1.5 rounded-md transition-all flex items-center gap-1.5 cursor-grab active:cursor-grabbing ${snapshot.isDragging ? 'bg-white dark:bg-[#1a1a1a] shadow-xl ring-2 ring-blue-500/20' : 'bg-transparent hover:bg-gray-50 dark:hover:bg-white/5'}`}
-                                    style={provided.draggableProps.style}
-                                  >
-                                    <GripVertical className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0 opacity-0 group-hover/item:opacity-100 transition-opacity" />
-                                    <div className="flex items-center justify-between w-full min-w-0 relative">
-                                      <span title={isLibrary ? method : method.replace(/_/g, ' ')} className={`font-medium text-gray-700 dark:text-gray-300 text-[13px] truncate ${isLibrary ? '' : 'capitalize'}`}>{isLibrary ? method : method.replace(/_/g, ' ')}</span>
-                                      {instruments[instrument][method]?.description && (
-                                        <div className="relative group/tooltip flex items-center shrink-0 ml-2">
-                                          <Info className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 transition-colors cursor-help" />
-                                          <div className="absolute right-0 top-full mt-2 w-[260px] p-2.5 bg-gray-900 dark:bg-gray-800 text-gray-100 text-xs rounded-lg shadow-xl opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-50 pointer-events-none whitespace-normal border border-gray-700">
-                                            {instruments[instrument][method].description}
-                                          </div>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                  {snapshot.isDragging && (
-                                    <div className="pl-1.5 pr-2 py-1.5 rounded-md flex items-center gap-1.5 opacity-50 grayscale pointer-events-none select-none">
-                                      <GripVertical className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0" />
-                                      <div className="flex items-center justify-between w-full min-w-0">
-                                        <span title={isLibrary ? method : method.replace(/_/g, ' ')} className="font-medium text-gray-700 dark:text-gray-300 text-[13px] truncate">{isLibrary ? method : method.replace(/_/g, ' ')}</span>
-                                        {instruments[instrument][method]?.description && (
-                                          <div className="shrink-0 ml-2">
-                                            <Info className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600" />
-                                          </div>
-                                        )}
-                                      </div>
-                                    </div>
-                                  )}
-                                </React.Fragment>
-                              )}
-                              </Draggable>
-                            ))}
                           </div>
                         )}
                       </div>
-                    );
-                  })}
-                  <div className="hidden">{provided.placeholder}</div>
-                </div>
-              )}
+                    )}
+
+                    {shownInstruments.length > 0 && (
+                      <div>
+                        <ToolboxGroupHeader collapsed={isFolded('instruments')} onToggle={() => toggleFold('instruments')} title="Each instrument's methods, as single steps">
+                          <ToolboxGroupTitle>Instruments</ToolboxGroupTitle>
+                          <span className="ml-auto text-[10px] text-gray-400 shrink-0">{methodTotal}</span>
+                        </ToolboxGroupHeader>
+                        {!isFolded('instruments') && (
+                          <div className="mt-1 space-y-2">
+                            {shownInstruments.map(inst => {
+                              const methods = methodsOf(inst);
+                              const folded = isFolded(`inst:${inst}`);
+                              return (
+                                <div key={inst} className="space-y-1">
+                                  <ToolboxInstrumentHeader name={inst} count={methods.length} collapsed={folded} onToggle={() => toggleFold(`inst:${inst}`)} />
+                                  {!folded && methods.map(m => chip(inst, m,
+                                    { icon: Wrench, accent: 'text-gray-400', label: m.replace(/_/g, ' ') },
+                                    instruments[inst][m]?.description || `${inst}.${m}`))}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {q && logic.length === 0 && workflowNames.length === 0 && shownInstruments.length === 0 && (
+                      <p className="px-1 text-xs text-gray-400 dark:text-gray-500">Nothing matches &ldquo;{searchQuery}&rdquo;.</p>
+                    )}
+                    <div className="hidden">{provided.placeholder}</div>
+                  </div>
+                );
+              }}
             </Droppable>
           </div>
           {toolboxFooter && (
@@ -2146,29 +2336,17 @@ export default function WorkflowEditor({
 
         {/* Sequence Canvas (Center) and Right Sidebar */}
         <div className="flex-1 flex flex-col bg-gray-50 dark:bg-[#0a0a0a] relative min-w-0">
-          {header}
-          
           <div className="flex-1 flex overflow-hidden relative min-w-0">
             {customView ? (
               customView
             ) : (
               <div className="flex-1 overflow-y-auto p-4 md:p-8 relative">
                 <div className="max-w-5xl mx-auto w-full relative min-h-[85vh]">
-                  {/* Select sits hard left, lining up with the checkbox column it turns on; the
-                      whole-list view toggles stay right. The strip spans the full width only to
-                      place them, so it lets clicks through to the list beneath it. */}
+                  {/* Select sits hard left, lining up with the checkbox column it turns on. There is
+                      no expand/collapse-all: every step shows its whole call on one line, and one
+                      step at a time opens to be edited. The strip lets clicks through to the list. */}
                   <div className="absolute -top-4 left-0 right-0 flex items-center space-x-3 z-10 pointer-events-none [&>*]:pointer-events-auto">
                      {renderSelectToggle('canvas')}
-                     <div className="flex-1" />
-                     <button onClick={expandAll} className="flex items-center space-x-1.5 text-[11px] font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors uppercase tracking-wide" title="Expand All Cards">
-                         <ChevronsUpDown className="w-3.5 h-3.5" />
-                         <span>Expand All</span>
-                     </button>
-                     <div className="w-px h-3 bg-gray-200 dark:bg-white/10"></div>
-                     <button onClick={collapseAll} className="flex items-center space-x-1.5 text-[11px] font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors uppercase tracking-wide" title="Collapse All Cards">
-                         <ChevronsDownUp className="w-3.5 h-3.5" />
-                         <span>Collapse All</span>
-                     </button>
                   </div>
                   {renderSequenceList('canvas', 'Main Workflow', sequence)}
                 </div>
@@ -2204,6 +2382,7 @@ export default function WorkflowEditor({
             </div>
           </div>
         </div>
+      </div>
       </div>
 
       <WorkflowDiff

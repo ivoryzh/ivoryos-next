@@ -148,9 +148,83 @@ class OpenAICompatibleProvider(Provider):
         return (choices[0].get("message") or {}).get("content", "")
 
 
+class AnthropicProvider(Provider):
+    """Claude, through Anthropic's own SDK (`pip install 'ivoryos-edge[claude]'`).
+
+    Not through the OpenAI-compatible entry: the Messages API has its own shape, and the SDK
+    carries the credential resolution (an `ANTHROPIC_API_KEY`, or an `ant auth login` profile)
+    and the retry behaviour. The key is optional here for that reason: with none saved, the SDK
+    looks in the environment. Thinking is left at the model's own adaptive default, and the
+    server-side refusal fallback is on, so a declined request is re-run on a fallback model
+    inside the same call rather than failing the turn.
+    """
+
+    name = "anthropic"
+    needs_api_key = False
+    default_base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    default_model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+
+    def _client(self):
+        try:
+            import anthropic
+        except ImportError:
+            raise ProviderError(
+                "The Claude provider needs Anthropic's SDK. Install it with "
+                "`pip install 'ivoryos-edge[claude]'` (or `pip install anthropic`) and restart the edge."
+            )
+        kwargs = {"timeout": self.timeout, "max_retries": 2}
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.base_url and self.base_url != "https://api.anthropic.com":
+            kwargs["base_url"] = self.base_url
+        return anthropic, anthropic.AsyncAnthropic(**kwargs)
+
+    @staticmethod
+    def _explain(anthropic, e):
+        if isinstance(e, anthropic.AuthenticationError):
+            return ProviderError("Anthropic rejected the API key. Save one in the assistant's settings, or set ANTHROPIC_API_KEY.")
+        if isinstance(e, anthropic.NotFoundError):
+            return ProviderError(f"Anthropic has no model called '{e.body.get('error', {}).get('message', '') if isinstance(e.body, dict) else ''}'.".replace("called ''", "with that id"))
+        if isinstance(e, anthropic.RateLimitError):
+            return ProviderError("Anthropic rate-limited the request. Try again in a moment.")
+        if isinstance(e, anthropic.APIConnectionError):
+            return ProviderError(f"Could not reach Anthropic: {e}")
+        if isinstance(e, anthropic.APIStatusError):
+            return ProviderError(f"Anthropic returned {e.status_code}: {str(e.message)[:200]}")
+        return ProviderError(f"The model call failed: {e}")
+
+    async def list_models(self):
+        anthropic, client = self._client()
+        try:
+            return [m.id async for m in client.models.list()]
+        except Exception as e:
+            raise self._explain(anthropic, e)
+
+    async def complete(self, system, messages, json_mode=False):
+        anthropic, client = self._client()
+        # No JSON mode on this API: the system prompt already asks for one JSON object and
+        # chat.py recovers it from any wrapping. Prefill is not available on current models.
+        try:
+            response = await client.beta.messages.create(
+                model=self.model,
+                max_tokens=16000,
+                system=system or anthropic.NOT_GIVEN,
+                messages=messages,
+                betas=["server-side-fallback-2026-07-01"],
+                fallbacks="default",
+            )
+        except Exception as e:
+            raise self._explain(anthropic, e)
+        if response.stop_reason == "refusal":
+            detail = getattr(response.stop_details, "explanation", None) if response.stop_details else None
+            raise ProviderError(f"The model declined this request{f': {detail}' if detail else '.'}")
+        return "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+
+
 PROVIDERS = {
     OllamaProvider.name: OllamaProvider,
     OpenAICompatibleProvider.name: OpenAICompatibleProvider,
+    AnthropicProvider.name: AnthropicProvider,
 }
 
 

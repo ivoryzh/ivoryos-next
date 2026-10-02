@@ -102,7 +102,7 @@ export function ResultView({ value, className = '' }: { value: unknown; classNam
         type="button"
         onClick={() => setRaw(r => !r)}
         title={raw ? 'Show the formatted view' : 'Show the raw JSON the driver returned'}
-        className="absolute right-0 -top-4 text-[9px] uppercase tracking-wider font-bold text-gray-300 dark:text-gray-600 hover:text-indigo-500 dark:hover:text-indigo-400 opacity-0 group-hover/result:opacity-100 focus:opacity-100 transition-opacity"
+        className="absolute right-0 -top-4 text-[9px] uppercase tracking-wider font-bold text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-gray-200 dark:hover:text-white opacity-0 group-hover/result:opacity-100 focus:opacity-100 transition-opacity"
       >
         {raw ? 'formatted' : 'raw'}
       </button>

@@ -10,7 +10,7 @@ import {
   ChevronDown, ChevronUp, ChevronRight, PanelRightOpen, Hourglass, MessageSquareText,
   GitBranch, AlertTriangle, AlertCircle, CheckCircle2, LayoutGrid, X, EyeOff, GripVertical, Workflow, Wrench,
 } from 'lucide-react';
-import { LIBRARY_INSTRUMENT, issuesLabel } from '@ivoryos/shared-ui';
+import { LIBRARY_INSTRUMENT, issuesLabel, SuggestInput, LOGIC_TOOLS, ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, AutoFillToggle } from '@ivoryos/shared-ui';
 import {
   CLOUD_LOGIC as CLOUD_LOGIC_SCHEMAS, IF_OPERATORS, isCloudLogicNode, isDeviceNode, isStartNode, blankParamsOf,
   logicProblemsOf, buildGraph,
@@ -42,11 +42,8 @@ interface CloudWorkflowEditorProps {
 const FLOW_CONTROL = 'Flow Control';
 // Indexed by a method name read off a node, so typed loosely.
 const CLOUD_LOGIC: Record<string, any> = CLOUD_LOGIC_SCHEMAS;
-const LOGIC_META: Record<string, { label: string; icon: React.ComponentType<any>; accent: string }> = {
-  Wait: { label: 'Wait', icon: Hourglass, accent: 'text-sky-500' },
-  User_Input: { label: 'User input', icon: MessageSquareText, accent: 'text-amber-500' },
-  If: { label: 'If / else', icon: GitBranch, accent: 'text-violet-500' },
-};
+// How each Logic step looks, shared with the edge Designer's toolbox (shared-ui Toolbox.tsx).
+const LOGIC_META = LOGIC_TOOLS;
 
 /** What a person calls a step, for warnings and toasts (never its generated id). */
 function labelOf(node: Node | undefined): string {
@@ -117,33 +114,20 @@ function useNow(active: boolean) {
 }
 
 /**
- * One draggable entry in the toolbox. Logic steps, a device's workflows and its instrument methods
- * all use it, so the palette reads as one list of things you can drop, told apart by icon colour
- * rather than by three unrelated box styles. What an entry does is in its tooltip, not on the card.
+ * One draggable entry in the toolbox: the shared chip (shared-ui Toolbox.tsx), so this palette and
+ * the edge Designer's read the same. Dragged with HTML5 drag-and-drop onto the canvas.
  */
-const ToolItem = ({ icon: Icon, accent, label, title, onDragStart, trailing }: {
+const ToolItem = ({ onDragStart, ...chip }: {
   icon: React.ComponentType<any>;
   accent: string;
   label: string;
   title?: string;
   onDragStart: (e: React.DragEvent) => void;
   trailing?: React.ReactNode;
-}) => (
-  <div
-    draggable
-    onDragStart={onDragStart}
-    title={title}
-    className="group flex items-center gap-2 rounded-lg border px-2.5 py-1.5 cursor-grab active:cursor-grabbing transition-colors border-gray-300 bg-white shadow-sm hover:border-gray-400 hover:bg-gray-50 dark:shadow-none dark:border-white/10 dark:bg-white/[0.03] dark:hover:border-white/20 dark:hover:bg-white/[0.07]"
-  >
-    <Icon className={`w-3.5 h-3.5 shrink-0 ${accent}`} />
-    <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-700 dark:text-gray-200">{label}</span>
-    {trailing}
-    <GripVertical className="w-3.5 h-3.5 shrink-0 text-gray-300 opacity-0 group-hover:opacity-100 dark:text-gray-600" />
-  </div>
-);
+}) => <ToolChip draggable onDragStart={onDragStart} {...chip} />;
 
 const fieldLabel = 'text-[11px] font-mono text-gray-500 dark:text-gray-400';
-const smallInput = 'nodrag nowheel w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-blue-500 text-gray-800 dark:text-white';
+const smallInput = 'nodrag nowheel w-full bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-accent text-gray-800 dark:text-white';
 
 /** A Cloud Logic node's settings. */
 const LogicFields = ({ block, onParam, variables }: { block: any; onParam: (k: string, v: any) => void; variables: string[] }) => {
@@ -171,15 +155,13 @@ const LogicFields = ({ block, onParam, variables }: { block: any; onParam: (k: s
     );
   }
   if (block.method === 'If') {
-    const listId = `vars-${block.id}`;
     return (
       <div className="flex flex-col gap-1.5">
         <span className={fieldLabel}>continue down <span className="text-emerald-600 dark:text-emerald-400">true</span> when</span>
-        <input
-          type="text" list={listId} value={p('variable')} placeholder="variable, e.g. yield_percent"
+        <SuggestInput
+          type="text" suggestions={variables} value={p('variable')} placeholder="variable, e.g. yield_percent"
           onChange={e => onParam('variable', e.target.value)} className={smallInput}
         />
-        <datalist id={listId}>{variables.map(v => <option key={v} value={v} />)}</datalist>
         <div className="flex gap-1.5">
           <select value={p('operator')} onChange={e => onParam('operator', e.target.value)} className="nodrag nowheel w-24 text-xs">
             {IF_OPERATORS.map((op: string) => <option key={op} value={op}>{op}</option>)}
@@ -281,7 +263,7 @@ const LogicStatus = ({ block, taskStatus }: { block: any; taskStatus: any }) => 
   );
 };
 
-const CustomCloudNode = ({ data, id }: any) => {
+const CustomCloudNode = ({ data, id, selected }: any) => {
   const { block, updateNodeData, cloudDevices, targetDeviceId, taskStatus, isInvalid } = data;
   const live = useContext(LiveSchema);
   const canvas = useContext(CanvasContext);
@@ -304,8 +286,11 @@ const CustomCloudNode = ({ data, id }: any) => {
   // A device stopped on a failed step, waiting for retry / skip / stop (see taskCommands.js).
   const stoppedOnError = status === 'running' && String(taskStatus?.progress?.pause || '').startsWith('error:');
   const recoveredFrom = status === 'completed' ? issuesLabel(taskStatus?.progress?.issues) : '';
-  let borderClass = 'border-blue-500';
+  // At rest a node is a quiet card; its border is for status (running, done, failed, unassigned).
+  // Selected (where a dropped step connects), it takes the accent until a status replaces it.
+  let borderClass = 'border-gray-300 dark:border-white/20';
   if (isLogic) borderClass = 'border-slate-400 dark:border-slate-500';
+  if (selected) borderClass = 'border-accent ring-4 ring-accent-ring';
   // A steady ring, not a pulse: the card holds a text box someone is about to type into.
   if (status === 'running') borderClass = stoppedOnError
     ? 'border-red-500 ring-4 ring-red-400/30 shadow-[0_0_18px_rgba(239,68,68,0.7)]'
@@ -359,7 +344,7 @@ const CustomCloudNode = ({ data, id }: any) => {
       className={`relative bg-white dark:bg-[#1a1a1a] rounded-xl p-0 shadow-md ${borderClass} ${isStart ? 'min-w-[150px]' : isLogic ? 'w-[230px]' : 'min-w-[250px]'}`}
       style={{ borderStyle: status === 'skipped' ? 'dashed' : 'solid', borderWidth: '2px' }}
     >
-      {!isStart && <Handle type="target" position={Position.Top} className="bg-blue-500" />}
+      {!isStart && <Handle type="target" position={Position.Top} className="bg-accent" />}
       <div
         className="glass-header px-3 py-2 flex flex-col justify-between"
         style={{
@@ -379,7 +364,10 @@ const CustomCloudNode = ({ data, id }: any) => {
                 {Meta && <Meta.icon className={`w-4 h-4 mt-0.5 shrink-0 ${Meta.accent}`} />}
                 <div className="min-w-0">
                   {!isLogic && (
-                    <div className="text-xs font-bold text-blue-400 uppercase tracking-wider truncate">{isLink ? 'Sequence' : block.instrument}</div>
+                    // "SEQUENCE" is a kind label; an instrument name is a name, kept as written.
+                    isLink
+                      ? <div className="text-xs font-bold text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">Sequence</div>
+                      : <div className="text-xs font-semibold text-gray-500 dark:text-gray-300 truncate">{block.instrument}</div>
                   )}
                   <div className="text-sm font-semibold">{isLogic ? Meta!.label : block.method.replace(/_/g, ' ')}</div>
                 </div>
@@ -392,7 +380,7 @@ const CustomCloudNode = ({ data, id }: any) => {
                   <button
                     onClick={() => canvas.openNode(String(id))}
                     title="Show this workflow's steps"
-                    className="nodrag p-0.5 rounded-md text-gray-400 hover:text-blue-600 dark:hover:text-blue-300 hover:bg-black/5 dark:hover:bg-white/10"
+                    className="nodrag p-0.5 rounded-md text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10"
                   >
                     <PanelRightOpen className="w-4 h-4" />
                   </button>
@@ -412,8 +400,8 @@ const CustomCloudNode = ({ data, id }: any) => {
               <div className="w-full mt-2 flex items-center space-x-1.5">
                 <div className={`w-1.5 h-1.5 rounded-full ${deviceOnline ? 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.8)]' : 'bg-red-500 shadow-[0_0_5px_rgba(239,68,68,0.8)]'}`}></div>
                 {targetDevice?.image_version && <DeviceAvatar id={targetDeviceId} version={targetDevice.image_version} size={14} className="rounded" />}
-                <span className={`text-[10px] font-bold ${deviceOnline ? 'text-gray-400' : 'text-red-400'}`}>
-                  {targetDeviceId ? targetDeviceId : 'Unassigned'}
+                <span className={`text-[10px] font-bold ${deviceOnline ? 'text-gray-400' : 'text-red-400'}`} title={targetDeviceId ? `Device id: ${targetDeviceId}` : undefined}>
+                  {targetDeviceId ? (targetDevice?.name || targetDeviceId) : 'Unassigned'}
                   {targetDeviceId && !deviceOnline && ' (Offline)'}
                 </span>
               </div>
@@ -570,7 +558,7 @@ const CustomCloudNode = ({ data, id }: any) => {
                             newParts[i] = e.target.value;
                             updateNodeData(id, { block: { ...block, returnVar: newParts.join(', ') } });
                           }}
-                          className="nodrag nowheel w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-gray-800 dark:text-white"
+                          className="nodrag nowheel w-20 bg-gray-50 dark:bg-black/60 border border-gray-300 dark:border-white/10 rounded px-2 py-0.5 text-xs focus:outline-none focus:border-accent text-gray-800 dark:text-white"
                         />
                       </div>
                     );
@@ -590,7 +578,7 @@ const CustomCloudNode = ({ data, id }: any) => {
           <span className="pointer-events-none absolute -bottom-5 text-[10px] font-semibold text-red-500" style={{ left: 'calc(70% + 8px)' }}>false</span>
         </>
       ) : (
-        <Handle type="source" position={Position.Bottom} className="bg-blue-500" />
+        <Handle type="source" position={Position.Bottom} className="bg-accent" />
       )}
     </div>
   );
@@ -850,20 +838,21 @@ export default function CloudWorkflowEditor({
       const deviceId = String((n.data as any)?.targetDeviceId || '');
       if (!deviceId) { add(id, 'no device assigned'); continue; }
       const device = cloudDevices.find(d => String(d.id) === deviceId);
+      const deviceName = device?.name || deviceId;
       // Blocks the run (the page and the run route both refuse it), so it is a problem, not a
       // warning: nothing on this graph can start until the device is back.
-      if (!String(device?.status || '').includes('online')) add(id, `${deviceId} is offline`);
+      if (!String(device?.status || '').includes('online')) add(id, `${deviceName} is offline`);
       const methods = device?.schema?.instruments?.[block.instrument];
       if (device?.schema?.instruments && !methods?.[block.method]) {
         add(id, block.instrument === LIBRARY_INSTRUMENT
-          ? `${deviceId} no longer has a workflow called ${block.method}`
-          : `${deviceId} no longer has ${block.instrument}.${block.method}`);
+          ? `${deviceName} no longer has a workflow called ${block.method}`
+          : `${deviceName} no longer has ${block.instrument}.${block.method}`);
         continue;
       }
       const verdict = block.instrument === LIBRARY_INSTRUMENT ? methods?.[block.method]?.compatibility : null;
       if (verdict?.status === 'broken') {
         const first = verdict.errors?.[0]?.message;
-        add(id, `this workflow won't run on ${deviceId} as saved${first ? `: ${first}` : ''}`);
+        add(id, `this workflow won't run on ${deviceName} as saved${first ? `: ${first}` : ''}`);
       }
       const blank = blankParamsOf(n);
       if (blank.length) add(id, `empty ${blank.length === 1 ? 'field' : 'fields'}: ${blank.join(', ')}`);
@@ -880,7 +869,7 @@ export default function CloudWorkflowEditor({
       list.push({
         id: p.nodeIds[0],
         level: 'warning',
-        text: `${p.deviceId} runs one task at a time. ${names.join(', ')} are on parallel branches, so they will run one after another, in whichever order each becomes ready. Connect them in the order you need.`,
+        text: `${cloudDevices.find(d => String(d.id) === p.deviceId)?.name || p.deviceId} runs one task at a time. ${names.join(', ')} are on parallel branches, so they will run one after another, in whichever order each becomes ready. Connect them in the order you need.`,
       });
     }
     return { problems: perNode, issueList: list, parallel: par };
@@ -901,7 +890,8 @@ export default function CloudWorkflowEditor({
     const grew = parallel.find(p => !prev.includes(`${p.deviceId}:${p.nodeIds.join(',')}`));
     if (grew) {
       const names = grew.nodeIds.map(id => labelOf(nodesRef.current.find(n => String(n.id) === id)));
-      setToast(`${grew.deviceId} runs one task at a time, so ${names.join(' and ')} will run one after another, not in parallel.`);
+      const device = cloudDevices.find(d => String(d.id) === grew.deviceId);
+      setToast(`${device?.name || grew.deviceId} runs one task at a time, so ${names.join(' and ')} will run one after another, not in parallel.`);
     }
   }, [parallelKey, parallel]);
 
@@ -950,8 +940,11 @@ export default function CloudWorkflowEditor({
     });
   }, [edges, nodes]);
 
+  // Wrap into columns at the height that shows at a readable zoom (canvasLayout.ts).
+  const canvasBox = useRef<HTMLDivElement>(null);
   const tidy = () => {
-    setNodes(nds => tidyLayout(nds, edges));
+    const visible = canvasBox.current?.clientHeight || 0;
+    setNodes(nds => tidyLayout(nds, edges, visible ? { maxHeight: visible / 0.8 } : {}));
     setTimeout(() => rfInstance?.fitView({ duration: 300, padding: 0.2 }), 50);
   };
 
@@ -960,17 +953,9 @@ export default function CloudWorkflowEditor({
   const hasSteps = nodes.some(n => !isStartNode(n));
 
   const groupHeader = (key: string, children: React.ReactNode, title?: string) => (
-    <button
-      type="button"
-      onClick={() => toggleGroup(key)}
-      title={title}
-      className="w-full flex items-center gap-2 px-2 py-1 mb-1 rounded-md text-left hover:bg-black/5 dark:hover:bg-white/5"
-    >
-      {collapsedGroups[key]
-        ? <ChevronRight className="w-3.5 h-3.5 shrink-0 text-gray-400" />
-        : <ChevronDown className="w-3.5 h-3.5 shrink-0 text-gray-400" />}
+    <ToolboxGroupHeader collapsed={!!collapsedGroups[key]} onToggle={() => toggleGroup(key)} title={title}>
       {children}
-    </button>
+    </ToolboxGroupHeader>
   );
 
   return (
@@ -1010,19 +995,13 @@ export default function CloudWorkflowEditor({
                     <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
                     <span className="text-xs font-medium truncate text-gray-600 dark:text-gray-300">{label}</span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={toggleAutoFill}
-                    aria-pressed={autoFill}
+                  <AutoFillToggle
+                    on={autoFill}
+                    onToggle={toggleAutoFill}
                     title={autoFill
                       ? '#auto is on: dropped cards fill every field with #<field name>. Click to turn off.'
                       : 'Turn on #auto: dropped cards fill every field with #<field name>, ready to configure in the run panel.'}
-                    className={`shrink-0 px-2 py-0.5 rounded-md border font-mono text-[11px] font-semibold transition-colors ${autoFill
-                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                      : 'bg-white border-gray-200 text-gray-500 hover:text-gray-800 dark:bg-white/5 dark:border-white/10 dark:text-gray-400 dark:hover:text-gray-200'}`}
-                  >
-                    #auto
-                  </button>
+                  />
                 </div>
               );
             })()}
@@ -1035,7 +1014,7 @@ export default function CloudWorkflowEditor({
                 can use them whichever devices happen to be connected. */}
             <div>
               {groupHeader('cloud-logic', (
-                <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200">Logic</h3>
+                <ToolboxGroupTitle>Logic</ToolboxGroupTitle>
               ), 'Steps Cloud runs itself, between device steps')}
               {!collapsedGroups['cloud-logic'] && (
                 <div className="space-y-1 mt-1">
@@ -1058,6 +1037,8 @@ export default function CloudWorkflowEditor({
 
             {cloudDevices.map(device => {
               const deviceId = device.id;
+              // Shown by the name a person gave it; the id (its MQTT identity) is in the tooltip.
+              const deviceName = device.name || deviceId;
               const dInstruments = device.schema?.instruments || {};
               const libraryWorkflows: Record<string, any> = dInstruments[LIBRARY_INSTRUMENT] || {};
               // A saved workflow the device itself says no longer runs against its deck is kept
@@ -1088,7 +1069,7 @@ export default function CloudWorkflowEditor({
                         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]'
                         : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'}`}></div>
                       {device.image_version && <DeviceAvatar id={deviceId} version={device.image_version} size={18} />}
-                      <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{deviceId}</h3>
+                      <ToolboxGroupTitle>{deviceName}</ToolboxGroupTitle>
                       {device.schema?.deck_version != null && (
                         <span className="text-[10px] font-medium text-gray-400 shrink-0" title="Version of this device's instrument schema; it changes when its drivers change">
                           deck v{device.schema.deck_version}
@@ -1098,8 +1079,8 @@ export default function CloudWorkflowEditor({
                       {collapsed && <span className="ml-auto text-[10px] text-gray-400 shrink-0">{runnable.length}</span>}
                     </>
                   ), isOnline
-                    ? `${deviceId} is online. Click to ${collapsed ? 'expand' : 'collapse'}.`
-                    : `${deviceId} is offline. Showing its last known instruments and workflows; a run using it cannot start.`)}
+                    ? `${deviceName} (${deviceId}) is online. Click to ${collapsed ? 'expand' : 'collapse'}.`
+                    : `${deviceName} (${deviceId}) is offline. Showing its last known instruments and workflows; a run using it cannot start.`)}
 
                   {!collapsed && (
                     <div className="mt-1 space-y-1">
@@ -1108,7 +1089,7 @@ export default function CloudWorkflowEditor({
                         <ToolItem
                           key={`wf-${deviceId}-${wfName}`}
                           icon={Workflow}
-                          accent="text-blue-500"
+                          accent="text-gray-700 dark:text-gray-200"
                           label={wfName.replace(/_/g, ' ')}
                           title={wfSchema?.description || wfName}
                           onDragStart={(e) => onDragStart(e, LIBRARY_INSTRUMENT, wfName, deviceId)}
@@ -1160,8 +1141,13 @@ export default function CloudWorkflowEditor({
                             <div className="mt-1 space-y-2">
                               {Object.entries(advancedInstruments).map(([instName, schema]: [string, any]) => (
                                 <div key={`${deviceId}-${instName}`} className="space-y-1">
-                                  <div className="px-1 text-[11px] font-mono text-gray-500 dark:text-gray-400">{instName}</div>
-                                  {Object.keys(schema).map((methodName) => (
+                                  <ToolboxInstrumentHeader
+                                    name={instName}
+                                    count={Object.keys(schema).length}
+                                    collapsed={!!collapsedGroups[`inst:${deviceId}:${instName}`]}
+                                    onToggle={() => toggleGroup(`inst:${deviceId}:${instName}`)}
+                                  />
+                                  {!collapsedGroups[`inst:${deviceId}:${instName}`] && Object.keys(schema).map((methodName) => (
                                     <ToolItem
                                       key={`${deviceId}-${instName}-${methodName}`}
                                       icon={Wrench}
@@ -1192,7 +1178,7 @@ export default function CloudWorkflowEditor({
         </div>
 
         <div className="flex-1 flex flex-col relative bg-transparent border-t" style={{ borderColor: 'var(--panel-border)' }}>
-          <div className="flex-1 w-full h-full" onDrop={onDrop} onDragOver={onDragOver}>
+          <div ref={canvasBox} className="flex-1 w-full h-full" onDrop={onDrop} onDragOver={onDragOver}>
             <LiveSchema.Provider value={statusData}>
             <CanvasContext.Provider value={canvasContext}>
             <ReactFlow
@@ -1219,7 +1205,7 @@ export default function CloudWorkflowEditor({
                 <button
                   type="button"
                   onClick={tidy}
-                  title="Arrange the steps in rows, each one under the step it waits for"
+                  title="Arrange the steps in rows, each one under the step it waits for; a long workflow wraps into columns"
                   className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white/90 px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-white dark:border-white/10 dark:bg-black/60 dark:text-gray-200"
                 >
                   <LayoutGrid className="w-3.5 h-3.5" /> Tidy up

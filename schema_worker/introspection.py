@@ -24,6 +24,7 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
     is_object = False
     is_numeric = False
     fields = {}
+    nullable = False
     _seen = set() if _seen is None else _seen
 
     if annotation != inspect.Parameter.empty:
@@ -106,8 +107,12 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
         # dataclass loses its fields, and an Optional[float] return stops looking numeric.
         if options is None and not is_object:
             try:
-                args = [a for a in get_args(annotation) if a is not type(None)]
+                all_args = get_args(annotation)
+                args = [a for a in all_args if a is not type(None)]
                 if get_origin(annotation) is not None and len(args) == 1:
+                    # A None arm was stripped: the parameter accepts None, and a validator must
+                    # not call a deliberate None "missing" or "not a number".
+                    nullable = len(args) < len(all_args)
                     inner = extract_type_info(args[0], inspect.Parameter.empty, _depth, _seen)
                     if inner.get("options") is not None:
                         options = inner["options"]
@@ -125,6 +130,8 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
         "type": param_type,
         "required": default == inspect.Parameter.empty
     }
+    if nullable:
+        param_data["optional"] = True
     if options is not None:
         param_data["options"] = options
     if is_object:

@@ -1,9 +1,11 @@
 "use client";
-import { Settings2, Key, Radio } from 'lucide-react';
+import { Settings2, Radio } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { ThemeChoice, inDesktopApp, useThemePreference } from '@ivoryos/shared-ui';
+import AgentTokens from '@/components/AgentTokens';
+import { NavPlacementChoice, ThemeChoice, inDesktopApp, useNavPlacement, useThemePreference } from '@ivoryos/shared-ui';
 export default function SettingsPage() {
   const [themePref, setThemePref] = useThemePreference();
+  const [nav, setNav] = useNavPlacement();
   const [desktop, setDesktop] = useState(false);
   useEffect(() => { setDesktop(inDesktopApp()); }, []);
   // On a LAN a device needs this Cloud's address to start pairing, the one value it cannot guess.
@@ -55,125 +57,61 @@ export default function SettingsPage() {
     }
   };
 
+  // Short sections, one line of help at most. Pairing lives on Devices; the "Global
+  // Orchestration" switches that used to sit here were never wired to anything.
+  const card = 'rounded-xl border px-5 py-4';
+  const cardStyle = { background: 'var(--panel-bg)', borderColor: 'var(--panel-border)' };
+  const muted = { color: 'var(--text-secondary)' };
+  const onLan = health?.mode === 'local';
   return (
     <div className="flex-1 flex flex-col h-full w-full overflow-y-auto">
-      <header className="h-16 shrink-0 border-b flex items-center px-8 z-10 glass-header" style={{ borderColor: 'var(--panel-border)' }}>
-        <div className="flex items-center space-x-3 text-blue-400">
-          <Settings2 className="w-5 h-5" />
-          <h1 className="text-xl font-bold tracking-wider" style={{ color: 'var(--text-primary)' }}>Cloud Settings</h1>
-        </div>
+      <header data-ivoryos-page-header="title" className="h-16 shrink-0 border-b flex items-center px-8 z-10 glass-header" style={{ borderColor: 'var(--panel-border)' }}>
+        <h1 className="flex items-center gap-2 text-lg font-semibold" style={{ color: 'var(--text-primary)' }}><Settings2 className="w-5 h-5" style={muted} /> Settings</h1>
       </header>
 
-      <div className="pt-4 px-8 pb-8 max-w-4xl mx-auto w-full">
-        <div className="glass-panel p-8 rounded-xl space-y-8" style={{ background: 'var(--panel-bg)', border: '1px solid var(--panel-border)' }}>
-          
-          <section>
-            <h2 className="text-xl font-semibold mb-4 border-b pb-2" style={{ borderColor: 'var(--panel-border)' }}>Appearance</h2>
-            {desktop ? (
-              <p className="text-sm text-gray-500">Follows the IvoryOS app. Change it in the app&apos;s Settings.</p>
-            ) : (
-              <div className="flex items-center justify-between gap-4">
-                <p className="text-sm text-gray-500">One theme for every page. System follows your computer.</p>
-                <ThemeChoice value={themePref} onChange={setThemePref} />
-              </div>
-            )}
+      <div className="px-8 py-6 max-w-2xl w-full mx-auto space-y-4">
+        {/* Inside the desktop app the theme and the layout follow the app. */}
+        {!desktop && (
+          <section className={card} style={cardStyle}>
+            <div className="flex items-center justify-between gap-4 pb-3"><span className="text-sm font-medium">Theme</span><ThemeChoice value={themePref} onChange={setThemePref} /></div>
+            <div className="flex items-center justify-between gap-4 pt-3 border-t" style={{ borderColor: 'var(--panel-border)' }}><span className="text-sm font-medium">Navigation</span><NavPlacementChoice value={nav} onChange={setNav} /></div>
           </section>
+        )}
 
-          <section>
-            <h2 className="text-xl font-semibold mb-4 border-b pb-2" style={{ borderColor: 'var(--panel-border)' }}>Global Orchestration</h2>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-4 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
-                <div>
-                  <h3 className="font-medium">Strict Sequence Enforcement</h3>
-                  <p className="text-sm text-gray-500 mt-1">If enabled, devices must completely finish their assigned graph node before the next device in the graph is notified.</p>
-                </div>
-                <input type="checkbox" className="w-5 h-5 rounded text-blue-500" defaultChecked />
-              </div>
-              
-              <div className="flex items-center justify-between p-4 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
-                <div>
-                  <h3 className="font-medium">Auto-Recovery</h3>
-                  <p className="text-sm text-gray-500 mt-1">Automatically attempt to re-dispatch a node if the target edge device disconnects during execution.</p>
-                </div>
-                <input type="checkbox" className="w-5 h-5 rounded text-blue-500" defaultChecked />
-              </div>
-            </div>
-          </section>
-          
-          <section>
-            <h2 className="text-xl font-semibold mb-4 border-b pb-2 flex items-center gap-2" style={{ borderColor: 'var(--panel-border)' }}>
-              <Radio className="w-5 h-5 text-blue-400" />
-              Cloud Broker
-            </h2>
-            <div className="flex flex-col space-y-4 p-6 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
-              <p className="text-sm text-gray-400">
-                The MQTT broker this Cloud connects to. On a LAN this is the machine running mosquitto — 127.0.0.1 if it is this one.
-                The daemon applies a change within a few seconds; no restart needed.
-              </p>
-
-              <div className="grid grid-cols-3 gap-4">
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium mb-1">Host</label>
-                  <input
-                    type="text"
-                    value={brokerHost}
-                    onChange={(e) => setBrokerHost(e.target.value)}
-                    placeholder={brokerFallback ? brokerFallback.replace(/^mqtts?:\/\//, '').split(':')[0] : '127.0.0.1'}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Port</label>
-                  <input
-                    type="number"
-                    value={brokerPort}
-                    onChange={(e) => setBrokerPort(Number(e.target.value))}
-                    placeholder="1883"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <button onClick={saveBroker} disabled={brokerSaving || !brokerHost} className="btn-primary px-4 py-2 rounded font-medium">
+        <section className={card} style={cardStyle}>
+          <h2 className="flex items-center gap-2 text-sm font-semibold mb-3"><Radio className="w-4 h-4" style={muted} /> Broker</h2>
+          {onLan ? (
+            <>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="flex-1 min-w-[10rem] text-xs" style={muted}>Host
+                  <input type="text" value={brokerHost} onChange={(e) => setBrokerHost(e.target.value)} className="mt-1"
+                    placeholder={brokerFallback ? brokerFallback.replace(/^mqtts?:\/\//, '').split(':')[0] : '127.0.0.1'} />
+                </label>
+                <label className="w-24 text-xs" style={muted}>Port
+                  <input type="number" value={brokerPort} onChange={(e) => setBrokerPort(Number(e.target.value))} placeholder="1883" className="mt-1" />
+                </label>
+                <button onClick={saveBroker} disabled={brokerSaving || !brokerHost} className="btn-primary px-4 py-2 rounded-md text-sm font-medium">
                   {brokerSaving ? 'Saving…' : 'Connect'}
                 </button>
-                {/* Live state, not save state — a saved host that refuses connections must not look like success. */}
-                {health && (
-                  <span className={`text-sm ${health.daemon?.brokerConnected ? 'text-green-500' : 'text-orange-400'}`}>
-                    {health.daemon?.brokerConnected
-                      ? `Connected to ${health.daemon.brokerUrl}`
-                      : (health.daemon?.running ? 'Daemon running, broker not connected' : 'Daemon not running')}
-                  </span>
-                )}
               </div>
+              {brokerError && <p className="mt-2 text-sm text-red-500">{brokerError}</p>}
+              {cloudOrigin && <p className="mt-3 text-xs" style={muted}>Devices on this network pair with <span className="font-mono">{cloudOrigin}</span></p>}
+            </>
+          ) : (
+            <p className="text-sm" style={muted}>AWS IoT Core</p>
+          )}
+          {/* Live state, not save state: a saved host that refuses connections must not look like success. */}
+          {health && (
+            <p className={`mt-2 text-xs flex items-center gap-1.5 ${health.daemon?.brokerConnected ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${health.daemon?.brokerConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              {health.daemon?.brokerConnected
+                ? `Connected${onLan && health.daemon?.brokerUrl ? ` to ${health.daemon.brokerUrl}` : ''}`
+                : (health.daemon?.running ? 'Not connected' : 'Daemon not running')}
+            </p>
+          )}
+        </section>
 
-              {brokerError && <p className="text-sm text-red-400">{brokerError}</p>}
-              {!brokerHost && brokerFallback && (
-                <p className="text-xs text-gray-500">Unset — falling back to {brokerFallback} from the environment.</p>
-              )}
-            </div>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mb-4 border-b pb-2 flex items-center gap-2" style={{ borderColor: 'var(--panel-border)' }}>
-              <Key className="w-5 h-5 text-blue-400" />
-              Pair a Device
-            </h2>
-            <div className="flex flex-col space-y-4 p-6 rounded-lg" style={{ background: 'var(--sidebar-hover-bg)' }}>
-              <p className="text-sm text-gray-400">
-                Start pairing on the device (its <strong>Cloud Connect</strong> page, <strong>Connect</strong> in the IvoryOS app,
-                or <code>ivoryos-edge pair</code>). It shows a code; approve it here. The device then fetches its own
-                credentials. Nothing is copied between machines, and nothing typed here is ever sent to a device.
-              </p>
-              {cloudOrigin && (
-                <p className="text-xs text-gray-500">
-                  On a lab network the device also needs this Cloud&apos;s address: <strong>{cloudOrigin}</strong>
-                </p>
-              )}
-              <a href="/pair" className="btn-primary self-start px-4 py-2 rounded font-medium">Enter a device&apos;s code</a>
-            </div>
-          </section>
-  
-        </div>
+        <AgentTokens />
       </div>
     </div>
   );

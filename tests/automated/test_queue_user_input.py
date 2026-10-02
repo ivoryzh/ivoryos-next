@@ -56,6 +56,37 @@ async def test_user_input_pauses_and_resumes_with_value():
 
 
 @pytest.mark.asyncio
+async def test_user_input_without_a_name_is_a_pause():
+    """No variable_name: the original IvoryOS's `pause`. It waits for Continue, asks no value
+    (input_type "none" for the UI and notifications) and saves nothing."""
+    from ivoryos_edge.queue import attention_items
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "name": "Test pause",
+            "sequence": [
+                {"instrument": "Flow_Control", "method": "User_Input", "params": {"prompt": "Load the vials"}},
+                {"instrument": "Flow_Control", "method": "Comment", "params": {"message": "loaded"}},
+            ],
+        }
+        response = await ac.post("/api/queue/runs", json=payload)
+        assert response.status_code == 200, response.text
+        run_id = response.json()["run_id"]
+
+        status, steps = await _poll_run(ac, run_id, {"waiting_input", "error"})
+        assert status == "waiting_input", steps
+        waiting = next(s for s in steps if s["status"] == "waiting_input")
+        assert waiting["outputs"] == {"prompt": "Load the vials", "input_type": "none"}
+        items = attention_items({"id": run_id, "name": "Test pause", "status": status, "steps": steps}, None)
+        assert items[0]["title"] == "Paused for you" and items[0]["body"] == "Load the vials"
+
+        # Continue sends no value.
+        assert (await ac.post(f"/api/queue/runs/{run_id}/input", json={"value": None})).status_code == 200
+        status, steps = await _poll_run(ac, run_id, {"completed", "error", "cancelled"})
+        assert status == "completed", steps
+        assert steps[0]["outputs"] == {"prompt": "Load the vials", "input_type": "none", "acknowledged": True}
+
+
+@pytest.mark.asyncio
 async def test_comment_step_logs_and_completes_immediately():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         payload = {

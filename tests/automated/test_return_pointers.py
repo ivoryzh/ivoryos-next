@@ -250,8 +250,144 @@ async def test_optimization_run_reads_objectives_from_nested_pointers():
             assert status == "completed"
 
             observed = [row for call in MockOptimizer.observe_calls for row in call]
-            assert observed == [{"y": 1.0, "purity": 0.5}, {"y": 2.0, "purity": 1.0}]
+            # Each trial's objectives, beside the parameter values it ran with (the mock suggests x).
+            assert [{k: v for k, v in row.items() if k != "x"} for row in observed] == [{"y": 1.0, "purity": 0.5}, {"y": 2.0, "purity": 1.0}]
+            assert all("x" in row for row in observed)
             # 'sid' resolved fine but isn't a number, so it never reaches the optimizer.
             assert all("sid" not in row for row in observed)
+    finally:
+        OPTIMIZER_REGISTRY.pop("mock", None)
+
+
+def test_a_linked_workflow_output_renamed_by_its_step_is_bound_under_both_names(tmp_path):
+    """A step that links a workflow saves what that workflow saves; a name changed on the step
+    becomes an alias, so the value is under the new name and still under the workflow's own."""
+    from ivoryos_edge import workflows as wf
+    from ivoryos_edge.queue import with_aliases
+
+    d = tmp_path / "workflows"
+    wf.save_version(str(d), "assay", {"prep": [], "cleanup": [], "script": [{
+        "instrument": "dummy", "action": "assay_method", "args": {},
+        "return": "y, purity", "return_bindings": [{"path": "yield_pct", "var": "y"}, {"path": "metrics.purity", "var": "purity"}],
+    }]})
+    steps = wf.expand_workflow_blocks([{
+        "instrument": wf.LIBRARY_INSTRUMENT, "method": "assay", "params": {},
+        # `y` renamed; `purity` left as it is (an empty name means the same name).
+        "returnBindings": [{"path": "y", "var": "yield_a"}, {"path": "purity", "var": ""}],
+    }], str(d))
+    assert steps[0]["params"]["_return_aliases"] == [["y", "yield_a"]]
+    assert with_aliases({"y": 3.0, "purity": 0.5}, steps[0]["params"]["_return_aliases"]) == {"y": 3.0, "yield_a": 3.0, "purity": 0.5}
+    # A link that renames nothing adds nothing.
+    plain = wf.expand_workflow_blocks([{"instrument": wf.LIBRARY_INSTRUMENT, "method": "assay", "params": {}}], str(d))
+    assert "_return_aliases" not in plain[0]["params"]
+
+
+@pytest.mark.asyncio
+async def test_optimizing_a_linked_workflow_reads_its_outputs_by_their_names_on_the_step():
+    """End-to-end: Optimize over a step that links a saved workflow. Its outputs reach the
+    optimizer: one under the name the step gave it, one under the workflow's own name. Before,
+    an expanded step's outputs were never read, so no trial had an objective value."""
+    from ivoryos_edge.server import app as fastapi_app
+    from ivoryos_edge.optimizer.registry import OPTIMIZER_REGISTRY
+    from test_optimizer_wiring import MockOptimizer
+
+    fastapi_app.state.instruments["dummy"].counter = 0
+    OPTIMIZER_REGISTRY["mock"] = MockOptimizer
+    MockOptimizer.observe_calls = []
+    MockOptimizer._counter = 0
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            saved = await ac.post("/api/workflows/Assay screen", json={"description": "", "prep": [], "cleanup": [], "script": [{
+                "id": 1, "uuid": 1, "instrument": "dummy", "action": "assay_method", "args": {}, "arg_types": {},
+                "return": "y, purity", "return_bindings": [{"path": "yield_pct", "var": "y"}, {"path": "metrics.purity", "var": "purity"}],
+            }]})
+            assert saved.status_code == 200, saved.text
+            payload = {
+                "name": "Linked optimization",
+                "parameters": {
+                    "type": "Optimization", "optimizer": "mock", "budget": 2, "optimizer_config": {},
+                    "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                    "objective_config": [{"name": "yield_a", "minimize": False}, {"name": "purity", "minimize": False}],
+                    "sequence_template": [{
+                        "instrument": "Library Workflows", "method": "Assay screen", "params": {},
+                        "returnVar": "yield_a, purity",
+                        "returnBindings": [{"path": "y", "var": "yield_a"}, {"path": "purity", "var": ""}],
+                    }],
+                },
+            }
+            resp = await ac.post("/api/queue/runs", json=payload)
+            assert resp.status_code == 200, resp.text
+            run_id = resp.json()["run_id"]
+            status = "pending"
+            for _ in range(80):
+                run = (await ac.get(f"/api/queue/runs/{run_id}")).json()
+                if run.get("status") in ["completed", "error", "cancelled"]:
+                    status = run["status"]
+                    break
+                await asyncio.sleep(0.05)
+            assert status == "completed", run
+            observed = [row for call in MockOptimizer.observe_calls for row in call]
+            assert [{k: row[k] for k in ("yield_a", "purity")} for row in observed] == [
+                {"yield_a": 1.0, "purity": 0.5}, {"yield_a": 2.0, "purity": 1.0}]
+    finally:
+        OPTIMIZER_REGISTRY.pop("mock", None)
+
+
+@pytest.mark.asyncio
+async def test_optimization_reads_earlier_saved_values_and_runs_every_prep_step():
+    """A '#name' naming a value an earlier step saved is that value when its step runs, in prep
+    and in each trial, as in a normal run. And a prep step that saves something no longer ends
+    the prep: it used to `return` there, so every prep step after it silently never ran."""
+    from ivoryos_edge.server import app as fastapi_app
+    from ivoryos_edge.optimizer.registry import OPTIMIZER_REGISTRY
+    from test_optimizer_wiring import MockOptimizer
+
+    fastapi_app.state.instruments["dummy"].counter = 0
+    OPTIMIZER_REGISTRY["mock"] = MockOptimizer
+    MockOptimizer.observe_calls = []
+    MockOptimizer._counter = 0
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            payload = {
+                "name": "Saved values read later",
+                "parameters": {
+                    "type": "Optimization", "optimizer": "mock", "budget": 2, "optimizer_config": {},
+                    "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                    "objective_config": [{"name": "echoed", "minimize": False}],
+                    "sequence_template": [
+                        {"instrument": "dummy", "method": "assay_method", "params": {}, "returnVar": "y",
+                         "returnBindings": [{"path": "yield_pct", "var": "y"}]},
+                        {"instrument": "dummy", "method": "echo_method", "params": {"value": "#y"}, "returnVar": "echoed"},
+                    ],
+                },
+                # Top level, as the Optimize page sends it: start_run makes it the run's
+                # prep_template (a prep_template inside parameters is overwritten, so prep never ran).
+                "prep": [
+                    {"instrument": "dummy", "method": "counting_method", "params": {}, "returnVar": "c0"},
+                    {"instrument": "dummy", "method": "echo_method", "params": {"value": "#c0"}, "returnVar": "e0"},
+                ],
+            }
+            resp = await ac.post("/api/queue/runs", json=payload)
+            assert resp.status_code == 200, resp.text
+            run_id = resp.json()["run_id"]
+            run = {}
+            for _ in range(80):
+                run = (await ac.get(f"/api/queue/runs/{run_id}")).json()
+                if run.get("status") in ["completed", "error", "cancelled"]:
+                    break
+                await asyncio.sleep(0.05)
+            assert run.get("status") == "completed", run
+
+            # The first step is prep's counter, the second prep's echo of it.
+            assert [s["method"] for s in run["steps"][:2]] == ["counting_method", "echo_method"]
+            prep_echo = run["steps"][1]
+            assert prep_echo["status"] == "completed"
+            assert float((prep_echo.get("outputs") or {}).get("result")) == 1.0   # prep's counter, read as #c0
+
+            observed = [row for call in MockOptimizer.observe_calls for row in call]
+            # Each trial echoed its own assay's yield: '#y' was that trial's value, not the text "#y".
+            assert len(observed) == 2
+            assert all(float(row["echoed"]) == row["y"] for row in observed), observed
+            assert observed[0]["y"] != observed[1]["y"]
     finally:
         OPTIMIZER_REGISTRY.pop("mock", None)

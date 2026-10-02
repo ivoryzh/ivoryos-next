@@ -10,13 +10,16 @@
     "start": "next start",
     "start:all": "node scripts/run-all.js start",
     "daemon": "node --disable-warning=ExperimentalWarning daemon.js",
+    "mcp": "node scripts/mcp-server.js",
     "test": "node --test src/lib/*.test.js",
     "lint": "eslint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "@aws-sdk/client-iot": "^3.1128.0",
     "@hello-pangea/dnd": "^18.0.1",
     "@ivoryos/shared-ui": "*",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@supabase/supabase-js": "^2.116.0",
     "@xyflow/react": "^12.11.6",
     "aedes": "^1.2.0",
@@ -25,7 +28,8 @@
     "mqtt": "^5.15.2",
     "next": "^16.3.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",

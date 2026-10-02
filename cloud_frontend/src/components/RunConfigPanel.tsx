@@ -15,6 +15,7 @@ import {
   type WorkflowRuntime,
 } from '@ivoryos/shared-ui';
 import type { NodeCadence, RunMode } from '@/lib/runPayload';
+import { useDeviceName } from '@/lib/deviceNames';
 
 /**
  * Supplies what a run needs from each node before it is dispatched.
@@ -107,13 +108,13 @@ const MODE_LABELS: Record<RunMode, { label: string; hint: string; icon: React.Re
 };
 
 const input =
-  'rounded border border-gray-300 bg-transparent px-2 py-1 text-sm outline-none focus:border-blue-500 dark:border-gray-600';
+  'rounded border border-gray-300 bg-transparent px-2 py-1 text-sm outline-none focus:border-accent dark:border-gray-600';
 const sectionTitle = 'text-xs font-semibold text-gray-600 dark:text-gray-300 mb-1.5';
 /** The inside of a Field: borderless, so the Field's own box is the only outline. */
 const fieldInput =
   'bg-transparent text-xs text-gray-800 outline-none placeholder:text-gray-300 dark:text-gray-100 dark:placeholder:text-gray-600';
 const smallControl =
-  'min-w-0 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs outline-none focus:border-indigo-400 dark:border-white/10 dark:bg-black/40';
+  'min-w-0 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs outline-none focus:border-accent dark:border-white/10 dark:bg-black/40';
 
 /**
  * A labelled value in one small box -- the same `name | value` field a step's arguments use in the
@@ -150,15 +151,15 @@ function estimateFor(node: ConfigurableNode): string | null {
     const trials = Math.max(1, node.optimization?.budget || 1);
     return `≈ ${formatDuration(estimateRunSeconds(rt, trials))} for ${trials} trial${trials === 1 ? '' : 's'}`;
   }
-  if (backToBackIterations(node) > 1) {
-    const n = backToBackIterations(node);
-    return `≈ ${formatDuration(estimateRunSeconds(rt, n))} for ${n} iterations`;
+  if (backToBackRuns(node) > 1) {
+    const n = backToBackRuns(node);
+    return `≈ ${formatDuration(n * rt.typical_s)} for ${n} runs`;
   }
   return null;
 }
 
-/** Back to back (no interval): one run of this many iterations. 1 when it is not repeated. */
-function backToBackIterations(node: ConfigurableNode) {
+/** Back to back (no interval): this many whole runs, one after another. 1 when not repeated. */
+function backToBackRuns(node: ConfigurableNode) {
   return isBlank(node.schedule.everyMinutes) && Number(node.schedule.repeat) >= 2 ? Math.floor(Number(node.schedule.repeat)) : 1;
 }
 
@@ -176,7 +177,7 @@ function cadenceNote(node: ConfigurableNode): { text: string; warn: boolean } | 
   const total = count * run + (count - 1) * wait;
   if (!wait) {
     return {
-      text: `One run: prep once, ${count} iterations, cleanup once ≈ ${formatDuration(estimateRunSeconds(rt, count))}.`,
+      text: `${count} whole runs, one after another, each with its own setup and cleanup ≈ ${formatDuration(total)}. Cloud sends the next when the device is free.`,
       warn: false,
     };
   }
@@ -228,6 +229,7 @@ export default function RunConfigPanel({
   onRun,
   onSchedule,
 }: Props) {
+  const deviceName = useDeviceName();
   const [copySource, setCopySource] = useState<Record<string, string>>({});
 
   const unfilled = useMemo(() => nodes.reduce((n, node) => n + unfilledCount(node), 0), [nodes]);
@@ -299,7 +301,7 @@ export default function RunConfigPanel({
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold">{node.label}</div>
                     <div className="truncate text-xs text-gray-500 dark:text-gray-400">
-                      {node.deviceId || 'Unassigned'}
+                      {deviceName(node.deviceId) || 'Unassigned'}
                       {node.runtime?.runs ? (
                         <span
                           title={`Median of its recent completed runs on this device: prep ${formatDuration(node.runtime.prep_s)}, body ${formatDuration(node.runtime.iteration_s)} per pass, cleanup ${formatDuration(node.runtime.cleanup_s)}`}
@@ -325,7 +327,7 @@ export default function RunConfigPanel({
                           onClick={() => onModeChange(node.id, mode)}
                           className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
                             node.mode === mode
-                              ? 'bg-blue-600 text-white'
+                              ? 'bg-accent text-on-accent'
                               : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
                           }`}
                         >
@@ -356,7 +358,7 @@ export default function RunConfigPanel({
                             const twins = donors.filter((o) => o.label === d.label && o.deviceId === d.deviceId);
                             const nth = twins.length > 1 ? ` (${twins.indexOf(d) + 1})` : '';
                             return (
-                              <option key={d.id} value={d.id}>{d.label} · {d.deviceId || 'Unassigned'}{nth}</option>
+                              <option key={d.id} value={d.id}>{d.label} · {deviceName(d.deviceId) || 'Unassigned'}{nth}</option>
                             );
                           })}
                         </select>
@@ -447,7 +449,7 @@ export default function RunConfigPanel({
                                 ? `Rows run in batches of ${node.batchSize}: each step of the workflow runs for every row in the batch, batch steps once per batch.`
                                 : batched
                                   ? `Rows are grouped ${size} to a batch, which matters once a pace is set: then one batch fires every N min.`
-                                  : `Each row runs the whole ${node.isWorkflow ? 'workflow' : 'step'} on ${node.deviceId || 'its device'}, in order.`}
+                                  : `Each row runs the whole ${node.isWorkflow ? 'workflow' : 'step'} on ${deviceName(node.deviceId) || 'its device'}, in order.`}
                           </span>
                         </div>
                       );
@@ -492,7 +494,7 @@ export default function RunConfigPanel({
                         </Field>
                         {catalog.length === 0 && (
                           <span className="text-xs text-amber-600 dark:text-amber-400">
-                            {node.deviceId || 'This device'} has not reported any optimizer backends.
+                            {deviceName(node.deviceId) || 'This device'} has not reported any optimizer backends.
                           </span>
                         )}
                       </div>
@@ -507,7 +509,7 @@ export default function RunConfigPanel({
                             return (
                               <div key={varName} className="min-w-0 space-y-1.5 rounded-lg border border-gray-100 bg-gray-50/60 p-2.5 dark:border-white/5 dark:bg-white/[0.02]">
                                 <div className="flex items-center justify-between gap-2">
-                                  <span className="truncate font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400">{varName}</span>
+                                  <span className="truncate font-mono text-xs font-semibold text-gray-900 dark:text-white">{varName}</span>
                                   <label
                                     className="flex shrink-0 cursor-pointer select-none items-center gap-1 text-[11px] font-medium text-teal-700 dark:text-teal-400"
                                     title="A different value each iteration, from the table below, instead of a search range or one fixed value"
@@ -663,7 +665,7 @@ export default function RunConfigPanel({
                     type="number"
                     min={1}
                     aria-label={`Minutes between runs of ${node.label}`}
-                    title="Left empty, it runs as one run with this many iterations (prep and cleanup once)"
+                    title="Left empty, the runs go one after another with no wait between them"
                     placeholder="0"
                     value={node.schedule.everyMinutes ?? ''}
                     onChange={(e) => onScheduleChange(node.id, { ...node.schedule, everyMinutes: e.target.value })}
@@ -752,7 +754,7 @@ export default function RunConfigPanel({
             <button
               onClick={onRun}
               disabled={unfilled > 0}
-              className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center gap-1.5 rounded-lg bg-accent px-4 py-1.5 text-sm font-semibold text-on-accent disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Play size={14} />
               Run

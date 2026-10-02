@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BellRing, ChevronDown, MessageSquareText, AlertTriangle } from 'lucide-react';
 import DeviceAvatar from './DeviceAvatar';
 import PauseActions, { type PauseItem } from './PauseActions';
+import { useDeviceName } from '@/lib/deviceNames';
 
 /**
  * Every run stopped for a person, on every page: a question to answer or a failed step to decide
@@ -30,6 +31,7 @@ const TITLE_PREFIX = /^\(\d+\)\s+/;
 const canNotify = () => typeof window !== 'undefined' && 'Notification' in window;
 
 export default function AttentionCenter() {
+  const deviceName = useDeviceName();
   const [items, setItems] = useState<Item[]>([]);
   const [open, setOpen] = useState(true);
   const [permission, setPermission] = useState<string>('unsupported');
@@ -57,7 +59,7 @@ export default function AttentionCenter() {
             for (const i of fresh) {
               try {
                 new Notification(i.kind === 'error' ? 'A run stopped on an error' : 'A run is waiting for input', {
-                  body: `${i.deviceId || 'Cloud'} · ${i.runName}\n${i.kind === 'error' ? i.error : i.prompt || 'Continue?'}`,
+                  body: `${deviceName(i.deviceId) || 'Cloud'} · ${i.runName}\n${i.kind === 'error' ? i.error : i.prompt || 'Continue?'}`,
                   tag: i.key,
                 });
               } catch { /* some embedded browsers expose the API but refuse to show one */ }
@@ -106,7 +108,7 @@ export default function AttentionCenter() {
           {permission === 'default' && (
             <button
               onClick={async () => setPermission(await Notification.requestPermission())}
-              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-indigo-600 hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-indigo-500/10"
+              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-accent-fg hover:bg-accent-soft"
               title="Get a desktop notification when a run stops, even when this tab is in the background"
             >
               Desktop alerts
@@ -130,8 +132,8 @@ export default function AttentionCenter() {
                 {i.deviceId
                   ? <DeviceAvatar id={i.deviceId} version={i.deviceImage} size={22} />
                   : <span className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-amber-100 text-amber-600 dark:bg-amber-500/15"><MessageSquareText className="h-3.5 w-3.5" /></span>}
-                <div className="min-w-0 flex-1 truncate text-xs" title={`${i.deviceId || 'Cloud'} · ${i.runName}${where ? ` · ${where}` : ''}`}>
-                  <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{i.deviceId || 'Cloud'}</span>
+                <div className="min-w-0 flex-1 truncate text-xs" title={`${deviceName(i.deviceId) || 'Cloud'} · ${i.runName}${where ? ` · ${where}` : ''}`}>
+                  <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{deviceName(i.deviceId) || 'Cloud'}</span>
                   <span style={{ color: 'var(--text-secondary)' }}> · {i.runName}{where ? ` · ${where}` : ''}</span>
                 </div>
               </div>

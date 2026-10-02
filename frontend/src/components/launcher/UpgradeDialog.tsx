@@ -54,7 +54,7 @@ export default function UpgradeDialog({ api, account, reason, onClose, onSignIn 
     <Modal wide title={<span className="flex items-center gap-2"><Sparkles className="w-4 h-4 text-violet-500" /> Plans</span>} onClose={onClose}>
       <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">{lead}</p>
       <div className="grid grid-cols-2 gap-4">
-        <div className={`rounded-xl border p-4 ${!pro ? 'border-indigo-300 dark:border-indigo-500/40' : 'border-gray-200 dark:border-white/10'}`}>
+        <div className={`rounded-xl border p-4 ${!pro ? 'border-gray-300 dark:border-white/20 dark:border-white/30' : 'border-gray-200 dark:border-white/10'}`}>
           <div className="flex items-baseline justify-between">
             <h3 className="font-semibold">Free</h3>
             <span className="text-sm text-gray-500">$0</span>
@@ -67,7 +67,7 @@ export default function UpgradeDialog({ api, account, reason, onClose, onSignIn 
               : <Button small disabled={busy} onClick={() => choose('free')}>Switch to Free</Button>}
           </div>
         </div>
-        <div className={`rounded-xl border p-4 bg-gradient-to-br from-indigo-50 to-violet-50 dark:from-indigo-500/10 dark:to-violet-500/10 ${pro ? 'border-violet-400 dark:border-violet-500/50' : 'border-violet-200 dark:border-violet-500/30'}`}>
+        <div className={`rounded-xl border p-4 bg-gradient-to-br from-gray-50 to-violet-50 dark:from-white/5 dark:to-violet-500/10 ${pro ? 'border-violet-400 dark:border-violet-500/50' : 'border-violet-200 dark:border-violet-500/30'}`}>
           <div className="flex items-baseline justify-between">
             <h3 className="font-semibold">Pro</h3>
             <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-600 text-white">Preview</span>

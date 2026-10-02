@@ -5,6 +5,7 @@
 //   resources/bin/uv[.exe]        manages Python on the user's machine
 //   resources/edge/*.whl          the edge server, built from ../edge_server
 //   resources/frontend/           the web UI, from ../frontend/out
+//   resources/example/            the simulated drivers behind "Try the example" (src/example.js)
 //
 // Run on each target OS (uv is a native binary): `npm run prepare-resources`, then `npm run dist`.
 // Development (`npm start`) does not need any of this; see src/resources.js.
@@ -38,5 +39,10 @@ if (!fs.existsSync(path.join(ui, 'index.html'))) {
     throw new Error('frontend/out is missing. Run `npm run build` in frontend/ first.');
 }
 fs.cpSync(ui, path.join(OUT, 'frontend'), { recursive: true });
+
+step('example lab');
+const { DRIVER_FILES } = require('../src/example');
+fs.mkdirSync(path.join(OUT, 'example'), { recursive: true });
+for (const f of DRIVER_FILES) fs.copyFileSync(path.join(REPO_ROOT, 'example', f), path.join(OUT, 'example', f));
 
 console.log(`\nResources ready in ${OUT}`);

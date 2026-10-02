@@ -75,6 +75,13 @@ export function uniqueNames(suggestions: string[], used: Iterable<string>): stri
 export type TemplateFit = {
   /** Instruments the template's steps call that the deck has no instrument of that name for. */
   missing: string[];
+  /**
+   * For a missing name, deck instruments built from one of the template's Hub modules but named
+   * differently: the same driver under another name, which is what a template most often meets.
+   * A template lists which modules it was written for and which names its steps call, but not
+   * which name is which module, so these are candidates to choose from, not a proven match.
+   */
+  sameDriver: Record<string, string[]>;
   /** True when every instrument it calls is on the deck. */
   fits: boolean;
 };
@@ -86,10 +93,37 @@ export type TemplateFit = {
  * instrument with the right name can still fit). Unfit templates can still be added; the edge's
  * Library marks their steps, and they can be re-pointed in the Designer.
  */
-export function templateFit(template: Pick<HubTemplate, 'instruments'>, deck: Deck | null): TemplateFit {
-  const onDeck = new Set((deck?.instruments || []).filter(i => i.enabled !== false).map(i => i.name));
+export function templateFit(template: Pick<HubTemplate, 'instruments'> & { module_ids?: number[] }, deck: Deck | null): TemplateFit {
+  const live = (deck?.instruments || []).filter(i => i.enabled !== false);
+  const onDeck = new Set(live.map(i => i.name));
+  const names = new Set(template.instruments || []);
   const missing = (template.instruments || []).filter(name => !onDeck.has(name));
-  return { missing, fits: missing.length === 0 };
+  const modules = new Set((template.module_ids || []).map(Number));
+  // Deck instruments from the template's modules that no template name already claims.
+  const candidates = live.filter(i => i.hub && modules.has(Number(i.hub.moduleId)) && !names.has(i.name)).map(i => i.name);
+  const sameDriver: Record<string, string[]> = {};
+  for (const name of missing) sameDriver[name] = candidates;
+  return { missing, sameDriver, fits: missing.length === 0 };
+}
+
+/**
+ * The template's body with its steps pointed at other instrument names (`{fromName: toName}`),
+ * so a workflow written for `pump` runs on a deck whose same driver is called `syringe_pump`
+ * without a trip through the Designer. Only the `instrument` field changes; arguments, return
+ * variables and everything else are left as written.
+ */
+export function repointInstruments(body: Record<string, unknown>, mapping: Record<string, string>): Record<string, unknown> {
+  const live = Object.fromEntries(Object.entries(mapping).filter(([from, to]) => to && to !== from));
+  if (!Object.keys(live).length) return body;
+  const out: Record<string, unknown> = { ...body };
+  for (const phase of ['prep', 'script', 'cleanup']) {
+    const steps = body[phase];
+    if (!Array.isArray(steps)) continue;
+    out[phase] = steps.map(step => (step && typeof step === 'object' && typeof (step as { instrument?: unknown }).instrument === 'string' && live[(step as { instrument: string }).instrument]
+      ? { ...(step as Record<string, unknown>), instrument: live[(step as { instrument: string }).instrument] }
+      : step));
+  }
+  return out;
 }
 
 /** Every requirement once, in first-seen order. */

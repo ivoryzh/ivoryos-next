@@ -14,12 +14,16 @@ import type { NextRequest } from 'next/server';
  *   /api/pair/start, /api/pair/poll
  *                                called by an edge server: it starts a pairing request, then
  *                                proves itself with the secret it kept (src/lib/pairing.js)
+ *   /api/agent/* with `Authorization: Bearer ivc_...`
+ *                                an outside agent (the MCP server) with an agent token; whether
+ *                                the token is real is `authorize`'s decision, not this file's
  */
 const OPEN = [/^\/login(\/|$)/, /^\/api\/auth\//, /^\/api\/health(\/|$)/, /^\/api\/pair\/(start|poll)(\/|$)/];
 
 export function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
   if (OPEN.some((re) => re.test(pathname)) || req.cookies.get('ivoryos_session')) return NextResponse.next();
+  if (pathname.startsWith('/api/agent/') && /^Bearer ivc_/.test(req.headers.get('authorization') || '')) return NextResponse.next();
   if (pathname.startsWith('/api/')) {
     return NextResponse.json({ error: 'Sign in to Cloud first.' }, { status: 401 });
   }

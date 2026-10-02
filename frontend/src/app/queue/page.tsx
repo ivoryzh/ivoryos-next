@@ -1,11 +1,13 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
+import CloudRepeats from '@/components/CloudRepeats';
 
 import { useState, useEffect } from 'react';
 import { ListTodo, Play, Pause, XCircle, Edit3, Check, X, ArrowUp, ArrowDown, Trash2, Cloud } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunProgress, { type RunStep } from '@/components/RunProgress';
 import { confirmDialog, notify, useDocumentTheme } from '@ivoryos/shared-ui';
+import { runSizeLabel } from '@/runSize';
 
 // The edge server runs pending work in (queue_position, id) order — a run only has a
 // queue_position once someone has moved it — so the list has to sort the same way or the
@@ -323,7 +325,7 @@ export default function QueuePage() {
     if (step.status !== 'pending') return null;
     if (editingStep !== step.id) {
       return (
-        <button onClick={() => startEdit(step)} className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-300">
+        <button onClick={() => startEdit(step)} className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-900 dark:hover:text-white">
           <Edit3 className="w-3 h-3" /> edit
         </button>
       );
@@ -331,7 +333,7 @@ export default function QueuePage() {
     return (
       <div className="mt-1.5 space-y-1.5">
         <textarea
-          className="w-full text-xs font-mono p-2 bg-gray-100 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded resize-y outline-none focus:border-indigo-500"
+          className="w-full text-xs font-mono p-2 bg-gray-100 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded resize-y outline-none focus:border-accent"
           rows={3}
           value={editParams}
           onChange={(e) => setEditParams(e.target.value)}
@@ -387,7 +389,7 @@ export default function QueuePage() {
 
   const statusPill = (status: string) => (
     <span className={`shrink-0 px-2.5 py-0.5 rounded-full text-xs font-bold ${
-      status === 'running' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
+      status === 'running' ? 'bg-accent-soft text-accent-fg'
         : ['paused', 'pausing', 'waiting_input'].includes(status) ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
         : ['error', 'cancelling'].includes(status) ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
         : status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
@@ -402,7 +404,7 @@ export default function QueuePage() {
       <Sidebar />
 
       <div className="flex-1 flex flex-col relative z-0 min-w-0">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+        <header data-ivoryos-page-header="title" className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <h2 className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 flex items-center space-x-2">
             <ListTodo className="w-5 h-5" />
             <span>Execution Queue</span>
@@ -414,14 +416,14 @@ export default function QueuePage() {
           <aside className="w-[340px] shrink-0 border-r border-gray-200 dark:border-white/10 bg-white/60 dark:bg-black/10 overflow-y-auto p-4 space-y-6">
             <section>
               <h3 className="text-xs font-bold text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5">
-                <Play className="w-3.5 h-3.5 text-indigo-500" /> now
+                <Play className="w-3.5 h-3.5 text-gray-700 dark:text-gray-200" /> now
               </h3>
               {activeRun ? (
                 <div
                   onClick={() => setSelectedRunId(null)}
                   className={`rounded-xl border p-3 space-y-3 cursor-pointer transition-colors ${
                     shownIsActive
-                      ? 'border-indigo-300 bg-indigo-50/60 dark:border-indigo-500/40 dark:bg-indigo-500/10'
+                      ? 'border-accent-tint bg-accent-soft'
                       : 'border-gray-200 bg-white hover:border-gray-300 dark:border-white/10 dark:bg-white/5'
                   }`}
                 >
@@ -456,7 +458,7 @@ export default function QueuePage() {
                       onClick={() => setSelectedRunId(run.id)}
                       className={`group rounded-lg border px-2.5 py-2 cursor-pointer transition-colors ${
                         shownRun?.id === run.id
-                          ? 'border-indigo-300 bg-indigo-50/60 dark:border-indigo-500/40 dark:bg-indigo-500/10'
+                          ? 'border-accent-tint bg-accent-soft'
                           : 'border-gray-200 bg-white hover:border-gray-300 dark:border-white/10 dark:bg-white/5'
                       }`}
                     >
@@ -474,7 +476,7 @@ export default function QueuePage() {
                                 if (e.key === 'Enter') renameRun(run.id, renameValue);
                                 if (e.key === 'Escape') setRenamingRunId(null);
                               }}
-                              className="min-w-0 flex-1 bg-gray-50 dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded px-2 py-0.5 text-sm font-semibold focus:outline-none focus:border-indigo-500"
+                              className="min-w-0 flex-1 bg-gray-50 dark:bg-black/40 border border-gray-200 dark:border-white/10 rounded px-2 py-0.5 text-sm font-semibold focus:outline-none focus:border-accent"
                             />
                             <button onClick={() => renameRun(run.id, renameValue)} title="Save name" className="p-1 rounded text-green-600 hover:bg-green-50 dark:hover:bg-green-900/30"><Check className="w-4 h-4" /></button>
                             <button onClick={() => setRenamingRunId(null)} title="Cancel" className="p-1 rounded text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10"><X className="w-4 h-4" /></button>
@@ -485,7 +487,7 @@ export default function QueuePage() {
                       </div>
                       <div className="mt-1 pl-8 flex items-center justify-between gap-2">
                         <span className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                          #{run.id} · {run.steps?.length || 0} steps
+                          #{run.id} · {runSizeLabel(run)}
                         </span>
                         {/* Housekeeping, on hover so a long queue stays scannable. */}
                         <div className="flex items-center shrink-0 opacity-40 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
@@ -501,7 +503,7 @@ export default function QueuePage() {
               )}
             </section>
 
-            {cloudQueue && (cloudQueue.waiting > 0 || cloudQueue.nextSchedule) && (
+            {cloudQueue && (cloudQueue.waiting > 0 || cloudQueue.nextSchedule || (cloudQueue.repeats || []).length > 0) && (
               <section>
                 <h3
                   className="text-xs font-bold text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5"
@@ -510,6 +512,7 @@ export default function QueuePage() {
                   <Cloud className="w-3.5 h-3.5 text-sky-500" /> waiting in cloud · {cloudQueue.waiting}
                 </h3>
                 <div className="space-y-1">
+                  <CloudRepeats repeats={cloudQueue.repeats} />
                   {(cloudQueue.items || []).map((item: any, i: number) => (
                     <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-dashed border-sky-200 dark:border-sky-500/30 bg-sky-50/40 dark:bg-sky-500/5">
                       <span className="min-w-0 flex-1 text-xs text-gray-700 dark:text-gray-200 truncate" title={item.label}>{item.label}</span>

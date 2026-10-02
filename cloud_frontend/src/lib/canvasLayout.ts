@@ -113,8 +113,12 @@ export function slotBelow(source: Node, nodes: Node[], edges: Edge[], newWidth =
  * Lay the whole graph out in rows: each step one row below the lowest step it waits on, rows
  * centred under Start, and siblings ordered by where their parents are (an If's true branch left
  * of its false one). Anchored on Start's current position so tidying does not move the view.
+ *
+ * With `maxHeight` (the visible canvas height, in canvas units), a layout taller than that is
+ * wrapped into columns side by side, read left to right: a twenty-step chain in one column is a
+ * scroll, in four it is one screen. See wrapColumns.
  */
-export function tidyLayout(nodes: Node[], edges: Edge[]): Node[] {
+export function tidyLayout(nodes: Node[], edges: Edge[], opts: { maxHeight?: number } = {}): Node[] {
   const ids = new Set(nodes.map(n => n.id));
   const live = edges.filter(e => ids.has(e.source) && ids.has(e.target));
   const incoming = new Map<string, Edge[]>();
@@ -145,6 +149,7 @@ export function tidyLayout(nodes: Node[], edges: Edge[]): Node[] {
     const n = nodes.find(m => m.id === id)!;
     return p ? p.x + sizeOf(n).w / 2 : n.position.x + sizeOf(n).w / 2;
   };
+  const bands: Band[] = [];
   for (const row of rows) {
     if (!row) continue;
     const key = (n: Node) => {
@@ -160,7 +165,63 @@ export function tidyLayout(nodes: Node[], edges: Edge[]): Node[] {
       placed.set(n.id, { x: snap(x), y: snap(y) });
       x += sizeOf(n).w + GAP_X;
     }
-    y += Math.max(...ordered.map(n => sizeOf(n).h)) + GAP_Y;
+    const height = Math.max(...ordered.map(n => sizeOf(n).h));
+    bands.push({ ids: ordered.map(n => n.id), top: y, height, width: total });
+    y += height + GAP_Y;
   }
+  if (opts.maxHeight) wrapColumns(bands, placed, opts.maxHeight, centreX, anchor.position.y);
   return nodes.map(n => ({ ...n, position: placed.get(n.id) || n.position }));
+}
+
+/** One laid-out row: its steps, where it starts, how tall and wide it is (rows are centred). */
+interface Band { ids: string[]; top: number; height: number; width: number }
+
+const COLUMN_GAP = 140;
+
+/**
+ * Split laid-out rows into balanced columns no taller than `maxHeight`, moving each row whole.
+ * A cut goes between rows, and if it can it goes just above a single step, so the edge that
+ * crosses to the next column is the only one and no branch is split down the middle. The
+ * crossing edge runs up the gap between the columns (edges are drawn as right-angled steps).
+ */
+function wrapColumns(bands: Band[], placed: Map<string, { x: number; y: number }>, maxHeight: number, centreX: number, top: number) {
+  const span = (from: number, to: number) => bands.slice(from, to).reduce((s, b) => s + b.height, 0) + GAP_Y * Math.max(0, to - from - 1);
+  const total = span(0, bands.length);
+  if (total <= maxHeight || bands.length < 2) return;
+  const target = total / Math.ceil(total / maxHeight);
+
+  const starts = [0];
+  for (let i = 1; i < bands.length; i++) {
+    const from = starts[starts.length - 1];
+    if (span(from, i + 1) <= target * 1.1) continue;
+    // Over the target: cut above row i, or above the nearest single step behind it that still
+    // leaves this column at least half full.
+    let cut = i;
+    if (bands[i].ids.length > 1) {
+      for (let j = i - 1; j > from; j--) {
+        if (span(from, j) < target / 2) break;
+        if (bands[j].ids.length === 1) { cut = j; break; }
+      }
+    }
+    starts.push(cut);
+    i = cut;
+  }
+
+  let left = centreX - Math.max(...bands.slice(0, starts[1] ?? bands.length).map(b => b.width)) / 2;
+  starts.forEach((from, c) => {
+    const to = starts[c + 1] ?? bands.length;
+    const width = Math.max(...bands.slice(from, to).map(b => b.width));
+    const centre = left + width / 2;
+    let y = top;
+    for (const band of bands.slice(from, to)) {
+      const dx = centre - centreX;
+      const dy = y - band.top;
+      for (const id of band.ids) {
+        const p = placed.get(id)!;
+        placed.set(id, { x: snap(p.x + dx), y: snap(p.y + dy) });
+      }
+      y += band.height + GAP_Y;
+    }
+    left += width + COLUMN_GAP;
+  });
 }

@@ -2,9 +2,11 @@
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
-import Link from 'next/link';
-import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo, HandHelping } from 'lucide-react';
+import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo, HandHelping, Flag } from 'lucide-react';
+import { decideFailure, stopGracefully } from '@/runControl';
 import { setPromptMinimized } from '@/inputPrompt';
+import { openQueue } from './QueueDrawer';
+import { notify } from '@ivoryos/shared-ui';
 
 export default function GlobalQueueBar() {
   const [activeRun, setActiveRun] = useState<any>(null);
@@ -15,7 +17,12 @@ export default function GlobalQueueBar() {
   const [pendingCount, setPendingCount] = useState(0);
   // The desktop launcher page is served by the app itself, not by an edge, so there is no queue
   // to watch there (and nothing at /api to ask).
-  const onLauncher = (usePathname() || '').startsWith('/launcher');
+  const pathname = usePathname() || '';
+  const onLauncher = pathname.startsWith('/launcher');
+  // The Run pages show the live run themselves (LiveRun, at the top of the page), with the same
+  // controls. A second card for the same run floated over that panel's buttons, so here the
+  // card stands down while a run is showing; the idle chip stays, as the way into the queue.
+  const onRunPage = /^\/(once|execution|optimize)(\/|$)/.test(pathname);
 
   useEffect(() => {
     if (onLauncher) return;
@@ -80,39 +87,38 @@ export default function GlobalQueueBar() {
     try {
       await fetch(`${API_BASE}/api/queue/runs/${activeRun.id}/${action}`, { method: 'POST' });
     } catch (e) {
-      alert(`Failed to ${action} run`);
+      notify(`Failed to ${action} the run.`, { tone: 'error' });
     }
   };
 
-  const resolveError = async (action: 'retry' | 'skip') => {
-    if (!activeRun) return;
-    try {
-      await fetch(`${API_BASE}/api/queue/runs/${activeRun.id}/resolve`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ action })
-      });
-    } catch (e) {
-      alert(`Failed to ${action} error`);
-    }
-  };
+  // Retry, skip and stop answer a failed step only while it waits (runControl.ts).
+  const waitingDecision = !!activeRun && activeRun.status === 'error' && status?.awaiting_decision === activeRun.id;
+  const graceful = !!status?.graceful_stop;
 
   // Legacy IvoryOS kept a status chip on screen at all times — the operator could glance at any
   // page and know whether the platform was idle, running, paused or stuck. Hiding the bar when
   // nothing is running loses that: "no bar" and "page still loading" look identical. So when
   // there's no active run, fall back to a compact idle chip that still reports the queue depth.
   if (onLauncher) return null;
+  // The Run pages draw their own chip and run bar at the bottom (LiveRun); one there is enough.
+  if (onRunPage) return null;
 
   if (!activeRun) {
     return (
-      <Link
-        href="/queue"
+      <button
+        type="button"
+        onClick={openQueue}
         title={pendingCount > 0 ? `Platform is idle — ${pendingCount} run${pendingCount === 1 ? '' : 's'} waiting in the queue` : 'Platform is idle'}
         className="fixed bottom-4 right-[calc(var(--ivoryos-dock-right,0px)+1rem)] z-[9999] flex items-center gap-2 px-3 py-2 rounded-full border border-gray-200 dark:border-white/10 bg-white/90 dark:bg-gray-900/90 backdrop-blur shadow-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
       >
-        {pendingCount > 0 ? (
+        {pendingCount > 0 && status?.queue_paused ? (
           <>
-            <ListTodo className="w-3.5 h-3.5 text-indigo-500" />
+            <Pause className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+            <span className="text-amber-700 dark:text-amber-300">Queue paused · {pendingCount} waiting</span>
+          </>
+        ) : pendingCount > 0 ? (
+          <>
+            <ListTodo className="w-3.5 h-3.5 text-gray-700 dark:text-gray-200" />
             <span>{pendingCount} queued</span>
           </>
         ) : (
@@ -121,7 +127,7 @@ export default function GlobalQueueBar() {
             <span>Idle</span>
           </>
         )}
-      </Link>
+      </button>
     );
   }
 
@@ -147,7 +153,7 @@ export default function GlobalQueueBar() {
         {/* Progress Bar (Top edge) */}
         <div className="h-1.5 w-full bg-gray-100 dark:bg-white/5">
             <div 
-                className="h-full bg-indigo-500 transition-all duration-500 ease-in-out" 
+                className="h-full bg-accent transition-all duration-500 ease-in-out" 
                 style={{ width: `${progressPercent}%` }}
             />
         </div>
@@ -160,13 +166,13 @@ export default function GlobalQueueBar() {
             {/* min-w-0 + flex-1 so a long run name truncates instead of pushing the buttons on
                 the right into each other. */}
             <div className="flex items-center space-x-3 min-w-0 flex-1">
-                <div className={`shrink-0 p-1.5 rounded-full ${activeRun.status === 'waiting_input' ? 'bg-pink-100 text-pink-600 dark:bg-pink-900/30 dark:text-pink-400 animate-pulse' : ['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 animate-pulse'}`}>
+                <div className={`shrink-0 p-1.5 rounded-full ${activeRun.status === 'waiting_input' ? 'bg-pink-100 text-pink-600 dark:bg-pink-900/30 dark:text-pink-400 animate-pulse' : ['paused', 'pausing'].includes(activeRun.status) ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' : activeRun.status === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : activeRun.status === 'cancelling' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 animate-pulse' : activeRun.status === 'completed' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-200 dark:bg-white/10 text-gray-900 dark:text-white dark:bg-white/15 dark:text-white animate-pulse'}`}>
                    <Activity className="w-4 h-4" />
                 </div>
                 <div className="flex flex-col min-w-0">
                     <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeRun.name}</span>
                     <span className="text-[11px] text-gray-500 font-medium truncate">
-                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : activeRun.status} · {startedSteps}/{totalSteps} steps
+                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : waitingDecision ? 'a step failed: decide' : graceful ? 'stopping after this iteration' : activeRun.status} · {startedSteps}/{totalSteps} steps
                     </span>
                 </div>
             </div>
@@ -180,6 +186,16 @@ export default function GlobalQueueBar() {
                     <HandHelping className="w-3.5 h-3.5" /> answer
                 </button>
             )}
+            {/* The queue is a drawer, not a page; while a run is up this card is where any page
+                reaches it (the idle chip does the same when nothing runs). */}
+            <button
+                onClick={(e) => { e.stopPropagation(); openQueue(); }}
+                title={pendingCount > 0 ? `Queue: ${pendingCount} waiting` : 'Queue'}
+                className="shrink-0 flex items-center gap-1 px-1.5 py-1 rounded-md text-xs font-medium text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-white/10"
+            >
+                <ListTodo className="w-4 h-4" />
+                {pendingCount > 0 && <span>{pendingCount}</span>}
+            </button>
             {expanded ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronUp className="w-4 h-4 text-gray-400 shrink-0" />}
         </div>
 
@@ -224,23 +240,34 @@ export default function GlobalQueueBar() {
                             <button onClick={() => handleRunControl('resume')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded transition-colors text-xs font-bold dark:bg-green-900/30 dark:text-green-300 dark:border-green-500/30">
                                 <Play className="w-3.5 h-3.5" /> <span>Resume</span>
                             </button>
-                        ) : activeRun.status === 'error' ? (
+                        ) : waitingDecision ? (
                             <>
-                            <button onClick={() => resolveError('retry')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 rounded transition-colors text-xs font-bold dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30">
+                            <button onClick={() => decideFailure(activeRun.id, 'retry')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 rounded transition-colors text-xs font-bold">
                                 <RefreshCcw className="w-3.5 h-3.5" /> <span>Retry</span>
                             </button>
-                            <button onClick={() => resolveError('skip')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 rounded transition-colors text-xs font-bold dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">
+                            <button onClick={() => decideFailure(activeRun.id, 'skip')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 rounded transition-colors text-xs font-bold dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">
                                 <FastForward className="w-3.5 h-3.5" /> <span>Skip</span>
                             </button>
                             </>
-                        ) : activeRun.status === 'completed' || activeRun.status === 'cancelled' ? (
+                        ) : ['completed', 'cancelled', 'error'].includes(activeRun.status) ? (
                              null
                         ) : (
+                            <>
+                            {!graceful && (
+                                <button onClick={() => stopGracefully(activeRun, pendingCount)} title="Finish this iteration (a row, a batch or a trial), then stop" className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-50 border border-gray-200 rounded transition-colors text-xs font-bold dark:bg-white/5 dark:text-gray-200 dark:border-white/10">
+                                    <Flag className="w-3.5 h-3.5" /> <span>After this</span>
+                                </button>
+                            )}
                             <button onClick={() => handleRunControl('pause')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 rounded transition-colors text-xs font-bold dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">
                                 <Pause className="w-3.5 h-3.5" /> <span>Pause</span>
                             </button>
+                            </>
                         )}
-                        {activeRun.status === 'completed' || activeRun.status === 'cancelled' ? (
+                        {waitingDecision ? (
+                            <button onClick={() => decideFailure(activeRun.id, 'stop')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 rounded transition-colors text-xs font-bold dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30">
+                                <XCircle className="w-3.5 h-3.5" /> <span>Stop</span>
+                            </button>
+                        ) : ['completed', 'cancelled', 'error'].includes(activeRun.status) ? (
                             <button onClick={() => setActiveRun(null)} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200 rounded transition-colors text-xs font-bold dark:bg-gray-900/30 dark:text-gray-300 dark:border-gray-500/30">
                                 <XCircle className="w-3.5 h-3.5" /> <span>Dismiss</span>
                             </button>

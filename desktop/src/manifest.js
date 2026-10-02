@@ -42,6 +42,25 @@ function packageKey(requirement) {
 }
 
 /**
+ * Two requirements for one package, as the one to keep. The newer version spec wins (that is
+ * what installing a newer pin is for), but the **extras are the union**: `pkg[full]` from a
+ * driver and `pkg>=0.1.7` from its plugin name the same package, and keeping only the second
+ * silently dropped `[full]` -- the driver then failed to import with "No module named 'cv2'"
+ * while the deck looked complete. Only plain named requirements are merged; anything else
+ * (a URL, a path) is replaced as before.
+ */
+function mergeRequirement(existing, incoming) {
+    const parse = (req) => /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*([^@]*)$/.exec(String(req).trim());
+    const a = parse(existing);
+    const b = parse(incoming);
+    if (!a || !b) return incoming;
+    const extrasOf = (list) => (list ? list.split(',') : []).map((e) => e.trim().toLowerCase()).filter(Boolean);
+    const extras = [...new Set([...extrasOf(a[2]), ...extrasOf(b[2])])].sort();
+    const spec = (b[3] || a[3] || '').trim();
+    return `${b[1]}${extras.length ? `[${extras.join(',')}]` : ''}${spec}`;
+}
+
+/**
  * Whether a requirement names exactly one version of the code. An unpinned one installs whatever
  * the index or branch holds at that moment, which for code that drives lab hardware is worth
  * telling the person before they accept it.
@@ -127,7 +146,7 @@ function mergeIntoDeck(deck, manifest) {
     for (const req of manifest.packages || []) {
         const key = packageKey(req);
         const at = packages.findIndex((p) => packageKey(p) === key);
-        if (at === -1) packages.push(req); else packages[at] = req;
+        if (at === -1) packages.push(req); else packages[at] = mergeRequirement(packages[at], req);
     }
 
     const instruments = [...(base.instruments || [])];
@@ -175,4 +194,4 @@ function describeInstall(manifest, { added, replaced, pluginsAdded = [] }) {
     return lines;
 }
 
-module.exports = { DECK_FORMAT, ManifestError, validateManifest, mergeIntoDeck, describeInstall, packageKey, isPinned };
+module.exports = { DECK_FORMAT, ManifestError, validateManifest, mergeIntoDeck, describeInstall, packageKey, isPinned, mergeRequirement };

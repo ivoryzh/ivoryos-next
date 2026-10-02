@@ -260,3 +260,37 @@ def test_starting_pairing_shows_the_code_and_never_the_secret(client, monkeypatc
     assert "secret-value" not in json.dumps(settings) and "secret-value" not in res.text
     assert client.delete("/api/cloud-settings/pair").json() == {"status": "cancelled"}
     assert client.get("/api/cloud-settings").json()["pairing"] is None
+
+
+def test_lan_token_login_reaches_the_mqtt_client():
+    """A LAN Cloud's token carries the device's broker login (Cloud's brokerAuth.js); the edge must
+    sign in with it, and an older token without one must still build a client."""
+    import base64
+    import json as _json
+    from ivoryos_edge import server
+
+    token = base64.b64encode(_json.dumps({
+        "protocol": "mqtt", "endpoint": "10.0.0.5", "port": 1883, "client_id": "rig-1",
+        "topic_prefix": "ivoryos/edge", "username": "rig-1", "password": "s3cret",
+    }).encode()).decode()
+    broker, prefix, client_id, url = server._broker_from_token(token)
+    assert (client_id, prefix, url) == ("rig-1", "ivoryos/edge", "mqtt://10.0.0.5:1883")
+    assert broker.client._username == b"rig-1" and broker.client._password == b"s3cret"
+
+    old = base64.b64encode(_json.dumps({"protocol": "mqtt", "endpoint": "10.0.0.5", "client_id": "rig-1"}).encode()).decode()
+    assert server._broker_from_token(old)[0].client._username is None
+
+
+def test_a_refused_login_says_pair_again():
+    import asyncio
+    from ivoryos_edge import server
+    from ivoryos_edge.broker import LocalMQTTBroker
+
+    broker = LocalMQTTBroker("rig-1", "127.0.0.1", 1883, username="rig-1", password="old")
+    broker.refused = 4  # what paho reports for a bad username or password
+    try:
+        asyncio.run(server._wait_connected(broker, seconds=0.3))
+    except PermissionError as e:
+        assert "pair it again" in str(e).lower()
+    else:
+        raise AssertionError("a refused login must not wait out the timeout as if unreachable")

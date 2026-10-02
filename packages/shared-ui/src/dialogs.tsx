@@ -181,7 +181,7 @@ function DialogHost() {
     >
       <div className="w-full max-w-md bg-white dark:bg-[#111] rounded-2xl shadow-2xl border border-gray-200 dark:border-white/10 overflow-hidden">
         <div className="px-5 pt-5 pb-4 flex gap-3">
-          <div className={`shrink-0 mt-0.5 ${isAlarming ? 'text-red-500' : 'text-indigo-500'}`}>
+          <div className={`shrink-0 mt-0.5 ${isAlarming ? 'text-red-500' : 'text-gray-700 dark:text-gray-200'}`}>
             {isAlarming ? <AlertTriangle className="w-5 h-5" /> : <Info className="w-5 h-5" />}
           </div>
           <div className="min-w-0 flex-1">
@@ -200,7 +200,7 @@ function DialogHost() {
                 value={value}
                 placeholder={spec.input.placeholder}
                 onChange={(e) => setValue(e.target.value)}
-                className="mt-3 w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-black/40 border border-gray-300 dark:border-white/10 text-gray-800 dark:text-gray-100 focus:outline-none focus:border-indigo-400"
+                className="mt-3 w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-black/40 border border-gray-300 dark:border-white/10 text-gray-800 dark:text-gray-100 focus:outline-none focus:border-accent"
               />
             )}
           </div>
@@ -218,7 +218,7 @@ function DialogHost() {
                   isDanger
                     ? 'bg-red-600 text-white hover:bg-red-700'
                     : isPrimary
-                      ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                      ? 'bg-accent text-on-accent hover:bg-accent-hover'
                       : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-100 dark:bg-white/5 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/10'
                 }`}
               >

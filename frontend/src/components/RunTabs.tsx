@@ -1,24 +1,26 @@
 "use client";
 
-import { Settings2, Zap } from 'lucide-react';
+import { Play, Rows3, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect } from 'react';
 
 /**
- * Configure and Optimize are two routes but one destination.
+ * Once, Iterate and Optimize (Cloud's run modes, on the bench) are three routes but one
+ * destination.
  *
- * They answer the same question — "this workflow has open parameters, what do I put in them?" —
- * and differ only in who picks the values: you, by hand, in a spreadsheet, or the optimizer, one
- * trial at a time. Two sidebar entries made that look like two unrelated places and buried the
- * fact that you can switch. So the sidebar has one entry and the switch lives here, in the page.
+ * They answer the same question, "what goes in this workflow's open parameters?", and differ in
+ * who picks the values: you, for one run (a form) or for each sample (a spreadsheet), or the
+ * optimizer, one trial at a time. Separate sidebar entries made that look like unrelated places,
+ * so the sidebar has one entry and the switch lives here, in the page.
  *
- * They stay separate routes deliberately: the deep links already in the app (the Designer's
- * Configure and Optimize buttons) keep working untouched, each page keeps its own bundle, and a
- * bookmark still lands where it did.
+ * Once and Iterate are one page in two modes (components/RunWorkflowPage.tsx). Iterate keeps the
+ * key `configure` and the route /execution it had as Configure, so a remembered tab, the
+ * Designer's Configure button and a bookmark all still land where they did.
  */
 
 export const RUN_TABS = [
-  { key: 'configure', href: '/execution', label: 'Configure', icon: Settings2 },
+  { key: 'once', href: '/once', label: 'Once', icon: Play },
+  { key: 'configure', href: '/execution', label: 'Iterate', icon: Rows3 },
   { key: 'optimize', href: '/optimize', label: 'Optimize', icon: Zap },
 ] as const;
 
@@ -76,7 +78,7 @@ export default function RunTabs({ active }: { active: RunTabKey }) {
             aria-current={isActive ? 'page' : undefined}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
               isActive
-                ? 'bg-white text-gray-900 shadow-sm dark:bg-white/10 dark:text-white'
+                ? 'bg-white text-accent-fg shadow-sm ring-1 ring-accent-tint/60 dark:bg-accent-soft dark:ring-0'
                 : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'
             }`}
           >

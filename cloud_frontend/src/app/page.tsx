@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Play, RefreshCw, Download, Save, FilePlus2 } from 'lucide-react';
+import CloudAgentPanel from '@/components/CloudAgentPanel';
+import { Play, RefreshCw, Download, Save, FilePlus2, Sparkles } from 'lucide-react';
 import { useNodesState, useEdgesState, addEdge, Connection, Edge, Node } from '@xyflow/react';
 import CloudWorkflowEditor from '@/components/CloudWorkflowEditor';
 import {
@@ -154,6 +155,10 @@ export default function CloudDesignerPage() {
   // Nodes the last run attempt rejected, so the canvas can point at them instead of leaving a
   // list of ids in an alert for someone to match up by eye.
   const [invalidNodeIds, setInvalidNodeIds] = useState<string[]>([]);
+  // The assistant: a left column beside the canvas, remembered per browser like the edge's.
+  const [agentOpen, setAgentOpen] = useState(false);
+  useEffect(() => { try { setAgentOpen(localStorage.getItem('cloud_agent_panel') === 'true'); } catch { } }, []);
+  const toggleAgent = () => setAgentOpen(open => { try { localStorage.setItem('cloud_agent_panel', String(!open)); } catch { } return !open; });
 
   // Polled alongside the device list. "0 Edges Online" used to be the only signal, and it looked
   // identical whether the backend was down or the lab was simply idle — this is what separates
@@ -639,6 +644,24 @@ export default function CloudDesignerPage() {
 
   return (
     <div className="flex h-full w-full">
+      {agentOpen && (
+        <CloudAgentPanel
+          nodes={nodes}
+          edges={edges}
+          workflowName={currentWorkflowName}
+          devices={cloudDevices}
+          onApply={(graph) => {
+            // Replaces the canvas wholesale, which is why it is only reachable from an explicit
+            // "Put on canvas": the proposal is always a complete graph. The editor re-attaches
+            // the live schema and callbacks to each node as it renders.
+            setNodes(graph.nodes as any);
+            setEdges(graph.edges as any);
+            if (graph.name && !currentWorkflowName) setCurrentWorkflowName(graph.name);
+            if (graph.description && !currentWorkflowDescription) setCurrentWorkflowDescription(graph.description);
+          }}
+          onClose={toggleAgent}
+        />
+      )}
       <div className="flex-1 flex flex-col h-full w-full overflow-hidden relative">
         <CloudWorkflowEditor
           cloudDevices={cloudDevices}
@@ -681,22 +704,28 @@ export default function CloudDesignerPage() {
               </div>
               <div className="flex items-center space-x-2 shrink-0">
                 <button
+                  onClick={toggleAgent}
+                  title={agentOpen ? 'Hide the assistant' : 'Assistant: describe a protocol, get a workflow across your devices to review'}
+                  className={`flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all border ${agentOpen ? 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-500/15 dark:text-violet-200 dark:border-violet-500/30' : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'}`}
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span className="hidden sm:inline">Assistant</span>
+                </button>
+                <button
                   onClick={startNewWorkflow}
                   title="Start a new, empty workflow"
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
                   <FilePlus2 className="w-4 h-4 text-gray-400" />
-                  <span className="hidden sm:inline">New</span>
                 </button>
 
                 <button
                   onClick={saveToLibrary}
                   disabled={nodes.length === 0}
                   title="Save this workflow to the Cloud library"
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Save className="w-4 h-4" />
-                  <span className="hidden sm:inline">Save</span>
                 </button>
 
                 <button
@@ -748,6 +777,7 @@ export default function CloudDesignerPage() {
         if (!node) return null;
         const block = (node.data as any).block || {};
         const deviceId = String((node.data as any).targetDeviceId || '');
+        const deviceName = cloudDevices.find((d: any) => String(d.id) === deviceId)?.name || deviceId;
         const body = sequenceBodies[`${deviceId}/${block.method}`] || null;
         const head = body?.version;
         const ref = block.ref || {};
@@ -762,12 +792,12 @@ export default function CloudDesignerPage() {
             target={{ name: String(block.method), version: ref.version, mode: ref.mode === 'latest' ? 'latest' : 'pinned', params }}
             body={tracksLatest ? body : null}
             error={!body
-              ? `${deviceId || 'Its device'} has not published this workflow's steps.`
+              ? `${deviceName || 'Its device'} has not published this workflow's steps.`
               : !tracksLatest
                 ? `This step is pinned to v${ref.version}. Cloud only has the latest version (v${head}), so it cannot show v${ref.version}'s steps. Update to run and see v${head}.`
                 : null}
             latestVersion={head}
-            note={<>These are the steps of <strong className="font-semibold">{String(block.method)}</strong> as {deviceId || 'its device'} last published it. Edit it on the device; {ref.mode === 'latest' ? 'this step runs the latest saved version.' : `this step runs v${ref.version} until you update it.`}</>}
+            note={<>These are the steps of <strong className="font-semibold">{String(block.method)}</strong> as {deviceName || 'its device'} last published it. Edit it on the device; {ref.mode === 'latest' ? 'this step runs the latest saved version.' : `this step runs v${ref.version} until you update it.`}</>}
             onClose={() => setPeekNodeId(null)}
             // Edits go to the device's own library through Edge Sequence (pushed and echoed back,
             // AGENTS.md section 0), not into this node: the node links the workflow and runs its

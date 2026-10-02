@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Inter } from 'next/font/google';
 import GlobalQueueBar from '@/components/GlobalQueueBar';
+import QueueDrawer from '@/components/QueueDrawer';
 import PluginPanelHost from '@/components/PluginPanel';
 import { ThemeSync } from '@ivoryos/shared-ui';
 import "./globals.css";
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Around the pages, not inside one: a plugin panel stays mounted while you navigate. */}
         <PluginPanelHost>{children}</PluginPanelHost>
         <GlobalQueueBar />
+        <QueueDrawer />
       </body>
     </html>
   );

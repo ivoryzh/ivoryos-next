@@ -11,7 +11,7 @@ const STATE: Record<string, { label: string; dot: string }> = {
   connecting: { label: 'Connecting', dot: 'bg-amber-400 animate-pulse' },
   reconnecting: { label: 'Reconnecting', dot: 'bg-amber-400 animate-pulse' },
   conflict: { label: 'Identity in use elsewhere', dot: 'bg-red-500' },
-  paused: { label: 'Paused', dot: 'bg-indigo-400' },
+  paused: { label: 'Paused', dot: 'bg-gray-500' },
   error: { label: 'Could not connect', dot: 'bg-red-500' },
   disconnected: { label: 'Not connected', dot: 'bg-gray-300 dark:bg-gray-600' },
 };
@@ -70,7 +70,7 @@ export default function CloudConnection({ api, profile, link, sharedWith }: {
   return (
     <section className={`${cardClass} p-4 space-y-3`}>
       <div className="flex items-center gap-2">
-        <Cloud className="w-4 h-4 text-indigo-500" />
+        <Cloud className="w-4 h-4 text-gray-700 dark:text-gray-200" />
         <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex-1">Cloud connection</h3>
         {running && !link?.paired && (
           <Button small tone="primary" onClick={() => connectDeck(api, profile).catch((e: any) => notify(e.message, { title: 'Could not connect', tone: 'error' }))}
@@ -117,7 +117,7 @@ export default function CloudConnection({ api, profile, link, sharedWith }: {
           )}
           {!sharedWith.length && link.connection_error && <Problem>{link.connection_error}</Problem>}
           {link.pairing?.state === 'waiting' && (
-            <div className="flex items-center gap-2 text-sm text-indigo-700 dark:text-indigo-300">
+            <div className="flex items-center gap-2 text-sm text-gray-900 dark:text-white">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               Waiting for approval on Cloud · code <span className="font-mono font-semibold">{link.pairing.code}</span>
             </div>

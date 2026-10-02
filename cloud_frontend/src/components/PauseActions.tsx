@@ -81,7 +81,7 @@ export default function PauseActions({ item }: { item: PauseItem }) {
   if (item.kind === 'error') {
     controls = (
       <>
-        <button onClick={() => send('retry')} disabled={!!sent} className={`${btn} bg-indigo-600 text-white hover:bg-indigo-700`}>
+        <button onClick={() => send('retry')} disabled={!!sent} className={`${btn} bg-accent text-on-accent hover:bg-accent-hover`}>
           <Play className="h-3 w-3" />Retry
         </button>
         <button onClick={() => send('skip')} disabled={!!sent} title="Mark the step skipped and carry on" className={`${btn} border border-gray-300 hover:bg-gray-50 dark:border-white/15 dark:hover:bg-white/5`}>

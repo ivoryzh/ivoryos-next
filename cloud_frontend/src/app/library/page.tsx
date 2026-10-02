@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cpu, AlertTriangle } from 'lucide-react';
+import { Library, Download, Search, Calendar, Clock, Filter, ArrowUpDown, Cloud, Cpu, AlertTriangle } from 'lucide-react';
 import { graphProblems } from '@/lib/libraryCheck';
 import { runtimeSummary, confirmDialog, notify, type WorkflowRuntime } from '@ivoryos/shared-ui';
 import { graphSignature, storedCanvasIsUnsaved } from '@/lib/graphSignature';
@@ -33,6 +33,11 @@ type EdgeSequenceItem = {
   created_at: number;
   updated_at: number;
   device_id: string;
+  /** The device as Cloud lists it; a removed one is a kept record and reads "removed". */
+  device_name: string;
+  device_removed: boolean;
+  /** Saved in Cloud and not sent to its device. */
+  cloud_only: boolean;
   /** The device's own verdict, published with the body -- see `published_sequence` on the edge. */
   problems: Problem[];
   problemCount: number;
@@ -83,16 +88,18 @@ export default function CloudLibraryPage() {
 
     const [sequences, devices] = await Promise.all([
       fetch('/api/edge-sequences').then(r => r.json()).catch(e => { console.error('Failed to fetch edge sequences', e); return []; }),
-      fetch('/api/devices').then(r => r.json()).catch(e => { console.error('Failed to fetch devices', e); return []; }),
+      fetch('/api/devices?removed=1').then(r => r.json()).catch(e => { console.error('Failed to fetch devices', e); return []; }),
     ]);
     const sequenceRows: any[] = Array.isArray(sequences) ? sequences : [];
     const deviceRows: any[] = Array.isArray(devices) ? devices : [];
+    // Devices that can run something: a removed device's kept record is not one.
+    const liveDevices = deviceRows.filter((d) => d.status !== 'removed');
 
     // Anything this browser still holds from before the Library moved to the server goes up first.
     await uploadBrowserLibrary();
     const distributed = await listLibrary().catch((e) => { console.error('Failed to read the Cloud library', e); return []; });
     for (const w of distributed) {
-      items.push({ ...w, type: 'distributed', problems: graphProblems(w.nodes || [], deviceRows, sequenceRows) });
+      items.push({ ...w, type: 'distributed', problems: graphProblems(w.nodes || [], liveDevices, sequenceRows) });
     }
 
     for (const s of sequenceRows) {
@@ -104,6 +111,9 @@ export default function CloudLibraryPage() {
         created_at: s.created_at ? new Date(s.created_at).getTime() : 0,
         updated_at: s.updated_at ? new Date(s.updated_at).getTime() : 0,
         device_id: s.device_id,
+        device_name: deviceRows.find((d) => String(d.id) === String(s.device_id))?.name || String(s.device_id).replace(/~removed-\d{14}$/, ''),
+        device_removed: deviceRows.find((d) => String(d.id) === String(s.device_id))?.status === 'removed',
+        cloud_only: !!s.body?.cloud_only,
         problems: verdict?.status === 'broken' ? (verdict.errors || []) : [],
         problemCount: verdict?.status === 'broken' ? (verdict.error_count || 0) : 0,
         runtime: s.body?.runtime || null,
@@ -165,9 +175,9 @@ export default function CloudLibraryPage() {
 
   return (
     <div className="flex-1 flex flex-col relative z-0 h-full w-full">
-      <header className="h-16 shrink-0 border-b flex items-center justify-between px-6 glass-header z-10" style={{ borderColor: 'var(--panel-border)' }}>
+      <header data-ivoryos-page-header="title" className="h-16 shrink-0 border-b flex items-center justify-between px-6 glass-header z-10" style={{ borderColor: 'var(--panel-border)' }}>
         <h2 className="text-sm font-bold tracking-wider flex items-center space-x-2" style={{ color: 'var(--text-secondary)' }}>
-          <Book className="w-5 h-5" />
+          <Library className="w-5 h-5" />
           <span>Cloud Workflow Library</span>
         </h2>
       </header>
@@ -232,11 +242,19 @@ export default function CloudLibraryPage() {
                   <div>
                       <h3 className="text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }} title={workflow.name}>{workflow.name}</h3>
                       {workflow.type === 'edge' ? (
-                          <span className="inline-flex items-center gap-1 max-w-full text-[10px] uppercase font-bold tracking-wider px-2 py-1 mt-2 rounded-full" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80' }}>
-                              <Cpu className="w-3 h-3 shrink-0" /> <span className="truncate" title={workflow.device_id}>{workflow.device_id}</span>
+                          <span className="flex flex-wrap items-center gap-1.5 mt-2">
+                            <span className="inline-flex items-center gap-1 max-w-full text-[11px] font-semibold px-2 py-1 rounded-full" style={workflow.device_removed ? { background: 'rgba(148, 163, 184, 0.18)', color: 'var(--text-secondary)' } : { background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80' }}>
+                              <Cpu className="w-3 h-3 shrink-0" /> <span className="truncate" title={workflow.device_id}>{workflow.device_name}</span>
+                            </span>
+                            {workflow.device_removed && (
+                              <span title="This device was removed from Cloud. Its workflows are kept as a record." className="text-[10px] uppercase font-bold tracking-wider px-2 py-1 rounded-full" style={{ background: 'rgba(148, 163, 184, 0.18)', color: 'var(--text-secondary)' }}>device removed</span>
+                            )}
+                            {workflow.cloud_only && !workflow.device_removed && (
+                              <span title="Saved in Cloud only. The device does not have this version, so it cannot be run from Cloud until it is sent (open it and choose Save and send to device)." className="text-[10px] uppercase font-bold tracking-wider px-2 py-1 rounded-full" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#f59e0b' }}>not on device</span>
+                            )}
                           </span>
                       ) : (
-                          <span className="inline-flex items-center gap-1 text-[10px] uppercase font-bold tracking-wider px-2 py-1 mt-2 rounded-full" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa' }}>
+                          <span className="inline-flex items-center gap-1 text-[10px] uppercase font-bold tracking-wider px-2 py-1 mt-2 rounded-full bg-accent-soft text-accent-fg">
                               <Cloud className="w-3 h-3 shrink-0" /> Distributed
                           </span>
                       )}
@@ -245,8 +263,8 @@ export default function CloudLibraryPage() {
                       ) : (
                           <p className="text-xs mt-2 italic text-gray-400">No description provided.</p>
                       )}
-                      {workflow.type === 'edge' && workflow.problemCount > 0 && (
-                          <ProblemLine lead={`Won't run on ${workflow.device_id}`} count={workflow.problemCount} problems={workflow.problems} />
+                      {workflow.type === 'edge' && !workflow.device_removed && workflow.problemCount > 0 && (
+                          <ProblemLine lead={`Won't run on ${workflow.device_name}`} count={workflow.problemCount} problems={workflow.problems} />
                       )}
                       {workflow.type === 'edge' && workflow.runtime?.runs ? (
                           <div className="mt-2 flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -271,11 +289,10 @@ export default function CloudLibraryPage() {
                   <div className="mt-6 flex justify-end">
                       <button 
                           onClick={() => loadWorkflow(workflow)}
-                          className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium hover-bg"
-                          style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa' }}
+                          className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium bg-accent-soft text-accent-fg hover:bg-accent-tint/30"
                       >
                           <Download className="w-4 h-4" />
-                          <span>{workflow.type === 'edge' ? 'Open in Edge Sequence Editor' : 'Load to Orchestrator'}</span>
+                          <span>{workflow.type === 'edge' ? (workflow.device_removed ? 'View' : 'Open in Edge Sequence Editor') : 'Load to Orchestrator'}</span>
                       </button>
                   </div>
               </div>

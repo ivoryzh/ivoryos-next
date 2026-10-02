@@ -55,14 +55,16 @@ unset means LAN (a SQLite file, with an MQTT broker the daemon starts itself). N
 
 | Topic (`{prefix}/{device_id}/…`) | Direction | Retained | QoS | Carries | Sent when |
 |---|---|---|---|---|---|
-| `status` | Edge → Cloud | yes | 0 | `{online, busy, ts, session}` | every 5 s, and immediately when a run is queued or finishes |
-| `status` (Last Will) | broker → Cloud | **no** | — | `{online: false}` | the edge drops without disconnecting |
-| `schema` | Edge → Cloud | yes | 1 | introspected instruments + optimizer catalog | on connect, then at ~5/10/20/40/80/160 s, then stops |
-| `sequences/{name}` | Edge → Cloud | yes | 1 | a saved workflow body + compatibility verdict + typical runtime | on connect (same schedule), on every save, on a push echo |
+| `status` | Edge → Cloud | yes | 1 | `{online, busy, ts, session, quiet, interval?, pong?}` | on connect and every reconnect, when a run is queued or finishes, when Cloud pings, and every 5 min as a backstop. **Not** every 5 s (see Presence) |
+| `status` (Last Will) | broker → Cloud | **no** | 1 | `{online: false}` | the connection dies: at once for a crash, after 1.5 × keep-alive for a silent loss |
+| `status` (goodbye) | Edge → Cloud | yes | 1 | `{online: false}`, or `{online: false, paused: true}` | the edge is stopped or paused on purpose |
+| `ping` | Cloud → Edge | no | 1 | `{ts, nonce}` | Cloud only has the broker's memory of a device (after Cloud restarts), or the edge has not gone quiet yet |
+| `schema` | Edge → Cloud | yes | 1 | introspected instruments + optimizer catalog | on connect and every reconnect, at ~5/10/20/40/80/160 s, then stops |
+| `sequences/{name}` | Edge → Cloud | yes | 1 | a saved workflow body + compatibility verdict + typical runtime | with automatic sync: on connect (same schedule) and on every save. With manual sync: on Sync now. Always: on a push echo |
 | `sequences/{name}` (empty) | Edge → Cloud | yes | 1 | zero bytes: MQTT's tombstone | the workflow is deleted on the edge |
-| `sequences-push` | Cloud → Edge | **no** | 1 | `{name, body, author}` | a workflow is saved in Cloud's editor |
-| `execute` | Cloud → Edge | no | 1 | one task: `{block, runId, nodeId}` or `{run, runId, nodeId}` | the dispatcher releases a task |
-| `task-status` | Edge → Cloud | no | 1 (0 for progress, 1 for a paused one) | `{runId, nodeId, status, error?, progress?}` | start, progress (≤ every 2 s; at once when the run stops for a person), finish, refusal |
+| `sequences-push` | Cloud → Edge | **no** | 1 | `{name, body, author}` | a workflow is saved in Cloud's editor with "Save and send to device" |
+| `execute` | Cloud → Edge | no | 1 | one task: `{block, runId, nodeId}` or `{run, runId, nodeId}`, plus `occurrence: {index, total}` for a repeated step | the dispatcher releases a task |
+| `task-status` | Edge → Cloud | no | 1 (0 for progress, 1 for a paused one) | `{runId, nodeId, status, ts, occurrence?, error?, progress?}`; `ts` is the edge's clock | start, progress (≤ every 2 s; at once when the run stops for a person), finish, refusal |
 | `task-control` | Cloud → Edge | **no** | 1 | `{runId, nodeId, pause, action, value?}`: an answer, or retry/skip/stop | someone decides in Cloud; re-sent every 10 s until the pause is gone |
 | `task-result` | Edge → Cloud | no | 1 | the finished run's record (steps, outputs; up to ~100 KB) | once, just before the final status |
 | `cloud-queue` | Cloud → Edge | no | 1 | what Cloud is holding for this device | when that summary changes, or the device comes back |
@@ -73,7 +75,7 @@ Two of these are easy to get wrong, and both have been:
   `payload.online` as missing and mark the device offline every time a run started.
 - **The Last Will is not retained.** AWS IoT refuses the whole connection, silently, if the Will
   has `retain=True`. A subscriber that connects later therefore never sees the Will, which is why
-  the daemon also marks a device offline when its heartbeat is more than 15 s old.
+  the daemon does not trust a *replayed* "online" until the device answers a ping (see Presence).
 
 Retained publishing needs `iot:RetainPublish` in the device's AWS IoT policy, not just
 `iot:Publish`. Without it AWS disconnects the client on every retained publish, which looks
@@ -81,7 +83,92 @@ exactly like a flaky network (see AGENTS.md, section 0).
 
 ---
 
+## Presence: how Cloud knows a device is there
+
+There is no 5-second heartbeat any more. It was about 17,000 messages per device per day, nearly
+all of an idle device's AWS IoT bill, to carry a fact every MQTT broker already tracks.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant E as Edge server
+    participant B as Broker (local or AWS IoT)
+    participant D as daemon.js
+    participant S as Cloud store
+
+    Note over E,B: connect (keep-alive 15 s local, 30 s AWS; Last Will = status {online:false})
+    E->>B: status {online, busy, quiet:false} (retained) + schema (+ workflows if sync is automatic)
+    B->>D: deliver
+    D->>S: device online
+    D->>B: ping {nonce}  (this Cloud does not need a heartbeat)
+    B->>E: deliver
+    E->>B: status {online, quiet:true, interval:300, pong:nonce}
+    Note over E,D: quiet from here: status only on change, plus one every 5 min
+
+    E->>B: a run is queued or finishes: status {busy} (QoS 1)
+    B->>D: deliver
+    D->>S: busy / free: hold or release this device's next task
+
+    Note over E,B: the edge crashes or loses power or network
+    B->>D: Last Will: status {online:false}
+    D->>S: device offline (its instruments and workflows stay, for scripting)
+
+    Note over E,B: the edge comes back
+    E->>B: status {online} at once, then schema again a few seconds later
+
+    Note over D: Cloud restarts (it may have missed a Last Will)
+    D->>B: subscribe
+    B->>D: replay retained status {online} (retain flag set)
+    D->>S: not trusted: shown offline
+    D->>B: ping {nonce}
+    alt the device is alive
+        E->>B: status {online, pong:nonce}
+        D->>S: device online (milliseconds later)
+    else no answer in 10 s
+        D->>S: stays offline
+    end
+
+    Note over E,B: stopped or paused on purpose
+    E->>B: status {online:false} (retained), then disconnect
+```
+
+The rules, and where they live (`cloud_frontend/src/lib/presence.js`, tested without a broker;
+edge `status_loop`, `publish_status`, `_on_reconnected`, `shutdown_event`):
+
+- **The broker reports a death.** Keep-alive pings are not messages and are not metered. A crashed
+  process is noticed at once (its socket closes); a silent loss after 1.5 × the keep-alive.
+- **A replayed "online" is the broker's memory, not proof.** The Last Will cannot be retained on
+  AWS, so a daemon that was down when a device died finds the old retained "online". It holds the
+  device as unconfirmed, sends nothing to it, and pings. The answer carries the ping's nonce, so
+  confirmation does not depend on how a broker sets the retain flag on a live message.
+- **Status on change is QoS 1.** With no repeat behind it, a lost "no longer busy" would leave
+  Cloud holding that device's next task until the backstop.
+- **The backstop** (`IVORYOS_STATUS_INTERVAL_S`, default 300 s) only bounds how long a wrong status
+  can last. The edge states its interval in the status; Cloud calls a device stale after three.
+- **Old and new versions mix.** The edge starts with the 5-second heartbeat and goes quiet when
+  Cloud pings, which only a Cloud that follows these rules does. An edge from before this change
+  sends no `quiet` field and is judged by the old 15-second rule. So either side can be updated
+  first.
+- **An offline device is still a device.** Its last schema and workflows stay in Cloud, so the
+  canvas and the sequence editor keep working against it; only running is refused.
+
+---
+
 ## 1. Workflow sync
+
+### Which workflows go to Cloud is a setting on the edge
+
+The Cloud Connect page on the edge has two modes (`CLOUD_SYNC_WORKFLOWS` in `.env`,
+`POST /api/cloud-settings/sync-mode`):
+
+- **Send automatically** (the default, and what happened before this was a choice): every saved
+  workflow goes to Cloud on connect and on each save.
+- **Only when I choose**: nothing is sent until **Sync now** (`POST /api/cloud-settings/sync-now`),
+  which sends every saved workflow once. Never pressing it is "never sync".
+
+Three things happen in either mode: the instrument schema is always sent (Cloud cannot script a
+device without it), a workflow Cloud sent to the edge is echoed back (that echo is its
+acknowledgement), and deleting a workflow on the edge clears Cloud's copy.
 
 ### Edge → Cloud: retained topics, no sync step
 
@@ -140,6 +227,13 @@ body still sitting on the broker.
 A workflow edited in Cloud has to reach the edge's disk, because that is where a run looks it up.
 It also has to survive the edge republishing its own copy, which would otherwise quietly undo the
 edit.
+
+**Sending it is a choice made at save time.** The editor asks: *Save and send to device* (the flow
+below; if the device is offline the push waits and is sent when it reconnects) or *Save in Cloud
+only*. A Cloud-only save is marked `cloud_only` in its body. While it is, the daemon does not
+replace it with the device's version of the same name, the Library shows it as "not on device",
+and a run or schedule that uses it is refused: the device would run its own version, or has none.
+Saving it again with "send" clears the mark.
 
 ```mermaid
 sequenceDiagram
@@ -313,6 +407,15 @@ moment as A.
 
 ### Repeats, schedules and what the bench sees
 
+- **"Run this 20 times" is 20 whole runs**, with or without a wait between them. Cloud sends one,
+  waits for the device to report it finished, then sends the next when the device is free. Each
+  run does its own setup and cleanup, is named "… · run 3 of 20", carries
+  `occurrence: {index, total}`, and keeps its own record (`run_tasks.results`). The device never
+  holds more than the current run; the `cloud-queue` summary tells it how many are still to come
+  and roughly when they end (`repeats: [{run, of, remaining, everyMs?, nextAt?, doneBy?}]`).
+  The edge echoes the run number in every report, and the daemon ignores a report whose number is
+  not the current run's: QoS 1 can redeliver run 2's "completed" while run 3 is on the device.
+  (Iterating a body inside one run, with setup and cleanup once, is what Iterate mode is for.)
 - **Repeat cadence (per node):** "every 20 minutes, 12 times". When an occurrence completes, the
   next one is scheduled (`not_before`) instead of advancing the run, so nothing downstream starts
   until all 12 have run.
@@ -335,6 +438,21 @@ moment as A.
 
 ---
 
+## Removing a device
+
+Removing a device (Cloud's Devices page, or "Remove from Cloud" on the edge) takes the *live*
+device away: its record, its pending pushes, its workspace membership and, on AWS, its certificate
+and Thing. The same id can then be paired again anywhere as a new device.
+
+What stays is the lab's record: its runs and results, and **the workflows mirrored from it**.
+Those move to a kept record (`<id>~removed-<time>`, status `removed`) in the same workspace, along
+with the instrument schema they were written against. The Library lists them as "device removed";
+they can be opened and exported, not changed or run. Nothing a device publishes can touch them.
+
+The edge says `leave` *before* it clears its retained topics. Clearing a retained workflow topic
+reads as "this workflow was deleted", so in the old order Cloud had deleted every workflow by the
+time it learned the device was leaving. The daemon also ignores those clears from a removed device.
+
 ## Connecting a device (for context)
 
 The edge shows an 8-character code (`POST /api/cloud-settings/pair` on the edge, which asks Cloud's
@@ -350,7 +468,9 @@ which looks like a flaky connection. A headless deployment can run `ivoryos-edge
 | Concern | Edge (`edge_server/ivoryos_edge/`) | Cloud (`cloud_frontend/`) |
 |---|---|---|
 | Broker connection, subscriptions, Last Will | `server.py` → `setup_broker`, `broker.py` | `daemon.js` (top), `src/lib/embedded-broker.js` |
-| Heartbeat and resync schedule | `server.py` → `status_loop`, `publish_status`, `notify_status_changed` | `daemon.js` → `status` handler, `markStaleDevicesOffline` |
+| Presence and resync schedule | `server.py` → `status_loop`, `publish_status`, `notify_status_changed`, `_on_reconnected`, `shutdown_event`; `broker.py` → `KEEPALIVE_S`, `on_reconnected` | `src/lib/presence.js`, `daemon.js` → `status` handler and its per-device sweep |
+| Workflow sync mode, Cloud-only saves | `server.py` → `CLOUD_SYNC_WORKFLOWS`, `sync-mode`, `sync-now` | `api/edge-sequences/route.ts` (`push`), `src/lib/runSources.ts` → `unsentWorkflows` |
+| Removing a device, keeping its workflows | `server.py` → `_say_goodbye` | `src/lib/deviceRemoval.js`, store `archiveDevice` |
 | Workflow publish / delete | `server.py` → `publish_sequences`, `published_sequence`, save and delete routes | `daemon.js` → `sequences` handler |
 | Cloud → Edge push | `server.py` → `handle_sequence_push` | `api/edge-sequences/route.ts`, `daemon.js` → `drainSequencePushes`, `ackIfEchoMatches` |
 | Run submission and graph rules | — | `api/cloud-workflows/runs`, `src/lib/dag.js` |

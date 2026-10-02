@@ -7,14 +7,17 @@ export const dynamic = 'force-dynamic';
 
 // Devices come from the store (written by daemon.js as it consumes each device's retained MQTT
 // status/schema topics) — SQLite on a LAN, Supabase in the hosted product.
-export async function GET() {
+export async function GET(req: Request) {
   const auth = await authorize();
   if ('response' in auth) return auth.response;
   const ws = auth.session.workspace.id;
   try {
-    // This workspace's devices only (lib/workspace.ts).
+    // This workspace's devices only (lib/workspace.ts). `?removed=1` adds the kept records of
+    // removed devices (status 'removed'), which hold the schema their kept workflows were
+    // written against; only the Library and the sequence viewer ask for them.
+    const includeRemoved = new URL(req.url).searchParams.get('removed') === '1';
     const mine = await ownedKeys('device', ws);
-    const devices = (await getStore().listDevices() as any[]).filter((d) => mine.has(String(d.id)));
+    const devices = (await getStore().listDevices({ includeRemoved }) as any[]).filter((d) => mine.has(String(d.id)));
     return NextResponse.json(devices);
   } catch (error: any) {
     // Every caller of this route (the orchestrator canvas especially) assumes the response is

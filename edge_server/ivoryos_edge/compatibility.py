@@ -28,6 +28,7 @@ import hashlib
 import json
 
 from ivoryos_edge.agent.validate import validate_body
+from ivoryos_edge.workflows import link_targets
 
 # name -> (body key, schema fingerprint, verdict)
 _cache: dict = {}
@@ -63,18 +64,49 @@ def _body_key(body) -> str:
         return ""
 
 
-def check(name, body, schema, fingerprint, known_workflows=()):
-    """`{"status": "ok"|"broken", "error_count": n, "errors": [...]}` for one workflow."""
+def check(name, body, schema, fingerprint, known_workflows=(), resolve_workflow=None, _visiting=()):
+    """`{"status": "ok"|"broken", "error_count": n, "errors": [...]}` for one workflow.
+
+    `resolve_workflow(name) -> body` lets the verdict follow `Library Workflows` links: a
+    workflow that calls a broken one cannot run either, and without this the Library showed the
+    caller green while every run of it failed inside the callee. Each linked workflow is checked
+    on its own (and cached on its own), and the caller's cache key carries their verdicts, so
+    fixing the callee clears the caller too. A link cycle is refused at save time; `_visiting`
+    only guards against one that predates that check.
+    """
     key = _body_key(body)
+    linked = {}
+    if resolve_workflow is not None:
+        visiting = set(_visiting) | {name}
+        for target in sorted(set(link_targets(body or {}))):
+            if target in visiting:
+                continue
+            try:
+                target_body = resolve_workflow(target)
+            except Exception:
+                target_body = None
+            if not target_body:
+                continue  # missing: validate_body reports "no saved workflow called ..."
+            linked[target] = check(target, target_body, schema, fingerprint, known_workflows, resolve_workflow, visiting)
+    link_key = tuple((t, v.get("status"), v.get("error_count")) for t, v in sorted(linked.items()))
+
     cached = _cache.get(name)
-    if cached is not None and cached[0] == key and cached[1] == fingerprint and key:
+    if cached is not None and cached[0] == key and cached[1] == fingerprint and cached[3] == link_key and key:
         return cached[2]
 
-    issues = validate_body(body or {}, schema or {}, known_workflows)
+    issues = validate_body(body or {}, schema or {}, known_workflows, resolve_workflow)
     errors = [
         issue for issue in issues
         if issue.get("severity") == "error" and issue.get("where") != "body"
     ]
+    for target, verdict in linked.items():
+        if verdict.get("status") == "broken":
+            n = verdict.get("error_count", 0)
+            errors.append({
+                "severity": "error", "where": f"link:{target}",
+                "message": f"Calls '{target}', which does not fit this deck ({n} error{'s' if n != 1 else ''} there).",
+                "hint": "Fix that workflow, or copy its steps into this one and point them at the deck's instruments.",
+            })
     verdict = {
         "status": "broken" if errors else "ok",
         "error_count": len(errors),
@@ -88,7 +120,7 @@ def check(name, body, schema, fingerprint, known_workflows=()):
     # saved before decks were versioned.
     if (body or {}).get("deck_version") is not None:
         verdict["deck_version"] = body["deck_version"]
-    _cache[name] = (key, fingerprint, verdict)
+    _cache[name] = (key, fingerprint, verdict, link_key)
     return verdict
 
 

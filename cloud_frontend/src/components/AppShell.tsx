@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
+import { useNavPlacement } from '@ivoryos/shared-ui';
 import AttentionCenter from '@/components/AttentionCenter';
 
 /**
@@ -35,10 +36,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isLogin = pathname === '/login' || pathname.startsWith('/login/');
   useSessionCheck(!isLogin);
+  // Read here as well as in the Sidebar so the frame's direction and the bar agree on first paint.
+  const [nav] = useNavPlacement();
   if (isLogin) return <>{children}</>;
   return (
     <>
-      <div className="flex h-screen w-full overflow-hidden">
+      <div className={`flex h-screen w-full overflow-hidden ${nav === 'top' ? 'flex-col' : ''}`}>
         <Sidebar />
         <main className="flex-1 overflow-hidden relative">
           {children}

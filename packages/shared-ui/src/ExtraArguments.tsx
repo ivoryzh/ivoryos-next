@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
+import { SuggestInput } from './SuggestInput';
 
 /**
  * Name/value rows for the arguments a `**kwargs` method takes but the schema cannot list.
@@ -108,10 +109,8 @@ export function ExtraArguments({
     commit(rows.map(r => (r.id === id ? { ...r, ...patch } : r)));
 
   const stacked = layout === 'stacked';
-  const nameListId = `${idPrefix}-names`;
-  const valueListId = `${idPrefix}-values`;
   const inputClass = stacked
-    ? 'bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500'
+    ? 'bg-gray-50 dark:bg-black/40 border border-gray-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 dark:text-white focus:outline-none focus:border-accent'
     : 'bg-transparent text-[11px] text-gray-800 dark:text-gray-100 focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-700';
 
   return (
@@ -146,9 +145,9 @@ export function ExtraArguments({
             ? 'flex items-center gap-2'
             : 'flex items-center gap-2 shrink-0 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 rounded-md px-2 py-1'}
         >
-          <input
+          <SuggestInput
             type="text"
-            list={suggestions.length > 0 ? nameListId : undefined}
+            suggestions={suggestions}
             value={row.name}
             placeholder="name"
             onChange={e => update(row.id, { name: e.target.value })}
@@ -157,9 +156,9 @@ export function ExtraArguments({
             className={`${inputClass} ${stacked ? 'flex-1 min-w-0' : 'w-24'}`}
           />
           <span className="text-gray-400 dark:text-gray-600 text-[11px] shrink-0">=</span>
-          <input
+          <SuggestInput
             type="text"
-            list={valueSuggestions.length > 0 ? valueListId : undefined}
+            suggestions={valueSuggestions}
             value={row.value}
             placeholder="value"
             onChange={e => update(row.id, { value: e.target.value })}
@@ -179,25 +178,11 @@ export function ExtraArguments({
       <button
         type="button"
         onClick={() => setRows([...rows, { id: nextRowId(), name: '', value: '' }])}
-        className="flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 w-fit"
+        className="flex items-center gap-1 text-[11px] font-medium text-accent-fg hover:text-accent w-fit"
       >
         <Plus className="w-3 h-3" /> Add argument
       </button>
 
-      {suggestions.length > 0 && (
-        <datalist id={nameListId}>
-          {suggestions.map(name => (
-            <option key={name} value={name} />
-          ))}
-        </datalist>
-      )}
-      {valueSuggestions.length > 0 && (
-        <datalist id={valueListId}>
-          {valueSuggestions.map(v => (
-            <option key={v.value} value={v.value} label={v.label} />
-          ))}
-        </datalist>
-      )}
     </div>
   );
 }

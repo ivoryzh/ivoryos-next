@@ -2,7 +2,7 @@
 // The bridge between pages and the app. Every call is checked again in main.js: launcher calls
 // are refused unless they come from the launcher page itself, so exposing the names here to an
 // edge's page gives that page nothing it can use.
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const call = async (channel, ...args) => {
     const res = await ipcRenderer.invoke(channel, ...args);
@@ -36,6 +36,11 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     reveal: (id, what) => call('launcher:reveal', id, what),
     pick: (kind) => call('launcher:pick', kind),
     rebuildPython: () => call('launcher:rebuild-python'),
+    prepareReport: (id, failure) => call('launcher:report:prepare', id, failure),
+    optimizers: (id) => call('launcher:optimizers', id),
+    joinEarlyAccess: (details) => call('launcher:early-access', details),
+    setOptimizers: (id, selection) => call('launcher:optimizers:set', id, selection),
+    sendReport: (report) => call('launcher:report:send', report),
 
     deck: (id) => call('launcher:deck', id),
     saveInstrument: (id, originalName, entry) => call('launcher:instrument:save', id, originalName, entry),
@@ -43,6 +48,11 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     setInstrumentEnabled: (id, name, enabled) => call('launcher:instrument:enable', id, name, enabled),
     install: (id, manifest) => call('launcher:install', id, manifest),
     installFromFile: () => call('launcher:install-file'),
+    readScript: (id) => call('launcher:script:read', id),
+    writeScript: (id, text) => call('launcher:script:write', id, text),
+    createExample: () => call('launcher:example'),
+    // The absolute path of a File dropped on the page, for "drop a script here".
+    pathForFile: (file) => webUtils.getPathForFile(file),
     freeName: (id, suggestion) => call('launcher:free-name', id, suggestion),
 
     setHubUrl: (url) => call('hub:set-url', url),
@@ -100,6 +110,7 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     setWindowPref: (key, on) => call('app:set-window-pref', key, on),
     revealData: () => call('app:reveal-data'),
     setTheme: (theme) => call('app:set-theme', theme),
+    setCloudOnly: (on) => call('app:set-cloud-only', on),
     reorderProfiles: (ids) => call('launcher:reorder', ids),
     reloadTab: () => call('launcher:reload-tab'),
 });

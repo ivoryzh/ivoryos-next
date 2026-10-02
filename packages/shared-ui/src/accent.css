@@ -1,0 +1,37 @@
+/* The accent, one definition for the edge UI and Cloud (both import this from their globals.css).
+   Steel, a bluish grey: primary buttons, the selected page/tab/row, focus, checked controls and
+   progress. Hues stay reserved for meanings (purple batch, green Run/online, amber warnings,
+   red errors, the step kinds), so do not reuse the accent for any of those.
+
+   Tailwind names: bg-accent / hover:bg-accent-hover / text-on-accent for a primary button,
+   bg-accent-soft + text-accent-fg for a selected item, border-accent-tint for a selected card's
+   edge, focus:border-accent + ring-accent-ring for focus, accent-accent for native checkboxes. */
+:root {
+  --accent-color: #4a6280;
+  --accent-hover: #3d536e;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e7edf4;
+  --accent-soft-text: #34495f;
+  --accent-tint: #a9bbcf;
+  --accent-ring: rgba(74, 98, 128, 0.22);
+}
+
+.dark {
+  --accent-color: #a9bed5;
+  --accent-hover: #94adc8;
+  --accent-contrast: #0f1a26;
+  --accent-soft: rgba(140, 170, 205, 0.16);
+  --accent-soft-text: #c9d7e6;
+  --accent-tint: #5a7290;
+  --accent-ring: rgba(169, 190, 213, 0.28);
+}
+
+@theme inline {
+  --color-accent: var(--accent-color);
+  --color-accent-hover: var(--accent-hover);
+  --color-on-accent: var(--accent-contrast);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-soft-text);
+  --color-accent-tint: var(--accent-tint);
+  --color-accent-ring: var(--accent-ring);
+}

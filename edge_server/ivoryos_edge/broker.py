@@ -4,7 +4,7 @@ import time
 import asyncio
 from collections import deque
 import paho.mqtt.client as mqtt
-from typing import Callable, Any, Coroutine
+from typing import Optional, Callable, Any, Coroutine
 
 class MessageBroker:
     def __init__(self, client_id: str):
@@ -31,16 +31,31 @@ class MessageBroker:
 
 
 class LocalMQTTBroker(MessageBroker):
-    def __init__(self, client_id: str, host: str, port: int = 1883):
+    # Seconds between MQTT keep-alive pings. This, not an application heartbeat, is how Cloud
+    # learns the edge is gone: a broker that hears nothing for 1.5x this closes the connection and
+    # publishes the Last Will. Keep-alive pings are not messages (nothing is published, and AWS
+    # IoT does not meter them), so a short one costs nothing. 15s -> a silent death is noticed in
+    # about 22s; a crash or a closed socket is noticed at once.
+    KEEPALIVE_S = 15
+
+    def __init__(self, client_id: str, host: str, port: int = 1883,
+                 username: Optional[str] = None, password: Optional[str] = None):
         super().__init__(client_id)
         self.host = host
         self.port = port
+        # Why the broker last turned this client away (a CONNACK code), for _wait_connected.
+        self.refused = None
 
         # Determine Paho API version (support v2 and v1)
         try:
             self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id)
         except AttributeError:
             self.client = mqtt.Client(client_id)
+
+        # A LAN Cloud's broker admits a device by the secret it was given at pairing, carried in
+        # the token (Cloud's brokerAuth.js). Nobody types it; an older token simply has none.
+        if username:
+            self.client.username_pw_set(username, password or "")
 
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
@@ -56,13 +71,23 @@ class LocalMQTTBroker(MessageBroker):
         # process last announced itself under this identity: (time, its session).
         self._identity = None
         self._foreign = None
+        # Called (on the app's event loop) every time the connection comes back after the first
+        # connect, so the app can say again what a subscriber may have missed. See _resubscribe.
+        self.on_reconnected = None
+        self._connects = 0
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
+            self.refused = None
             print(f"Connected to MQTT Broker at {self.host}:{self.port}")
             self._resubscribe()
         else:
+            self.refused = getattr(rc, "value", rc)
             print(f"Failed to connect to MQTT broker, return code {rc}")
+
+    def refused_credentials(self) -> bool:
+        """Whether the broker turned this device's login down (MQTT 3.1.1 codes 4/5, v5 134/135)."""
+        return self.refused in (4, 5, 134, 135)
 
     def _resubscribe(self):
         # A clean session (the default) means the broker forgets this client's subscriptions
@@ -73,6 +98,14 @@ class LocalMQTTBroker(MessageBroker):
         for topic in self._subscriptions:
             self.client.subscribe(topic)
         self._announce()
+        self._connects += 1
+        # The broker published this client's Last Will ("offline") when the old connection died,
+        # so a reconnect has to say "online" again itself; nothing else will.
+        if self._connects > 1 and self.on_reconnected and self.loop:
+            try:
+                asyncio.run_coroutine_threadsafe(self.on_reconnected(self), self.loop)
+            except Exception as e:
+                print(f"Could not announce the reconnect: {e}")
 
     def _announce(self):
         # Every connect says "this session holds the identity now", retained, so a second copy
@@ -148,10 +181,10 @@ class LocalMQTTBroker(MessageBroker):
         endpoint, request logs show no rejection reason. A plain local MQTT broker (Mosquitto etc.)
         has no such restriction, which is why this only breaks against real AWS IoT. Practical
         effect: the will only reaches subscribers who are already connected at the moment we drop
-        — anyone who (re)subscribes afterward won't see it. status_loop's periodic retained
-        'online' publish plus daemon.js's own staleness sweep (no update in 15s -> mark offline)
-        is what actually catches the "subscriber wasn't watching live" case. Must be called before
-        connect()."""
+        — anyone who (re)subscribes afterward won't see it. That case is closed from the other
+        side: Cloud treats a *replayed* retained "online" as unconfirmed and pings the device
+        (cloud_frontend/src/lib/presence.js), and a slow backstop heartbeat covers the rest.
+        Must be called before connect()."""
         self.client.will_set(topic, json.dumps(payload, default=str), qos=1, retain=retain)
 
     def _on_message(self, client, userdata, msg):
@@ -188,7 +221,7 @@ class LocalMQTTBroker(MessageBroker):
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
             pass # We'll set this later if missing
-        self.client.connect(self.host, self.port, 60)
+        self.client.connect(self.host, self.port, self.KEEPALIVE_S)
         self.client.loop_start()
 
     def disconnect(self):
@@ -212,6 +245,10 @@ class LocalMQTTBroker(MessageBroker):
 
 
 class AWSIoTBroker(LocalMQTTBroker):
+    # AWS IoT Core's floor: it treats any shorter keep-alive as 30s. A silent death is noticed
+    # in about 45s there.
+    KEEPALIVE_S = 30
+
     def __init__(self, client_id: str, endpoint: str, ca_cert: str, certfile: str, keyfile: str):
         super().__init__(client_id, endpoint, 8883)
         self.client.tls_set(

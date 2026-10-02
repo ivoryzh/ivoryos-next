@@ -787,6 +787,18 @@ def expand_workflow_blocks(
 
         caller_params = block.get("params") or block.get("args") or {}
 
+        # What the caller saves this workflow's outputs as: its `returnBindings`, with `path` the
+        # name inside the workflow and `var` the name here (shared-ui workflowOutputs). An output
+        # left under its own name needs nothing, since the inner step binds it. A renamed one is
+        # bound under both names, so the workflow's own later steps (an If on `absorbance`)
+        # still find it by the name they were written with.
+        aliases = [
+            [b.get("path"), b.get("var").strip()]
+            for b in (block.get("returnBindings") or block.get("return_bindings") or [])
+            if isinstance(b, dict) and b.get("path") and isinstance(b.get("var"), str)
+            and b.get("var").strip() and b.get("var").strip() != b.get("path")
+        ]
+
         # A link normally stands for the whole saved workflow, prep through cleanup. `phases`
         # narrows that to a subset, which is what lets a caller run the setup once, the body once
         # per sample, and the teardown once.
@@ -841,6 +853,9 @@ def expand_workflow_blocks(
             for key in ("_row", "_block"):
                 if key in caller_params:
                     params.setdefault(key, caller_params[key])
+            # Appended after any a nested link added, so a rename of a rename resolves in order.
+            if aliases:
+                params["_return_aliases"] = list(params.get("_return_aliases") or []) + aliases
 
         expanded.extend(steps)
 

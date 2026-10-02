@@ -226,6 +226,49 @@ create table if not exists cloud_config (
     updated_at text
 );
 
+-- Small named settings (the assistant's model provider, for one). cloud_config above is typed
+-- for the broker alone, so anything else goes here as JSON text under a key.
+create table if not exists cloud_settings (
+    key text primary key,
+    value text not null,
+    updated_at text
+);
+
+-- An outside agent (an MCP client) proves who it is with a token minted in Settings; only the
+-- hash is kept, and a token stands for one workspace.
+create table if not exists agent_tokens (
+    token_hash text primary key,
+    workspace_id text not null,
+    user_id text not null default '',
+    label text not null default '',
+    created_at text,
+    last_used_at text
+);
+create index if not exists agent_tokens_workspace_idx on agent_tokens(workspace_id);
+
+-- What an agent proposed: a graph spec, the canvas graph built from it, and its verdict. Nothing
+-- here is a workflow or a run until a person accepts it (the human gate).
+-- A proposal answers one person's question, so accepting it is that person's decision: rows carry
+-- the user who filed them (through the panel, or the minter of the token an outside agent used)
+-- and are listed to that user only, even inside a shared organization workspace.
+create table if not exists agent_proposals (
+    id text primary key,
+    workspace_id text not null,
+    user_id text not null default '',
+    name text not null,
+    summary text not null default '',
+    source text not null default '',
+    spec text not null,
+    graph text,
+    issues text not null default '[]',
+    questions text not null default '[]',
+    status text not null default 'pending',
+    result text,
+    created_at text,
+    decided_at text
+);
+create index if not exists agent_proposals_ws_status_idx on agent_proposals(workspace_id, user_id, status);
+
 -- Outbox for Cloud -> Edge workflow writes. 'pending' -> 'sent' (published) -> 'acked' (the
 -- device echoed the same body_hash back on its own sequences topic). A push that never reaches
 -- 'acked' is a push that did not take effect, which is exactly what the UI needs to know.
@@ -265,6 +308,14 @@ create table if not exists removed_devices (
     id text primary key,
     removed_at text not null
 );
+
+-- Each device's secret for the LAN broker (brokerAuth.js), as a hash only. Minted at pairing,
+-- replaced by pairing again, deleted with the device.
+create table if not exists broker_credentials (
+    device_id text primary key,
+    secret_hash text not null,
+    created_at text not null
+);
 `;
 
 function jsonParse(value, fallback) {
@@ -274,6 +325,10 @@ function jsonParse(value, fallback) {
 }
 
 const nowIso = () => new Date().toISOString();
+const parseJson = (text, fallback) => { try { return text == null ? fallback : JSON.parse(text); } catch { return fallback; } };
+const mapProposal = (r) => ({
+  ...r, spec: parseJson(r.spec, {}), graph: parseJson(r.graph, null), issues: parseJson(r.issues, []), questions: parseJson(r.questions, []),
+});
 
 /**
  * When a repeating task's next occurrence is due: `repeat_every_ms` after the previous one STARTED
@@ -427,12 +482,37 @@ function createSqliteStore(filePath) {
       );
     },
 
+    /** A device's display name; its id (identity) is untouched. False if there is no such device. */
+    async renameDevice(deviceId, name) {
+      return run('update devices set name = ? where id = ?', name, deviceId).changes > 0;
+    },
+
+    /** The hash of a device's LAN broker secret (brokerAuth.js); one per device, replaced on re-pairing. */
+    async setBrokerCredential(deviceId, secretHash) {
+      run(
+        `insert into broker_credentials (device_id, secret_hash, created_at) values (?, ?, ?)
+         on conflict(device_id) do update set secret_hash = excluded.secret_hash, created_at = excluded.created_at`,
+        deviceId, secretHash, nowIso(),
+      );
+    },
+
+    async getBrokerCredential(deviceId) {
+      return get('select secret_hash from broker_credentials where device_id = ?', deviceId)?.secret_hash || null;
+    },
+
+    async deleteBrokerCredential(deviceId) {
+      run('delete from broker_credentials where device_id = ?', deviceId);
+    },
+
     // A fixed order (by name, which is the id), never by last_seen: every device's heartbeat
     // bumps last_seen every 5 s, so with several devices that order reshuffled on every poll and
     // every list built from it -- the Orchestrator toolbox, Devices, the sidebar -- jumped around.
-    async listDevices() {
+    // A removed device's kept record (status 'removed', see archiveDevice) is not a device anyone
+    // can run on, so it is left out unless asked for: only the Library, which lists the workflows
+    // kept from it, wants it.
+    async listDevices({ includeRemoved = false } = {}) {
       return all('select id, name, status, busy, last_seen, schema, image_updated_at from devices order by id collate nocase, id')
-        .map(mapDevice);
+        .map(mapDevice).filter((d) => includeRemoved || d.status !== 'removed');
     },
 
     /** Returns whether the device exists. `image` null removes the picture. */
@@ -448,6 +528,23 @@ function createSqliteStore(filePath) {
     },
 
     /** Cloud tasks not yet sent anywhere: ready but held (`pending`) or waiting on others (`blocked`). */
+    /** A task's repeat counters, for numbering an occurrence and spotting a report from an earlier one. */
+    async getTaskRepeat(runId, nodeId) {
+      return get(
+        'select status, repeat_total, repeat_done, repeat_every_ms, dispatched_at from run_tasks where run_id = ? and node_id = ?',
+        runId, nodeId,
+      ) || null;
+    },
+    /** Repeating tasks that still have occurrences to run, for telling a device what is to come. */
+    async listRepeatingTasks() {
+      return all(
+        `select t.run_id, t.node_id, t.device_id, t.status, t.block, t.not_before, t.repeat_total, t.repeat_done,
+                t.repeat_every_ms, r.name as run_name
+         from run_tasks t left join runs r on r.id = t.run_id
+         where t.repeat_total > 1 and t.status in ('pending', 'queued', 'running', 'waiting_input')
+         order by t.updated_at asc`,
+      ).map(r => ({ ...r, block: jsonParse(r.block, {}) }));
+    },
     async listWaitingTasks() {
       return all(
         `select t.run_id, t.node_id, t.device_id, t.status, t.block, t.not_before, r.name as run_name
@@ -508,6 +605,14 @@ function createSqliteStore(filePath) {
       );
     },
 
+    /** Offline because it went quiet: unlike a status it sent, this must not move `last_seen`. */
+    async markDeviceOffline(deviceId) {
+      run(`update devices set status = 'offline', busy = 0 where id = ? and status = 'online'`, deviceId);
+    },
+    async getSequence(deviceId, name) {
+      const row = get('select device_id, name, description, body, updated_at from edge_sequences where device_id = ? and name = ?', deviceId, name);
+      return row ? { ...row, body: jsonParse(row.body, {}) } : null;
+    },
     async markStaleDevicesOffline(staleBeforeIso) {
       const res = run(
         `update devices set status = 'offline' where status = 'online' and last_seen < ?`,
@@ -531,6 +636,31 @@ function createSqliteStore(filePath) {
     // and any queued pushes, both of which are caches of device state and meaningless once it is
     // gone. `run_tasks` is deliberately left alone — those are history, and a finished run that
     // named a since-removed device is still a truthful record of what actually ran.
+    /**
+     * Take a device out of Cloud but keep the workflows mirrored from it, as a record.
+     *
+     * The workflows move to `archiveId`, with a 'removed' device record of that id holding the
+     * name and the instrument schema they were written against (so they can still be read).
+     * The live id is freed completely: pairing the same device again, in any workspace, starts a
+     * new device, and nothing it publishes can touch the kept copies. A device with no workflows
+     * leaves nothing behind. Returns {removed, archived, workflows}.
+     */
+    async archiveDevice(deviceId, archiveId) {
+      const device = get('select name, last_seen, schema from devices where id = ?', deviceId);
+      const count = get('select count(*) as n from edge_sequences where device_id = ?', deviceId).n;
+      const keep = !!device && count > 0;
+      if (keep) {
+        run(
+          `insert into devices (id, name, status, busy, last_seen, schema) values (?, ?, 'removed', 0, ?, ?)`,
+          archiveId, device.name || deviceId, device.last_seen, device.schema,
+        );
+        run('update edge_sequences set device_id = ? where device_id = ?', archiveId, deviceId);
+      }
+      run('delete from edge_sequences where device_id = ?', deviceId);
+      run('delete from sequence_pushes where device_id = ?', deviceId);
+      const res = run('delete from devices where id = ?', deviceId);
+      return { removed: res.changes, archived: keep ? archiveId : null, workflows: keep ? count : 0 };
+    },
     async deleteDevice(deviceId) {
       run('delete from edge_sequences where device_id = ?', deviceId);
       run('delete from sequence_pushes where device_id = ?', deviceId);
@@ -692,7 +822,7 @@ function createSqliteStore(filePath) {
       // Oldest first: tasks now wait their turn per device (see deviceHasActiveTask), so the
       // order they are offered in is the order a device works through them.
       return all(
-        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress, repeat_done
+        `select run_id, node_id, device_id, block, run, status, not_before, dispatched_at, progress, repeat_done, repeat_total
          from run_tasks where status = ? order by updated_at asc`,
         status,
       ).map(hydrateTask).filter((t) => isDue(t));
@@ -944,6 +1074,58 @@ function createSqliteStore(filePath) {
            host = excluded.host, port = excluded.port, updated_at = excluded.updated_at`,
         host, port, nowIso(),
       );
+    },
+
+    // --- named settings ----------------------------------------------------------------------
+    async getSetting(key) {
+      const row = get('select value from cloud_settings where key = ?', key);
+      if (!row) return null;
+      try { return JSON.parse(row.value); } catch { return null; }
+    },
+
+    async setSetting(key, value) {
+      run(
+        `insert into cloud_settings (key, value, updated_at) values (?, ?, ?)
+         on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at`,
+        key, JSON.stringify(value ?? null), nowIso(),
+      );
+    },
+
+    // --- agent tokens and proposals (src/lib/agent/) ------------------------------------------
+    async createAgentToken({ token_hash, workspace_id, user_id, label }) {
+      run('insert into agent_tokens (token_hash, workspace_id, user_id, label, created_at) values (?, ?, ?, ?, ?)', token_hash, workspace_id, user_id || '', label || '', nowIso());
+    },
+    async resolveAgentToken(token_hash) {
+      const row = get('select token_hash, workspace_id, user_id, label from agent_tokens where token_hash = ?', token_hash);
+      if (row) run('update agent_tokens set last_used_at = ? where token_hash = ?', nowIso(), token_hash);
+      return row || null;
+    },
+    async listAgentTokens(workspace_id) {
+      return all('select token_hash, label, created_at, last_used_at from agent_tokens where workspace_id = ? order by created_at', workspace_id);
+    },
+    async deleteAgentToken(token_hash, workspace_id) {
+      run('delete from agent_tokens where token_hash = ? and workspace_id = ?', token_hash, workspace_id);
+    },
+    async insertAgentProposal(p) {
+      run(
+        `insert into agent_proposals (id, workspace_id, user_id, name, summary, source, spec, graph, issues, questions, status, created_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        p.id, p.workspace_id, p.user_id || '', p.name, p.summary || '', p.source || '', JSON.stringify(p.spec), p.graph ? JSON.stringify(p.graph) : null,
+        JSON.stringify(p.issues || []), JSON.stringify(p.questions || []), nowIso(),
+      );
+    },
+    async listAgentProposals(workspace_id, user_id, status = 'pending', limit = 50) {
+      const rows = status === 'all'
+        ? all('select * from agent_proposals where workspace_id = ? and user_id = ? order by created_at desc limit ?', workspace_id, user_id, limit)
+        : all('select * from agent_proposals where workspace_id = ? and user_id = ? and status = ? order by created_at desc limit ?', workspace_id, user_id, status, limit);
+      return rows.map(mapProposal);
+    },
+    async getAgentProposal(id) {
+      const row = get('select * from agent_proposals where id = ?', id);
+      return row ? mapProposal(row) : null;
+    },
+    async decideAgentProposal(id, { status, result }) {
+      run('update agent_proposals set status = ?, result = ?, decided_at = ? where id = ?', status, result || null, nowIso(), id);
     },
 
     // --- cloud -> edge workflow pushes -----------------------------------------------------

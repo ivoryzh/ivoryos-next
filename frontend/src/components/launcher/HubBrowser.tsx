@@ -14,10 +14,13 @@ import PrivateRepos, { type InstrumentSeed } from './PrivateRepos';
 import { PlatformCard, PlatformDetail } from './HubPlatforms';
 import { PluginCard, PluginDetail } from './HubPlugins';
 import { TemplateCard, TemplateDetail, templateTitle } from './HubTemplates';
-import { ErrorBox, Loading, VisibilityBadge } from './hubUi';
+import { addTo, deckLabel, plainInstrumentName, ErrorBox, Loading, VisibilityBadge, type DeckAccess, type DeckTarget } from './hubUi';
 import { Button, Field, Modal, inputClass, labelClass } from './ui';
+import { installFailed } from './ReportProblem';
 
 type Kind = 'starred' | 'instruments' | 'platforms' | 'plugins' | 'workflows' | 'repos';
+/** A section the browser can be opened on. */
+export type HubKind = Exclude<Kind, 'starred' | 'repos'>;
 type ListKind = Exclude<Kind, 'repos' | 'starred'>;
 type Chosen =
   | { kind: 'instrument'; module: HubModule }
@@ -60,10 +63,17 @@ const KINDS: { kind: ListKind; label: string; icon: LucideIcon; noun: string }[]
  * instantly. Only a few devices have a photo on the Hub; every other driver card shows its
  * category's picture, so the grid never reads as a list of blank boxes.
  */
-export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded, onOpenProfile }: {
+export default function HubBrowser({ api, profile, newDeck, initialKind, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded, onOpenProfile }: {
   api: DesktopApi;
-  profileId: string;
-  profileName: string;
+  /** The deck this browser adds to; null when the launcher has no deck yet (see `newDeck`). */
+  profile: DeckTarget | null;
+  /**
+   * With no `profile`, the first add makes a deck through this (`create` asks for the name), and a
+   * failed first add removes it again. The browser then adds to that deck until it is closed.
+   */
+  newDeck?: { create: (suggestedName: string) => Promise<DeckTarget | null>; discard: (deck: DeckTarget) => Promise<void> };
+  /** Open on this section rather than on starred items / instruments. */
+  initialKind?: HubKind;
   hubUrl: string;
   /** The private hub and private repositories are Pro features (preview plans, desktop/src/account.js). */
   pro: boolean;
@@ -76,12 +86,29 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
   onOpenProfile: (id: string) => void;
 }) {
   const [scope, setScope] = useState<Scope>('public');
-  const [kind, setKind] = useState<Kind>('instruments');
+  const [kind, setKind] = useState<Kind>(initialKind || 'instruments');
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null>(null);
   const [testedOnly, setTestedOnly] = useState(false);
   const [chosen, setChosen] = useState<Chosen | null>(null);
   const [deck, setDeck] = useState<Deck | null>(null);
+  // The deck adds land on: the one the browser was opened on, else whatever the first add created.
+  const [created, setCreated] = useState<DeckTarget | null>(null);
+  const target = profile ?? created;
+  const access = useMemo<DeckAccess>(() => ({
+    target,
+    ensure: async suggested => {
+      if (target) return target;
+      if (!newDeck) throw new Error('This browser was opened without a deck to add to.');
+      const made = await newDeck.create(suggested);
+      if (made) setCreated(made);
+      return made;
+    },
+    discard: async made => {
+      setCreated(c => (c?.id === made.id ? null : c));
+      if (newDeck) await newDeck.discard(made);
+    },
+  }), [target, newDeck]);
   // Starred for quick access (kept per account by the app): 'module:12', 'platform:4', ...
   // The browser opens on them when there are any, so the whole catalog is one click away, not
   // the first thing to scroll through.
@@ -89,10 +116,10 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
   useEffect(() => {
     let cancelled = false;
     api.hubStarred()
-      .then(list => { if (!cancelled) { setStars(list); if (list.length) setKind('starred'); } })
+      .then(list => { if (!cancelled) { setStars(list); if (list.length && !initialKind) setKind('starred'); } })
       .catch(() => { if (!cancelled) setStars([]); });
     return () => { cancelled = true; };
-  }, [api]);
+  }, [api, initialKind]);
   const starred = useMemo(() => new Set(stars || []), [stars]);
   const toggleStar = (key: string) => {
     const on = !starred.has(key);
@@ -115,7 +142,10 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
 
   // The deck the browser adds to: templates are checked against it, and platform drivers are
   // named clear of what is already on it.
-  const refreshDeck = useCallback(() => { api.deck(profileId).then(setDeck).catch(() => setDeck(null)); }, [api, profileId]);
+  const refreshDeck = useCallback(() => {
+    if (target) api.deck(target.id).then(setDeck).catch(() => setDeck(null));
+    else setDeck(null);
+  }, [api, target]);
   useEffect(refreshDeck, [refreshDeck]);
 
   const words = useMemo(() => query.toLowerCase().split(/\s+/).filter(Boolean), [query]);
@@ -159,11 +189,12 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
   const shownInstruments = category ? lists.instruments.filter(m => categoryOf(m) === category) : lists.instruments;
 
   const finish = () => { onAdded(); onClose(); };
-  const title = !chosen ? `Add to ${profileName} from the Hub`
-    : chosen.kind === 'instrument' ? `Add ${chosen.module.name} to ${profileName}`
+  const where = target ? target.name : 'a new deck';
+  const title = !chosen ? `Add to ${where} from the Hub`
+    : chosen.kind === 'instrument' ? `Add ${chosen.module.name} to ${where}`
       : chosen.kind === 'platform' ? `Install ${chosen.platform.name}`
-        : chosen.kind === 'plugin' ? `Add ${chosen.plugin.name.trim()} to ${profileName}`
-          : `Add ${templateTitle(chosen.template)} to ${profileName}`;
+        : chosen.kind === 'plugin' ? `Add ${chosen.plugin.name.trim()} to ${where}`
+          : `Add ${templateTitle(chosen.template)} to ${where}`;
 
   return (
     <Modal wide="browser" onClose={onClose} title={chosen
@@ -172,15 +203,15 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
     >
       {chosen ? (
         <div className="flex-1 overflow-y-auto p-5">
-          {chosen.kind === 'instrument' && <Configure api={api} profileId={profileId} summary={chosen.module} onDone={finish} />}
+          {chosen.kind === 'instrument' && <Configure api={api} access={access} summary={chosen.module} onDone={finish} />}
           {chosen.kind === 'platform' && (
-            <PlatformDetail api={api} profileId={profileId} profileName={profileName} deck={deck} platformId={chosen.platform.id}
+            <PlatformDetail api={api} access={access} deck={deck} platformId={chosen.platform.id}
               onDone={newId => { finish(); if (newId) onOpenProfile(newId); }} />
           )}
-          {chosen.kind === 'plugin' && <PluginDetail api={api} profileId={profileId} profileName={profileName} deck={deck} plugin={chosen.plugin} onDone={finish} />}
+          {chosen.kind === 'plugin' && <PluginDetail api={api} access={access} deck={deck} plugin={chosen.plugin} onDone={finish} />}
           {chosen.kind === 'template' && (
             // A workflow does not restart the deck, so stay in the browser to add more.
-            <TemplateDetail api={api} profileId={profileId} profileName={profileName} deck={deck} template={chosen.template}
+            <TemplateDetail api={api} access={access} deck={deck} template={chosen.template}
               onDone={() => { onAdded(); setChosen(null); }} />
           )}
         </div>
@@ -190,7 +221,7 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
             <div className="grid grid-cols-2 gap-1 p-1 mb-2 rounded-lg bg-gray-100 dark:bg-white/5">
               {(['public', 'private'] as const).map(s => (
                 <button key={s} type="button" onClick={() => { setScope(s); setCategory(null); if (s === 'public' && kind === 'repos') setKind('instruments'); }}
-                  className={`flex items-center justify-center gap-1.5 rounded-md py-1 text-xs font-medium ${scope === s ? 'bg-white text-gray-900 shadow-sm dark:bg-white/15 dark:text-white' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}>
+                  className={`flex items-center justify-center gap-1.5 rounded-md py-1 text-xs font-medium ${scope === s ? 'bg-white text-accent-fg shadow-sm ring-1 ring-accent-tint/60 dark:bg-accent-soft dark:ring-0' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}>
                   {s === 'public' ? <Globe className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
                   {s === 'public' ? 'Public' : 'Private'}
                   {s === 'private' && !pro && <span className="text-[9px] font-bold uppercase tracking-wider text-violet-500">Pro</span>}
@@ -224,7 +255,7 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
 
           {kind === 'repos' ? (
             <div className="flex-1 min-w-0 overflow-y-auto p-4">
-              <PrivateRepos api={api} profileId={profileId} pro={pro} onUpgrade={onUpgrade} onPicked={seed => { onClose(); onPrivatePicked(seed); }} />
+              <PrivateRepos api={api} access={access} pro={pro} onUpgrade={onUpgrade} onPicked={seed => { onClose(); onPrivatePicked(seed); }} />
             </div>
           ) : locked && kind !== 'starred' ? (
             <ProGate onUpgrade={onUpgrade} />
@@ -239,7 +270,7 @@ export default function HubBrowser({ api, profileId, profileName, hubUrl, pro, o
                 </div>
                 {kind === 'instruments' && (
                   <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                    <input type="checkbox" checked={testedOnly} onChange={e => setTestedOnly(e.target.checked)} className="accent-indigo-600" />
+                    <input type="checkbox" checked={testedOnly} onChange={e => setTestedOnly(e.target.checked)} className="accent-accent" />
                     Tested with IvoryOS
                   </label>
                 )}
@@ -301,7 +332,7 @@ function KindList({ kind, scope, query, category, hubUrl, loaded, count, childre
             ? <p>No private {noun}s yet. What you, or an organization you belong to, keep private on the Hub appears here, and only here.</p>
             : <p>No {noun}s match{query ? <> &ldquo;{query}&rdquo;</> : ''}{category ? <> in {category}</> : ''}.</p>}
           {kind === 'instruments' && scope === 'public' && (
-            <a href={`${hubUrl}/hub/devices`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline">
+            <a href={`${hubUrl}/hub/devices`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-fg hover:underline">
               Can&apos;t find your instrument? Request or contribute a driver on the Hub <ExternalLink className="w-3.5 h-3.5" />
             </a>
           )}
@@ -370,7 +401,7 @@ const LOOKS: { match: RegExp; icon: LucideIcon; tile: string }[] = [
   { match: /temperat|heat|stirr|thermo/i, icon: Thermometer, tile: 'from-orange-50 to-orange-100 text-orange-600 dark:from-orange-500/10 dark:to-orange-500/20 dark:text-orange-300' },
   { match: /analyt|spectr|chromat/i, icon: Microscope, tile: 'from-violet-50 to-violet-100 text-violet-600 dark:from-violet-500/10 dark:to-violet-500/20 dark:text-violet-300' },
   { match: /sensor|monitor/i, icon: Activity, tile: 'from-emerald-50 to-emerald-100 text-emerald-600 dark:from-emerald-500/10 dark:to-emerald-500/20 dark:text-emerald-300' },
-  { match: /test|measur|meter/i, icon: Gauge, tile: 'from-indigo-50 to-indigo-100 text-indigo-600 dark:from-indigo-500/10 dark:to-indigo-500/20 dark:text-indigo-300' },
+  { match: /test|measur|meter/i, icon: Gauge, tile: 'from-gray-50 to-gray-100 text-gray-900 dark:text-white dark:from-white/5 dark:to-white/10 dark:text-white' },
   { match: /reactor/i, icon: FlaskRound, tile: 'from-rose-50 to-rose-100 text-rose-600 dark:from-rose-500/10 dark:to-rose-500/20 dark:text-rose-300' },
   { match: /workup|sample|process/i, icon: FlaskConical, tile: 'from-fuchsia-50 to-fuchsia-100 text-fuchsia-600 dark:from-fuchsia-500/10 dark:to-fuchsia-500/20 dark:text-fuchsia-300' },
   { match: /solid|weigh|balance/i, icon: Scale, tile: 'from-amber-50 to-amber-100 text-amber-600 dark:from-amber-500/10 dark:to-amber-500/20 dark:text-amber-300' },
@@ -393,7 +424,7 @@ function CategoryButton({ label, icon: Icon, tint, count, active, onClick }: {
     <button
       type="button"
       onClick={onClick}
-      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-sm ${active ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300 font-medium' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/5'}`}
+      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-sm ${active ? 'bg-accent-soft text-accent-fg font-medium' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/5'}`}
     >
       <span className={`w-6 h-6 shrink-0 rounded-md flex items-center justify-center bg-gradient-to-br ${tint || 'from-gray-50 to-gray-100 text-gray-500 dark:from-white/5 dark:to-white/10 dark:text-gray-400'}`}>
         <Icon className="w-3.5 h-3.5" />
@@ -430,7 +461,7 @@ function ModuleCard({ module: m, onPick }: { module: HubModule; onPick: () => vo
     <button
       type="button"
       onClick={onPick}
-      className="group text-left rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-white dark:bg-white/[0.03] hover:border-indigo-300 hover:shadow-md dark:hover:border-indigo-500/40 transition flex flex-col"
+      className="group text-left rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-white dark:bg-white/[0.03] hover:border-gray-300 dark:hover:border-white/20 hover:shadow-md dark:hover:border-white/30 transition flex flex-col"
     >
       <div className="relative">
         <Picture module={m} className="h-28" />
@@ -442,7 +473,7 @@ function ModuleCard({ module: m, onPick }: { module: HubModule; onPick: () => vo
       </div>
       <div className="p-3 flex-1 flex flex-col gap-1 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-indigo-700 dark:group-hover:text-indigo-300">{m.name}</span>
+          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-accent-fg">{m.name}</span>
           <VisibilityBadge row={m} />
         </div>
         <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{[m.devices?.vendor?.trim(), device].filter(Boolean).join(' · ') || m.pip_name}</div>
@@ -460,7 +491,7 @@ function ModuleCard({ module: m, onPick }: { module: HubModule; onPick: () => vo
 // --- the chosen driver's settings -------------------------------------------------------------------
 
 /** The browse card has no argument form; read the full entry once a driver is picked. */
-function Configure({ api, profileId, summary, onDone }: { api: DesktopApi; profileId: string; summary: HubModule; onDone: () => void }) {
+function Configure({ api, access, summary, onDone }: { api: DesktopApi; access: DeckAccess; summary: HubModule; onDone: () => void }) {
   const [module, setModule] = useState<HubModule | null>(summary.init_args ? summary : null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -474,19 +505,21 @@ function Configure({ api, profileId, summary, onDone }: { api: DesktopApi; profi
 
   if (error) return <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/10 rounded-lg p-3">{error}</div>;
   if (!module) return <div className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Loading {summary.name}…</div>;
-  return <ConfigureForm api={api} profileId={profileId} module={module} onDone={onDone} />;
+  return <ConfigureForm api={api} access={access} module={module} onDone={onDone} />;
 }
 
-function ConfigureForm({ api, profileId, module, onDone }: { api: DesktopApi; profileId: string; module: HubModule; onDone: () => void }) {
+function ConfigureForm({ api, access, module, onDone }: { api: DesktopApi; access: DeckAccess; module: HubModule; onDone: () => void }) {
   const defs = useMemo(() => module.init_args || [], [module]);
   const connections = module.connection || [];
   const [name, setName] = useState('');
   const [form, setForm] = useState<FormValues>(() => toForm(defs, {}));
   const [busy, setBusy] = useState(false);
 
+  const deckId = access.target?.id;
   useEffect(() => {
-    api.freeName(profileId, module.name).then(setName).catch(() => setName('device'));
-  }, [api, profileId, module.name]);
+    if (deckId) api.freeName(deckId, module.name).then(setName).catch(() => setName('device'));
+    else setName(plainInstrumentName(module.name));
+  }, [api, deckId, module.name]);
 
   const add = async () => {
     setBusy(true);
@@ -502,7 +535,7 @@ function ConfigureForm({ api, profileId, module, onDone }: { api: DesktopApi; pr
       const empty = emptyFields(defs, form);
       const ok = await confirmDialog(
         [
-          `Install ${packages.join(', ') || 'nothing new'} and add “${instrument.name}” (${instrument.import}.${instrument.class}).`,
+          `Install ${packages.join(', ') || 'nothing new'} and add “${instrument.name}” (${instrument.import}.${instrument.class}) to ${deckLabel(access.target)}.`,
           ...(empty.length ? [`Left empty, so not passed to the driver: ${empty.join(', ')}. If the driver needs them it will not load; you can fill them in later with Edit.`] : []),
           ...warnings,
           'Drivers run on this computer with access to your instruments. The deck restarts to load it.',
@@ -510,10 +543,10 @@ function ConfigureForm({ api, profileId, module, onDone }: { api: DesktopApi; pr
         { title: 'Install and add?', confirmLabel: 'Install and add' },
       );
       if (!ok) return;
-      await api.install(profileId, { packages, instruments: [instrument] });
+      if (!await addTo(access, module.name, deck => api.install(deck.id, { packages, instruments: [instrument] }))) return;
       onDone();
     } catch (e: any) {
-      await notify(`${e.message}${e.output ? `\n\n${String(e.output).split('\n').slice(-12).join('\n')}` : ''}`, { title: 'Could not add the instrument', tone: 'error' });
+      await installFailed(api, 'Could not add the instrument', e, access.target?.id ?? null);
     } finally {
       setBusy(false);
     }

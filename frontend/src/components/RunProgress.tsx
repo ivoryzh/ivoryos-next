@@ -201,13 +201,13 @@ function StatusIcon({ state, size = 'md' }: { state: string; size?: 'sm' | 'md' 
     return <span className={`${box} shrink-0 rounded-full border-2 border-dashed border-gray-300 dark:border-white/20`} title="skipped" />;
   }
   if (state === 'running' || state === 'waiting_input') {
-    return <span className={`${box} shrink-0 rounded-full bg-indigo-500 text-white flex items-center justify-center`}><Loader2 className={`${icon} animate-spin`} /></span>;
+    return <span className={`${box} shrink-0 rounded-full bg-accent text-on-accent flex items-center justify-center`}><Loader2 className={`${icon} animate-spin`} /></span>;
   }
   if (state === 'error') {
     return <span className={`${box} shrink-0 rounded-full bg-red-500 text-white flex items-center justify-center`}><AlertTriangle className={icon} /></span>;
   }
   if (state === 'partial') {
-    return <span className={`${box} shrink-0 rounded-full border-2 border-indigo-400 bg-indigo-100 dark:bg-indigo-500/20`} />;
+    return <span className={`${box} shrink-0 rounded-full border-2 border-gray-400 dark:border-white/30 bg-gray-200 dark:bg-white/10`} />;
   }
   return <span className={`${box} shrink-0 rounded-full border-2 border-gray-300 dark:border-white/20`} />;
 }
@@ -239,8 +239,8 @@ function OnceRow({ step }: { step: RunStep }) {
   const args = argsText(step);
   return (
     <div>
-      <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg border ${
-        ACTIVE.has(step.status) ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30'
+      <div data-run-active={ACTIVE.has(step.status) ? '' : undefined} className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg border ${
+        ACTIVE.has(step.status) ? 'bg-gray-100 dark:bg-white/10 border-gray-200 dark:border-white/15 dark:bg-white/10 dark:border-white/20'
           : 'bg-white border-gray-100 dark:bg-white/[0.03] dark:border-white/5'
       }`}>
         <StatusIcon state={step.status} />
@@ -271,8 +271,17 @@ const OncePill = () => (
   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">once</span>
 );
 
-export default function RunProgress({ run, live, stepEditor }: {
+export default function RunProgress({ run, live, stepEditor, hideOverall = false, pinSummary = false }: {
   run: RunLike;
+  /**
+   * Keep the summary (elapsed time, and the sample / batch / iteration badges) stuck to the top
+   * of the scrolling parent while the step lists scroll under it. For a caller that gives this
+   * a bounded, scrollable box (LiveRun): with a long spreadsheet the badges are the part that
+   * says where the run is, and they used to scroll away with the first step.
+   */
+  pinSummary?: boolean;
+  /** Leave out the big "N of M steps" figure and its bar: the caller already draws one. The elapsed line stays. */
+  hideOverall?: boolean;
   /** Whether the server is executing this run right now (drives elapsed/remaining time). */
   live: boolean;
   /** Renders the per-call list's edit affordance for a pending step; the page owns the API call. */
@@ -303,23 +312,28 @@ export default function RunProgress({ run, live, stepEditor }: {
     : NaN;
   const remaining = live && timed.length >= 3 ? mean * (p.total - p.done) : NaN;
 
-  const barColor = run.status === 'error' ? 'bg-red-500' : run.status === 'completed' ? 'bg-green-500' : 'bg-indigo-500';
+  const barColor = run.status === 'error' ? 'bg-red-500' : run.status === 'completed' ? 'bg-green-500' : 'bg-accent';
 
   return (
     <div className="space-y-5">
+      <div data-run-pinned className={pinSummary ? 'sticky top-0 z-10 -mx-4 px-4 py-3 space-y-3 bg-white dark:bg-[#151515] border-b border-gray-100 dark:border-white/5' : 'space-y-5'}>
       {/* Overall */}
       <div>
-        <div className="flex items-baseline justify-between gap-3 mb-1.5">
-          <span className="text-lg font-bold text-gray-900 dark:text-white">
-            {p.done} <span className="text-gray-400 dark:text-gray-500 font-medium">of</span> {p.total} steps
-          </span>
-          <span className="text-lg font-bold text-gray-900 dark:text-white tabular-nums">{percent}%</span>
-        </div>
-        <div className="h-2.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
-          <div className={`h-full ${barColor} transition-all duration-500`} style={{ width: `${percent}%` }} />
-        </div>
+        {!hideOverall && (
+          <>
+            <div className="flex items-baseline justify-between gap-3 mb-1.5">
+              <span className="text-lg font-bold text-gray-900 dark:text-white">
+                {p.done} <span className="text-gray-400 dark:text-gray-500 font-medium">of</span> {p.total} steps
+              </span>
+              <span className="text-lg font-bold text-gray-900 dark:text-white tabular-nums">{percent}%</span>
+            </div>
+            <div className="h-2.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
+              <div className={`h-full ${barColor} transition-all duration-500`} style={{ width: `${percent}%` }} />
+            </div>
+          </>
+        )}
         {(isFinite(elapsed) || isFinite(remaining)) && (
-          <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+          <p className={`${hideOverall ? '' : 'mt-1.5 '}text-xs text-gray-500 dark:text-gray-400`}>
             {isFinite(elapsed) && <>{formatSeconds(elapsed)} elapsed</>}
             {isFinite(remaining) && <> · ≈ {formatSeconds(remaining)} left</>}
           </p>
@@ -334,7 +348,7 @@ export default function RunProgress({ run, live, stepEditor }: {
               samples {p.iterations.done}/{p.iterations.total}
             </span>
             {hasBatches && (
-              <span className="text-sm font-bold text-teal-700 dark:text-teal-300">
+              <span className="text-sm font-bold text-purple-700 dark:text-purple-300">
                 batch {currentGroup ? p.groups.indexOf(currentGroup) + 1 : p.groups.length}/{p.groups.length}
               </span>
             )}
@@ -343,9 +357,9 @@ export default function RunProgress({ run, live, stepEditor }: {
             {p.groups.map((g, gi) => (
               <div
                 key={g.index}
-                className={`flex items-center gap-1 ${hasBatches ? `rounded-lg border p-1 pr-1.5 ${g === currentGroup ? 'border-teal-300 bg-teal-50/60 dark:border-teal-500/40 dark:bg-teal-500/10' : 'border-gray-200 dark:border-white/10'}` : ''}`}
+                className={`flex items-center gap-1 ${hasBatches ? `rounded-lg border p-1 pr-1.5 ${g === currentGroup ? 'border-purple-300 bg-purple-50/60 dark:border-purple-500/40 dark:bg-purple-500/10' : 'border-gray-200 dark:border-white/10'}` : ''}`}
               >
-                {hasBatches && <span className="text-[10px] font-bold text-teal-700 dark:text-teal-300 px-1">b{gi + 1}</span>}
+                {hasBatches && <span className="text-[10px] font-bold text-purple-700 dark:text-purple-300 px-1">b{gi + 1}</span>}
                 {g.rows.map(r => {
                   const state = p.rowState.get(r);
                   return (
@@ -354,9 +368,9 @@ export default function RunProgress({ run, live, stepEditor }: {
                       title={`row ${r + 1}: ${state}`}
                       className={`min-w-7 h-7 px-1 rounded-md text-xs font-bold flex items-center justify-center ${
                         state === 'done' ? 'bg-green-500 text-white'
-                          : state === 'running' ? 'bg-indigo-500 text-white animate-pulse'
+                          : state === 'running' ? 'bg-accent text-on-accent animate-pulse'
                           : state === 'error' ? 'bg-red-500 text-white'
-                          : state === 'partial' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300'
+                          : state === 'partial' ? 'bg-gray-200 dark:bg-white/10 text-gray-900 dark:text-white dark:bg-white/10 dark:text-white'
                           : 'bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400'
                       }`}
                     >
@@ -381,7 +395,7 @@ export default function RunProgress({ run, live, stepEditor }: {
                 key={i}
                 className={`min-w-7 h-7 px-1 rounded-md text-xs font-bold flex items-center justify-center ${
                   i < p.iterations.done ? 'bg-green-500 text-white'
-                    : i === p.iterations.done && live ? 'bg-indigo-500 text-white animate-pulse'
+                    : i === p.iterations.done && live ? 'bg-accent text-on-accent animate-pulse'
                     : 'bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400'
                 }`}
               >
@@ -391,6 +405,8 @@ export default function RunProgress({ run, live, stepEditor }: {
           </div>
         </div>
       )}
+
+      </div>
 
       {p.prep.length > 0 && (
         <section>
@@ -405,7 +421,7 @@ export default function RunProgress({ run, live, stepEditor }: {
             name="Main"
             count={p.template.length}
             badge={loops ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-indigo-600 text-white">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-accent text-on-accent">
                 <Repeat className="w-3 h-3" />
                 {p.kind === 'optimization'
                   ? `${p.iterations.total} iterations`
@@ -416,7 +432,7 @@ export default function RunProgress({ run, live, stepEditor }: {
           {!loops ? (
             <div className="space-y-1">{p.template.map(t => <OnceRow key={t.key} step={t.calls[0]} />)}</div>
           ) : (
-            <div className="rounded-xl border-2 border-dashed border-indigo-200 dark:border-indigo-500/30 bg-indigo-50/30 dark:bg-indigo-500/[0.04] p-2 space-y-1">
+            <div className="rounded-xl border-2 border-dashed border-gray-200 dark:border-white/15 dark:border-white/20 bg-gray-100/30 dark:bg-white/10 dark:bg-white/[0.04] p-2 space-y-1">
               {p.template.map(t => {
                 const state = aggregate(t.calls);
                 const current = t.calls.find(s => ACTIVE.has(s.status))
@@ -428,8 +444,8 @@ export default function RunProgress({ run, live, stepEditor }: {
                 const pct = t.total ? (t.done / t.total) * 100 : 0;
                 return (
                   <div key={t.key}>
-                    <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg border ${
-                      state === 'running' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/30'
+                    <div data-run-active={state === 'running' ? '' : undefined} className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg border ${
+                      state === 'running' ? 'bg-gray-100 dark:bg-white/10 border-gray-200 dark:border-white/15 dark:bg-white/10 dark:border-white/20'
                         : 'bg-white border-gray-100 dark:bg-white/[0.03] dark:border-white/5'
                     }`}>
                       <StatusIcon state={state} />
@@ -446,18 +462,18 @@ export default function RunProgress({ run, live, stepEditor }: {
                       <div className="ml-auto flex items-center gap-2 shrink-0">
                         {p.kind === 'rows' && (
                           t.perBatch ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-teal-700 dark:text-teal-300">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-purple-700 dark:text-purple-300">
                               <Layers className="w-3 h-3" /> per batch
                             </span>
                           ) : (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-300">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-gray-900 dark:text-white">
                               <Repeat className="w-3 h-3" /> per sample
                             </span>
                           )
                         )}
                         <div className="w-16 h-1.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
                           <div
-                            className={`h-full ${state === 'error' ? 'bg-red-500' : state === 'done' ? 'bg-green-500' : 'bg-indigo-500'}`}
+                            className={`h-full ${state === 'error' ? 'bg-red-500' : state === 'done' ? 'bg-green-500' : 'bg-accent'}`}
                             style={{ width: `${pct}%` }}
                           />
                         </div>

@@ -19,10 +19,17 @@ import {
   confirmDialog,
   notify,
   promptDialog,
+  FLOW_CONTROL_PALETTE,
+  workflowOutputs,
+  getReturnLeaves,
 } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  // The device this sequence belongs to, as Cloud last knew it. 'removed' is a kept record: its
+  // workflows can be read and exported, not saved or sent.
+  const [targetDevice, setTargetDevice] = useState<{ name: string; status: string } | null>(null);
+  const deviceRemoved = targetDevice?.status === 'removed';
   const [statusData, setStatusData] = useState<any>(null);
   const [prepSequence, setPrepSequence] = useState<SequenceBlock[]>([]);
   const [sequence, setSequence] = useState<SequenceBlock[]>([]);
@@ -166,12 +173,9 @@ export default function DesignerPage() {
 
             if (!data.instruments) data.instruments = {};
             
-            // Inject Flow Control
-            data.instruments["Flow Control"] = {
-                If_Else_Block: { description: "If / Else conditional block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-                While_Loop: { description: "While loop block", parameters: { condition: { type: "str", required: true } }, return_type: "None" },
-                Sleep: { description: "Pause execution for duration (s)", parameters: { duration_seconds: { type: "float", required: true } }, return_type: "None" }
-            };
+            // The same built-in steps the edge Designer offers (shared-ui flowControl.ts). This
+            // page kept its own copy, which had lost User input and Comment.
+            data.instruments["Flow Control"] = { ...FLOW_CONTROL_PALETTE };
 
             data.instruments["Library Workflows"] = {};
             
@@ -193,6 +197,8 @@ export default function DesignerPage() {
                     // The full saved body, so a Copy-mode drag can inline the real steps and
                     // Detach can turn a link back into an editable copy without a round trip.
                     body: wfJson,
+                    // What it saves, as a linking step's outputs (same as the edge Designer).
+                    return_paths: workflowOutputs(wfJson, (inst, method) => getReturnLeaves(data.instruments?.[inst]?.[method])),
                 };
             }
             setWorkflowVersions(versions);
@@ -224,10 +230,13 @@ export default function DesignerPage() {
     }
 
     if (targetDeviceId) {
-        fetch(`/api/devices`)
+        // `removed=1`: a removed device's kept record still holds the schema its workflows were
+        // written against, so they stay readable here.
+        fetch(`/api/devices?removed=1`)
           .then(res => res.json())
           .then(async (devices: any[]) => {
               const targetDevice = devices.find(d => d.id === targetDeviceId);
+              setTargetDevice(targetDevice ? { name: targetDevice.name || targetDevice.id, status: String(targetDevice.status || '') } : null);
               if (targetDevice && targetDevice.schema) {
                   await processStatusData({ instruments: targetDevice.schema.instruments || {} });
               } else {
@@ -388,7 +397,26 @@ export default function DesignerPage() {
       // Also persist to the Cloud database (shared, visible in the Library) when this sequence
       // targets a specific device — edge_sequences is keyed by device_id, so there's nowhere to
       // put an un-targeted sequence there; it stays browser-local-only in that case.
-      if (deviceId) {
+      if (deviceId && deviceRemoved) {
+        await notify("This device was removed from Cloud, so its workflows are kept as a record and cannot be changed. Your edits are saved in this browser; export them to use them elsewhere.",
+                     { title: 'Not saved to Cloud' });
+      } else if (deviceId) {
+        // Sending it to the device is a choice. The device owns its own library: sent, it saves
+        // the workflow there (as a new version) and can run it; kept here, it is Cloud's copy only.
+        const where = targetDevice?.name || deviceId;
+        const online = !!targetDevice?.status.includes('online');
+        const choice = await chooseDialog({
+          title: `Save "${name}"`,
+          message: `Send it to ${where} as well? Sent, the device saves it and can run it`
+            + (online ? '.' : `; ${where} is offline, so it is sent when it is next connected.`)
+            + ' Kept in Cloud only, it stays here and cannot be run until it is sent.',
+          actions: [
+            { id: 'cancel', label: 'Cancel', kind: 'cancel' },
+            { id: 'cloud', label: 'Save in Cloud only' },
+            { id: 'send', label: 'Save and send to device', kind: 'primary' },
+          ],
+        });
+        if (!choice || choice === 'cancel') return;
         const res = await fetch('/api/edge-sequences', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -397,10 +425,13 @@ export default function DesignerPage() {
             name,
             description: currentWorkflowDescription,
             body: legacyFormat,
+            push: choice === 'send',
           }),
         });
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Cloud save failed');
-        await notify("Saved to the Cloud Library.", { title: name });
+        await notify(choice === 'send'
+          ? (online ? `Saved, and sent to ${where}.` : `Saved. It is sent to ${where} when it is next connected.`)
+          : `Saved in Cloud only. ${where} does not have this version, so it cannot be run from Cloud until it is sent.`, { title: name });
       } else {
         await notify("Saved on this device only. Assign a target device to also save it to the Cloud Library.",
                      { title: name });
@@ -511,8 +542,14 @@ export default function DesignerPage() {
     <div className="flex h-full min-w-[900px]">
       <div className="flex-1 flex flex-col overflow-hidden w-full h-full min-w-0">
         {deviceId && (
-            <div className="bg-blue-500/10 border-b border-blue-500/20 px-6 py-2 text-sm text-blue-600 dark:text-blue-400 flex justify-between items-center z-10 shrink-0">
-                <span className="font-medium">Targeting Edge Device: <strong className="font-bold">{deviceId}</strong></span>
+            <div className="bg-gray-900/10 dark:bg-white/10 border-b border-gray-900/20 dark:border-white/20 px-6 py-2 text-sm text-gray-900 dark:text-white flex justify-between items-center z-10 shrink-0">
+                {deviceRemoved ? (
+                  <span className="font-medium">A record kept from <strong className="font-bold">{targetDevice?.name}</strong>, which was removed from Cloud. It can be read and exported, not changed or run.</span>
+                ) : (
+                  <span className="font-medium">Targeting Edge Device: <strong className="font-bold">{targetDevice?.name || deviceId}</strong>
+                    {targetDevice && !targetDevice.status.includes('online') && targetDevice.status !== 'paused' && <span className="ml-2 font-normal opacity-80">(offline: showing what it last sent)</span>}
+                  </span>
+                )}
             </div>
         )}
         <WorkflowEditor
@@ -535,6 +572,9 @@ export default function DesignerPage() {
                     className="text-sm font-bold tracking-wider text-gray-600 dark:text-gray-300 bg-transparent border-none focus:outline-none focus:ring-0 p-0"
                   />
                   {isUnsaved && <span className="px-1.5 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 text-[10px] font-bold uppercase tracking-wider">Unsaved</span>}
+                  {deviceRemoved && (
+                    <span title="This device was removed from Cloud. Its workflows are kept as a record: they can be read and exported, not changed." className="px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-white/10 text-gray-600 dark:text-gray-300 text-[10px] font-bold uppercase tracking-wider whitespace-nowrap">Device removed · record</span>
+                  )}
                   {isOffline && (
                     <span className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 text-[10px] font-bold uppercase tracking-wider border border-purple-200 dark:border-purple-500/30">
                       <AlertTriangle className="w-3 h-3" />
@@ -561,17 +601,15 @@ export default function DesignerPage() {
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
                   <FilePlus2 className="w-4 h-4 text-gray-400" />
-                  <span className="hidden sm:inline">New</span>
                 </button>
 
                 <button
                   onClick={saveWorkflow}
                   disabled={sequence.length === 0}
                   title="Save this sequence to the library"
-                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Save className="w-4 h-4" />
-                  <span className="hidden sm:inline">Save</span>
                 </button>
 
                 <div className="relative group">
@@ -610,7 +648,7 @@ export default function DesignerPage() {
                   onClick={() => setViewMode(viewMode === 'canvas' ? 'code' : 'canvas')}
                   className="flex items-center space-x-1 px-3 py-1.5 rounded text-sm font-medium transition-all bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
                 >
-                  {viewMode === 'canvas' ? <Code className="w-4 h-4 text-indigo-500" /> : <LayoutTemplate className="w-4 h-4 text-indigo-500" />}
+                  {viewMode === 'canvas' ? <Code className="w-4 h-4 text-gray-700 dark:text-gray-200" /> : <LayoutTemplate className="w-4 h-4 text-gray-700 dark:text-gray-200" />}
                   <span className="hidden sm:inline">{viewMode === 'canvas' ? 'Python' : 'Back'}</span>
                 </button>
                 {(() => {
@@ -638,7 +676,7 @@ export default function DesignerPage() {
                         sequence.length === 0
                           ? 'bg-gray-50 text-gray-400 border border-gray-200 dark:bg-gray-900/30 dark:border-gray-800 dark:text-gray-600 cursor-not-allowed'
                           : hasDynamicParams
-                            ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-500/30 dark:text-blue-300 dark:hover:bg-blue-900/50 shadow-sm'
+                            ? 'bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 shadow-sm'
                             : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 dark:bg-green-900/30 dark:border-green-500/30 dark:text-green-300 dark:hover:bg-green-900/50 shadow-sm'
                       }`}
                     >
@@ -663,7 +701,11 @@ export default function DesignerPage() {
           customView={
             viewMode === 'code' ? (
                 <PythonCodeView
-                  code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta)}
+                  code={generatePythonCode(prepSequence, sequence, cleanupSequence, instrumentMeta, {
+                    // A linked step becomes a call to a function of the script's own, written from the saved body.
+                    workflows: Object.fromEntries(Object.entries(statusData?.instruments?.['Library Workflows'] || {}).map(([n, e]: [string, any]) => [n, e?.body])),
+                    instruments: statusData?.instruments,
+                  })}
                   theme={theme}
                   fileName={currentWorkflowName || 'sequence'}
                 />

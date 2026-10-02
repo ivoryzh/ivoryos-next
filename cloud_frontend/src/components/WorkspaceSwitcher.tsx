@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Building2, Check, ChevronsUpDown, LogOut, User } from 'lucide-react';
+import { TopNavMenu, TopNavMenuItem } from '@ivoryos/shared-ui';
 
 type Workspace = { id: string; kind: 'personal' | 'org'; name: string; role?: string };
 type SessionInfo = { user: { id: string; email: string | null; name: string | null }; workspace: Workspace; workspaces: Workspace[] };
@@ -11,7 +12,7 @@ type SessionInfo = { user: { id: string; email: string | null; name: string | nu
  * spaces -- and who is signed in. Everything Cloud lists (devices, runs, library, schedules,
  * results) is that workspace's; switching reloads the page so no list keeps another's rows.
  */
-export default function WorkspaceSwitcher({ expanded }: { expanded: boolean }) {
+export default function WorkspaceSwitcher({ expanded, compact = false }: { expanded: boolean; /** One short line, for the top bar. */ compact?: boolean }) {
   const [info, setInfo] = useState<SessionInfo | null>(null);
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -44,6 +45,40 @@ export default function WorkspaceSwitcher({ expanded }: { expanded: boolean }) {
     window.location.href = '/login';
   };
 
+  // In the top bar: the shared menu pill (shared-ui TopNav.tsx), which keeps its menu clear of
+  // whatever the page draws below the bar.
+  if (compact) {
+    return (
+      <TopNavMenu
+        label={info.workspace.kind === 'org' ? info.workspace.name : 'Personal'}
+        icon={<Icon className="w-4 h-4 shrink-0" />}
+        title={`${info.workspace.name} · ${who}`}
+      >
+        {(close) => (
+          <>
+            <div className="px-3 pt-1.5 pb-2 mb-1 border-b border-gray-200 dark:border-white/10">
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">Signed in as</div>
+              <div className="text-sm font-medium truncate">{who}</div>
+            </div>
+            <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">Workspaces</div>
+            {info.workspaces.map(w => (
+              <TopNavMenuItem
+                key={w.id}
+                onClick={() => { close(); choose(w.id); }}
+                icon={w.kind === 'org' ? <Building2 className="w-3.5 h-3.5 shrink-0" /> : <User className="w-3.5 h-3.5 shrink-0" />}
+                trailing={w.id === info.workspace.id ? <Check className="w-3.5 h-3.5 shrink-0 text-gray-700 dark:text-gray-200" /> : undefined}
+              >
+                {w.kind === 'org' ? w.name : 'Personal workspace'}
+              </TopNavMenuItem>
+            ))}
+            <div className="my-1 border-t border-gray-200 dark:border-white/10" />
+            <TopNavMenuItem onClick={() => { close(); signOut(); }} icon={<LogOut className="w-3.5 h-3.5 shrink-0" />}>Sign out</TopNavMenuItem>
+          </>
+        )}
+      </TopNavMenu>
+    );
+  }
+
   return (
     <div ref={box} className="relative px-3">
       <button
@@ -53,7 +88,7 @@ export default function WorkspaceSwitcher({ expanded }: { expanded: boolean }) {
         className="w-full flex items-center gap-2 rounded-lg px-2 py-2 hover-bg"
         style={{ color: 'var(--text-primary)' }}
       >
-        <span className="w-6 h-6 shrink-0 rounded-md flex items-center justify-center bg-blue-500/15 text-blue-400"><Icon className="w-3.5 h-3.5" /></span>
+        <span className="w-6 h-6 shrink-0 rounded-md flex items-center justify-center bg-gray-900/15 dark:bg-white/15 text-gray-500 dark:text-gray-300"><Icon className="w-3.5 h-3.5" /></span>
         {expanded && (
           <>
             <span className="flex-1 min-w-0 text-left">
@@ -71,7 +106,7 @@ export default function WorkspaceSwitcher({ expanded }: { expanded: boolean }) {
             <button key={w.id} type="button" onClick={() => choose(w.id)} className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover-bg" style={{ color: 'var(--text-primary)' }}>
               {w.kind === 'org' ? <Building2 className="w-3.5 h-3.5" /> : <User className="w-3.5 h-3.5" />}
               <span className="flex-1 truncate">{w.kind === 'org' ? w.name : 'Personal workspace'}</span>
-              {w.id === info.workspace.id && <Check className="w-3.5 h-3.5 text-blue-400" />}
+              {w.id === info.workspace.id && <Check className="w-3.5 h-3.5 text-gray-500 dark:text-gray-300" />}
             </button>
           ))}
           <div className="my-1 border-t" style={{ borderColor: 'var(--panel-border)' }} />

@@ -1,10 +1,11 @@
 "use client";
 import React, { useState } from 'react';
 import { Ban, Loader2, PanelsTopLeft, Puzzle } from 'lucide-react';
-import { confirmDialog, notify } from '@ivoryos/shared-ui';
+import { confirmDialog } from '@ivoryos/shared-ui';
 import type { Deck, DesktopApi, HubPlugin } from '@/desktop';
 import { Button } from './ui';
-import { CatalogCard, Notice, VisibilityBadge } from './hubUi';
+import { addTo, deckLabel, CatalogCard, Notice, VisibilityBadge, type DeckAccess } from './hubUi';
+import { installFailed } from './ReportProblem';
 
 /**
  * Plugins are added only when they are v2 (an `ivoryos_edge.plugins.Plugin`). A v1 plugin is a
@@ -26,7 +27,7 @@ export function PluginApiBadge({ plugin }: { plugin: HubPlugin }) {
 export function PluginCard({ plugin, onPick }: { plugin: HubPlugin; onPick: () => void }) {
   return (
     <CatalogCard onPick={onPick} muted={!isV2(plugin)}>
-      <div className="h-24 bg-gradient-to-br from-indigo-50 to-indigo-100 text-indigo-500 dark:from-indigo-500/10 dark:to-indigo-500/20 dark:text-indigo-300 flex items-center justify-center relative">
+      <div className="h-24 bg-gradient-to-br from-gray-50 to-gray-100 text-gray-700 dark:text-gray-200 dark:from-white/5 dark:to-white/10 dark:text-white flex items-center justify-center relative">
         {plugin.screenshot_urls?.[0]
           // eslint-disable-next-line @next/next/no-img-element -- a remote Hub image in a static export
           ? <img src={plugin.screenshot_urls[0]} alt="" loading="lazy" className="w-full h-full object-cover" />
@@ -35,7 +36,7 @@ export function PluginCard({ plugin, onPick }: { plugin: HubPlugin; onPick: () =
       </div>
       <div className="p-3 flex-1 flex flex-col gap-1 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-indigo-700 dark:group-hover:text-indigo-300">{plugin.name.trim()}</span>
+          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-accent-fg">{plugin.name.trim()}</span>
           <VisibilityBadge row={plugin} />
         </div>
         <div className="text-xs font-mono text-gray-500 dark:text-gray-400 truncate">{plugin.pip_name}</div>
@@ -46,8 +47,8 @@ export function PluginCard({ plugin, onPick }: { plugin: HubPlugin; onPick: () =
 }
 
 /** One plugin: what it is, and "Add to deck" when it is v2. */
-export function PluginDetail({ api, profileId, profileName, deck, plugin, onDone }: {
-  api: DesktopApi; profileId: string; profileName: string; deck: Deck | null; plugin: HubPlugin; onDone: () => void;
+export function PluginDetail({ api, access, deck, plugin, onDone }: {
+  api: DesktopApi; access: DeckAccess; deck: Deck | null; plugin: HubPlugin; onDone: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const entry = plugin.entry;
@@ -61,7 +62,7 @@ export function PluginDetail({ api, profileId, profileName, deck, plugin, onDone
     if (entry.blocked) return;
     const ok = await confirmDialog(
       [
-        `Install ${entry.packages.join(', ') || 'nothing new'} and add the plugin ${entry.plugins.join(', ')} to “${profileName}”.`,
+        `Install ${entry.packages.join(', ') || 'nothing new'} and add the plugin ${entry.plugins.join(', ')} to ${deckLabel(access.target)}.`,
         ...(madeForOthers ? ['It was made for other instruments than this deck has, so parts of it may not find what they look for.'] : []),
         'Plugins run on this computer with access to your instruments. The deck restarts to load it.',
       ].join('\n\n'),
@@ -70,10 +71,10 @@ export function PluginDetail({ api, profileId, profileName, deck, plugin, onDone
     if (!ok) return;
     setBusy(true);
     try {
-      await api.install(profileId, { packages: entry.packages, instruments: [], plugins: entry.plugins });
+      if (!await addTo(access, plugin.name.trim(), deck => api.install(deck.id, { packages: entry.packages, instruments: [], plugins: entry.plugins }))) return;
       onDone();
     } catch (e: any) {
-      await notify(`${e.message}${e.output ? `\n\n${String(e.output).split('\n').slice(-12).join('\n')}` : ''}`, { title: 'Could not add the plugin', tone: 'error' });
+      await installFailed(api, 'Could not add the plugin', e, access.target?.id ?? null);
     } finally {
       setBusy(false);
     }
@@ -82,7 +83,7 @@ export function PluginDetail({ api, profileId, profileName, deck, plugin, onDone
   return (
     <div className="max-w-3xl mx-auto space-y-4">
       <div className="flex items-start gap-3">
-        <div className="w-12 h-12 shrink-0 rounded-xl bg-indigo-50 text-indigo-500 dark:bg-indigo-500/10 dark:text-indigo-300 flex items-center justify-center"><Puzzle className="w-6 h-6" /></div>
+        <div className="w-12 h-12 shrink-0 rounded-xl bg-gray-100 dark:bg-white/10 text-gray-700 dark:text-gray-200 dark:bg-white/10 dark:text-white flex items-center justify-center"><Puzzle className="w-6 h-6" /></div>
         <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">{plugin.name.trim()}</h3>

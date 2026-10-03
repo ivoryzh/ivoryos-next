@@ -1,5 +1,5 @@
 "use client";
-import { API_BASE } from '@/config';
+import { API_BASE, withBase } from '@/config';
 
 import { useState, useEffect } from 'react';
 import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag, Plus } from 'lucide-react';
@@ -376,7 +376,7 @@ export default function LibraryPage() {
         workflowSignature(prepSequence, newSequence, cleanupSequence, name, legacyData.description || '')
       );
       localStorage.setItem('ivoryos_is_unsaved', version ? 'true' : 'false');
-      window.location.href = '/designer';
+      window.location.href = withBase('/designer');
     } catch (e: any) {
       await notify(e.message, { title: 'Could not load workflow', tone: 'error' });
     }
@@ -405,7 +405,7 @@ export default function LibraryPage() {
                 Keep editing
               </button>
               <a
-                href="/designer"
+                href={withBase('/designer')}
                 className="px-4 py-2 rounded-lg text-sm font-medium bg-accent-soft hover:bg-accent-tint/30 text-accent-fg transition-colors"
               >
                 Go save it first

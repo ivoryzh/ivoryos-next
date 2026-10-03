@@ -1,5 +1,5 @@
 "use client";
-import { API_BASE, WS_BASE } from '@/config';
+import { API_BASE, WS_BASE, withBase } from '@/config';
 import CloudRepeats from '@/components/CloudRepeats';
 import { useCallback, useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
@@ -188,7 +188,7 @@ export default function QueueDrawer() {
                         {/* Its spreadsheet or optimization settings, on the page that made it. A full
                             load, not a client-side route: the page reads ?edit=<id> when it mounts. */}
                         {editHref(run) && (
-                          <button onClick={() => { window.location.href = editHref(run)!; }} title="Change its values or settings before it runs" className={iconBtn}><SlidersHorizontal className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => { window.location.href = withBase(editHref(run)!); }} title="Change its values or settings before it runs" className={iconBtn}><SlidersHorizontal className="w-3.5 h-3.5" /></button>
                         )}
                         <button onClick={() => move(run.id, 'up')} disabled={idx === 0} title="Run this sooner" className={iconBtn}><ArrowUp className="w-3.5 h-3.5" /></button>
                         <button onClick={() => move(run.id, 'down')} disabled={idx === pending.length - 1} title="Run this later" className={iconBtn}><ArrowDown className="w-3.5 h-3.5" /></button>

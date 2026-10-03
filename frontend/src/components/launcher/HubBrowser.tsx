@@ -6,12 +6,12 @@ import {
   Thermometer, Wind, type LucideIcon,
 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
-import type { Deck, DesktopApi, HubModule, HubPlatform, HubPlugin, HubTemplate } from '@/desktop';
+import type { Deck, DesktopApi, HubLinkRequest, HubModule, HubPlatform, HubPlugin, HubTemplate } from '@/desktop';
 import { emptyFields, toForm, type FormValues } from '@/launcherArgs';
 import { inScope, preferV2, type Scope } from '@/hubCatalog';
 import ArgsForm from './ArgsForm';
 import PrivateRepos, { type InstrumentSeed } from './PrivateRepos';
-import { PlatformCard, PlatformDetail } from './HubPlatforms';
+import { LinkDetail, PlatformCard, PlatformDetail } from './HubPlatforms';
 import { PluginCard, PluginDetail } from './HubPlugins';
 import { TemplateCard, TemplateDetail, templateTitle } from './HubTemplates';
 import { addTo, deckLabel, plainInstrumentName, ErrorBox, Loading, VisibilityBadge, type DeckAccess, type DeckTarget } from './hubUi';
@@ -26,7 +26,8 @@ type Chosen =
   | { kind: 'instrument'; module: HubModule }
   | { kind: 'platform'; platform: HubPlatform }
   | { kind: 'plugin'; plugin: HubPlugin }
-  | { kind: 'template'; template: HubTemplate };
+  | { kind: 'template'; template: HubTemplate }
+  | { kind: 'link'; request: HubLinkRequest };
 type Loaded<T> = { items: T[] | null; error: string | null };
 
 /** Load one catalog list once; `items` is null until it arrives, [] (with `error`) if it failed. */
@@ -51,8 +52,8 @@ const KINDS: { kind: ListKind; label: string; icon: LucideIcon; noun: string }[]
 /**
  * The Hub, from a deck: its instrument drivers, platforms (a whole deck's worth of drivers,
  * plugins and workflows), plugins and workflow templates, each added to this deck in one step.
- * A driver becomes the same deck entry the Hub's "Open in IvoryOS" button would send
- * (/api/catalog/deck-entry); a platform can instead become a new deck of its own.
+ * A platform can instead become a new deck of its own. The Hub website's "Open in IvoryOS" button
+ * lands here too: its link names Hub ids, opened on the platform install screen (`initialLink`).
  *
  * Public and private hub are the same browser over different rows. The Hub decides which rows a
  * signed-in person may see (row-level security: their own, and their organizations'); the switch
@@ -63,7 +64,7 @@ const KINDS: { kind: ListKind; label: string; icon: LucideIcon; noun: string }[]
  * instantly. Only a few devices have a photo on the Hub; every other driver card shows its
  * category's picture, so the grid never reads as a list of blank boxes.
  */
-export default function HubBrowser({ api, profile, newDeck, initialKind, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded, onOpenProfile }: {
+export default function HubBrowser({ api, profile, newDeck, initialKind, initialLink, hubUrl, pro, onUpgrade, onPrivatePicked, onClose, onAdded, onOpenProfile }: {
   api: DesktopApi;
   /** The deck this browser adds to; null when the launcher has no deck yet (see `newDeck`). */
   profile: DeckTarget | null;
@@ -74,6 +75,8 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, hubUrl,
   newDeck?: { create: (suggestedName: string) => Promise<DeckTarget | null>; discard: (deck: DeckTarget) => Promise<void> };
   /** Open on this section rather than on starred items / instruments. */
   initialKind?: HubKind;
+  /** Open on what an `ivoryos://install` link from the Hub asks for (desktop/src/installLink.js). */
+  initialLink?: HubLinkRequest | null;
   hubUrl: string;
   /** The private hub and private repositories are Pro features (preview plans, desktop/src/account.js). */
   pro: boolean;
@@ -90,7 +93,14 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, hubUrl,
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null>(null);
   const [testedOnly, setTestedOnly] = useState(false);
-  const [chosen, setChosen] = useState<Chosen | null>(null);
+  const [chosen, setChosen] = useState<Chosen | null>(initialLink ? { kind: 'link', request: initialLink } : null);
+  // A second link while the browser is open replaces whatever it was showing (adjusted while
+  // rendering, as React recommends for state that follows a prop, rather than in an effect).
+  const [shownLink, setShownLink] = useState(initialLink);
+  if (initialLink !== shownLink) {
+    setShownLink(initialLink);
+    if (initialLink) setChosen({ kind: 'link', request: initialLink });
+  }
   const [deck, setDeck] = useState<Deck | null>(null);
   // The deck adds land on: the one the browser was opened on, else whatever the first add created.
   const [created, setCreated] = useState<DeckTarget | null>(null);
@@ -194,7 +204,8 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, hubUrl,
     : chosen.kind === 'instrument' ? `Add ${chosen.module.name} to ${where}`
       : chosen.kind === 'platform' ? `Install ${chosen.platform.name}`
         : chosen.kind === 'plugin' ? `Add ${chosen.plugin.name.trim()} to ${where}`
-          : `Add ${templateTitle(chosen.template)} to ${where}`;
+          : chosen.kind === 'link' ? 'Install from the Automation Hub'
+            : `Add ${templateTitle(chosen.template)} to ${where}`;
 
   return (
     <Modal wide="browser" onClose={onClose} title={chosen
@@ -206,6 +217,10 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, hubUrl,
           {chosen.kind === 'instrument' && <Configure api={api} access={access} summary={chosen.module} onDone={finish} />}
           {chosen.kind === 'platform' && (
             <PlatformDetail api={api} access={access} deck={deck} platformId={chosen.platform.id}
+              onDone={newId => { finish(); if (newId) onOpenProfile(newId); }} />
+          )}
+          {chosen.kind === 'link' && (
+            <LinkDetail api={api} access={access} deck={deck} request={chosen.request}
               onDone={newId => { finish(); if (newId) onOpenProfile(newId); }} />
           )}
           {chosen.kind === 'plugin' && <PluginDetail api={api} access={access} deck={deck} plugin={chosen.plugin} onDone={finish} />}

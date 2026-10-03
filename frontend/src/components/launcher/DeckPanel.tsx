@@ -2,7 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileJson, Package, Pencil, Plus, Store, Trash2 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
-import type { Deck, DeckInstrument, DesktopApi, Profile } from '@/desktop';
+import type { Deck, DeckInstrument, DesktopApi, HubLinkRequest, Profile } from '@/desktop';
 import HubBrowser, { type HubKind } from './HubBrowser';
 import InstrumentEditor from './InstrumentEditor';
 import type { InstrumentSeed } from './PrivateRepos';
@@ -11,7 +11,7 @@ import { Button, cardClass } from './ui';
 type LoadState = { loaded: Set<string>; errors: Record<string, string> } | null;
 
 /** One deck profile's instruments: what is on it, whether each loaded, and how to change it. */
-export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpenProfile, browsing, setBrowsing, hubKind, seed: handedSeed, onSeedTaken }: {
+export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpenProfile, browsing, setBrowsing, hubKind, hubLink, seed: handedSeed, onSeedTaken }: {
   api: DesktopApi; profile: Profile; hubUrl: string; pro: boolean; onUpgrade: () => void;
   /** A private-repository class picked in the sidebar's Hub browser before this deck existed: open the form with it. */
   seed?: InstrumentSeed | null;
@@ -23,6 +23,8 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpen
   setBrowsing: (open: boolean) => void;
   /** The Hub section to open on when the launcher opened the browser. */
   hubKind?: HubKind;
+  /** An install link from the Hub website the browser opens on. */
+  hubLink?: HubLinkRequest | null;
 }) {
   const [deck, setDeck] = useState<Deck | null>(null);
   const [load, setLoad] = useState<LoadState>(null);
@@ -139,6 +141,7 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpen
           api={api} profile={hubTarget} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade}
           onPrivatePicked={s => { refresh(); setSeed(s); setEditing('new'); }}
           initialKind={hubKind}
+          initialLink={hubLink}
           onClose={() => setBrowsing(false)} onAdded={added} onOpenProfile={onOpenProfile}
         />
       )}

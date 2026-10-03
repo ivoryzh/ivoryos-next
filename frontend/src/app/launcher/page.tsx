@@ -5,7 +5,7 @@ import {
   LogIn, PanelLeftClose, PanelLeftOpen, Play, Plus, RotateCw, Save, Send, Settings, Sparkles, Square, Store, UserPlus, X,
 } from 'lucide-react';
 import { chooseDialog, notify, promptDialog } from '@ivoryos/shared-ui';
-import { CLOUD_TAB, desktopApi, type AccountInfo, type CloudLink, type DesktopApi, type Profile, type Snapshot, type Tabs, type UpdateStatus } from '@/desktop';
+import { CLOUD_TAB, desktopApi, type AccountInfo, type CloudLink, type DesktopApi, type HubLinkRequest, type Profile, type Snapshot, type Tabs, type UpdateStatus } from '@/desktop';
 import AccountPanel, { Avatar, type AuthMode } from '@/components/launcher/AccountPanel';
 import CloudPanel, { useCloudLinks } from '@/components/launcher/CloudPanel';
 import { openReport } from '@/components/launcher/ReportProblem';
@@ -69,6 +69,9 @@ export default function LauncherPage() {
   const [hubOpen, setHubOpen] = useState(false);
   // Which part of the Hub to open on: the sidebar's "Add platform" starts on platforms.
   const [hubKind, setHubKind] = useState<HubKind | undefined>(undefined);
+  // What an `ivoryos://install` link from the Hub website asks for: the browser opens on it.
+  const [hubLink, setHubLink] = useState<HubLinkRequest | null>(null);
+  const openHubRef = useRef<(kind?: HubKind, link?: HubLinkRequest | null) => void>(() => {});
   // The Hub opened from the sidebar with no deck to add to: the first add creates one
   // (`createdDeck`), and closing the browser lands on it. A class picked from a private
   // repository there is handed to that deck's panel, which opens its instrument form.
@@ -227,6 +230,36 @@ export default function LauncherPage() {
   // with only a sliver visible beside the sidebar. So whatever opens it, this page comes forward.
   useEffect(() => { if ((upgrade !== undefined || earlyAccess) && api) api.showTab(null); }, [upgrade, earlyAccess, api]);
 
+  // The Hub adds to a deck: the selected one, or the first deck when a script is selected. With
+  // no deck at all it opens anyway, and the first thing added creates the deck it lands on.
+  const hubDeck = profile?.kind === 'deck' ? profile : profiles.find(p => p.kind === 'deck') || null;
+  const openHub = (kind?: HubKind, link: HubLinkRequest | null = null) => {
+    api?.showTab(null);
+    setHubKind(kind);
+    setHubLink(link);
+    if (hubDeck) { setSelected(hubDeck.id); setView('profile'); setTab('main'); setHubOpen(true); return; }
+    createdDeck.current = null;
+    setStandaloneHub(true);
+  };
+
+  // A link from the Hub website opens the Hub on what it names. Taken once the profiles are in, so
+  // it lands on a deck if there is one; that covers the link that started the app as well.
+  const profilesLoaded = !!snap;
+  // Opened with `?hub` (the tour's "Build My Lab", src/tour/), it starts in the Hub browser instead.
+  useEffect(() => {
+    if (!api || !profilesLoaded) return;
+    const take = (atStart: boolean) => {
+      api.takeHubLink().then(link => {
+        if (link) openHubRef.current(undefined, link);
+        else if (atStart && new URLSearchParams(window.location.search).has('hub')) openHubRef.current();
+      }).catch(() => {});
+    };
+    take(true);
+    return api.onHubLink(() => take(false));
+  }, [api, profilesLoaded]);
+  // openHub as of the last render, for a link that arrives later than the effect above was set up.
+  useEffect(() => { openHubRef.current = openHub; });
+
   if (api === undefined) return null;
   if (api === null) {
     return (
@@ -359,16 +392,6 @@ export default function LauncherPage() {
     run(() => api.reorderProfiles(ids));
   };
   const activeProfile = tabs.active && tabs.active !== CLOUD_TAB ? profiles.find(p => p.id === tabs.active) || null : null;
-  // The Hub adds to a deck: the selected one, or the first deck when a script is selected. With
-  // no deck at all it opens anyway, and the first thing added creates the deck it lands on.
-  const hubDeck = profile?.kind === 'deck' ? profile : profiles.find(p => p.kind === 'deck') || null;
-  const openHub = (kind?: HubKind) => {
-    api.showTab(null);
-    setHubKind(kind);
-    if (hubDeck) { setSelected(hubDeck.id); setView('profile'); setTab('main'); setHubOpen(true); return; }
-    createdDeck.current = null;
-    setStandaloneHub(true);
-  };
   const showDeck = (id: string) => { setSelected(id); setView('profile'); setTab('main'); };
   const closeStandaloneHub = () => {
     setStandaloneHub(false);
@@ -507,7 +530,7 @@ export default function LauncherPage() {
           </div>}
           {/* No rule above Cloud: it is one more entry in the list, and the same space above and
               below keeps its highlight centred between the entries and the account row. */}
-          {!cloudOnly && <div className="px-3 pt-0.5 pb-2 space-y-0.5">{cloudRow}</div>}
+          {!cloudOnly && !snap?.noCloud && <div className="px-3 pt-0.5 pb-2 space-y-0.5">{cloudRow}</div>}
           <AccountCorner
             account={account}
             update={snap?.update}
@@ -559,6 +582,7 @@ export default function LauncherPage() {
               hubOpen={hubOpen}
               setHubOpen={setHubOpen}
               hubKind={hubKind}
+              hubLink={hubLink}
               seed={handedSeed}
               onSeedTaken={clearSeed}
             />
@@ -574,6 +598,7 @@ export default function LauncherPage() {
           profile={null}
           newDeck={newDeckFromHub}
           initialKind={hubKind}
+          initialLink={hubLink}
           hubUrl={snap?.hubUrl || ''}
           pro={pro}
           onUpgrade={() => setUpgrade('private')}
@@ -663,7 +688,7 @@ function UpdateChip({ update, onClick }: { update: UpdateStatus; onClick: () => 
   );
 }
 
-function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, tab, setTab, log, run, onRemoved, onOpenProfile, hubOpen, setHubOpen, hubKind, seed, onSeedTaken, cloudComingSoon }: {
+function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, tab, setTab, log, run, onRemoved, onOpenProfile, hubOpen, setHubOpen, hubKind, hubLink, seed, onSeedTaken, cloudComingSoon }: {
   api: DesktopApi;
   profile: Profile;
   hubUrl: string;
@@ -680,6 +705,7 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
   hubOpen: boolean;
   setHubOpen: (open: boolean) => void;
   hubKind?: HubKind;
+  hubLink?: HubLinkRequest | null;
   seed?: InstrumentSeed | null;
   onSeedTaken?: () => void;
   cloudComingSoon?: boolean;
@@ -760,7 +786,7 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
       </div>
 
       {tab === 'main' && (profile.kind === 'deck'
-        ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade} onOpenProfile={onOpenProfile} browsing={hubOpen} setBrowsing={setHubOpen} hubKind={hubKind} seed={seed} onSeedTaken={onSeedTaken} />
+        ? <DeckPanel api={api} profile={profile} hubUrl={hubUrl} pro={pro} onUpgrade={onUpgrade} onOpenProfile={onOpenProfile} browsing={hubOpen} setBrowsing={setHubOpen} hubKind={hubKind} hubLink={hubLink} seed={seed} onSeedTaken={onSeedTaken} />
         : <ScriptOverview api={api} profile={profile} openSettings={() => setTab('settings')} openCode={() => setTab('code')} />)}
       {tab === 'code' && profile.kind === 'script' && <CodePanel api={api} profile={profile} run={run} />}
       {tab === 'log' && <LogPanel api={api} profile={profile} lines={log} onReport={failed ? report : undefined} />}

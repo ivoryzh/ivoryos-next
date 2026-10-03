@@ -1,8 +1,8 @@
 "use client";
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, Cpu, ExternalLink, FileText, Layers, Loader2, Puzzle, TrendingUp } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Cpu, ExternalLink, FileText, Layers, Loader2, Puzzle, TrendingUp } from 'lucide-react';
 import { confirmDialog } from '@ivoryos/shared-ui';
-import type { Deck, DeckInstrument, DesktopApi, HubModule, HubPlatform, HubPlugin, OptimizerChoice } from '@/desktop';
+import type { Deck, DeckInstrument, DesktopApi, HubLinkRequest, HubModule, HubPlatform, HubPlugin, OptimizerChoice } from '@/desktop';
 import { emptyFields, toForm, type FormValues } from '@/launcherArgs';
 import { preferV2, templateFit, uniqueNames, unionPackages } from '@/hubCatalog';
 import ArgsForm from './ArgsForm';
@@ -68,9 +68,49 @@ export function PlatformDetail({ api, access, deck, platformId, onDone }: {
   return <PlatformForm api={api} access={access} deck={deck} platform={platform} onDone={onDone} />;
 }
 
-function PlatformForm({ api, access, deck, platform, onDone }: {
+/** What an install link adds beyond a platform: optimizers to pre-tick, and ids it named that the Hub would not show. */
+type FromLink = { optimizers: string[]; hiddenPlugins: number[]; hiddenTemplates: number[] };
+
+/**
+ * An `ivoryos://install` link from the Hub (desktop/src/installLink.js), on the same screen as a
+ * platform picked here: every driver, plugin and workflow is read from the Hub by id, shown with
+ * who contributed it, and nothing installs until the person chooses Install.
+ */
+export function LinkDetail({ api, access, deck, request, onDone }: {
+  api: DesktopApi; access: DeckAccess; deck: Deck | null; request: HubLinkRequest;
+  onDone: (newProfileId: string | null) => void;
+}) {
+  const [platform, setPlatform] = useState<(HubPlatform & { modules: HubModule[] }) | null>(null);
+  const [link, setLink] = useState<FromLink | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = request.platform
+      ? api.hubPlatform(request.platform).then(r => ({ platform: r.platform, hiddenPlugins: [], hiddenTemplates: [] }))
+      : api.hubSelection(request).then(({ selection: s }) => ({
+        platform: {
+          id: 0, name: 'Hub build', modules: s.modules, hiddenModules: s.hiddenModules, plugins: s.plugins, templates: s.templates,
+          description: 'The drivers, plugins and workflows picked on the Automation Hub website.',
+        },
+        hiddenPlugins: s.hiddenPlugins, hiddenTemplates: s.hiddenTemplates,
+      }));
+    load
+      .then(r => { if (!cancelled) { setPlatform(r.platform); setLink({ optimizers: request.optimizers, hiddenPlugins: r.hiddenPlugins, hiddenTemplates: r.hiddenTemplates }); } })
+      .catch(e => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [api, request]);
+
+  if (error) return <ErrorBox>{error}</ErrorBox>;
+  if (!platform || !link) return <Loading what="what the link asks for" />;
+  return <PlatformForm api={api} access={access} deck={deck} platform={platform} link={link} onDone={onDone} />;
+}
+
+function PlatformForm({ api, access, deck, platform, link, onDone }: {
   api: DesktopApi; access: DeckAccess; deck: Deck | null;
-  platform: HubPlatform & { modules: HubModule[] }; onDone: (newProfileId: string | null) => void;
+  platform: HubPlatform & { modules: HubModule[] };
+  /** Opened from an install link rather than picked in this browser. */
+  link?: FromLink;
+  onDone: (newProfileId: string | null) => void;
 }) {
   // Opened without a deck, a platform can only become one; "append" needs a deck to append to.
   const existing = access.target;
@@ -95,11 +135,26 @@ function PlatformForm({ api, access, deck, platform, onDone }: {
   // optimizer id to the version to add; what the deck already lists is shown, not offered.
   const [optimizers, setOptimizers] = useState<{ catalog: OptimizerChoice[]; selected: Record<string, string | null>; installed: Record<string, string | null> } | null>(null);
   const [picked, setPicked] = useState<Record<string, string>>({});
+  const linkOptimizers = link?.optimizers;
   useEffect(() => {
     let live = true;
-    api.optimizers(existing?.id ?? null).then(o => { if (live) setOptimizers(o); }).catch(() => {});
+    api.optimizers(existing?.id ?? null).then(o => {
+      if (!live) return;
+      setOptimizers(o);
+      // A link's optimizers arrive ticked, at the version this screen would offer first anyway.
+      if (linkOptimizers?.length) {
+        setPicked(p => {
+          const next = { ...p };
+          for (const c of o.catalog.filter(c => linkOptimizers.includes(c.id))) {
+            const installed = o.installed[c.id];
+            next[c.id] = next[c.id] || (installed && c.versions.includes(installed) ? installed : c.versions[0]);
+          }
+          return next;
+        });
+      }
+    }).catch(() => {});
     return () => { live = false; };
-  }, [api, existing?.id]);
+  }, [api, existing?.id, linkOptimizers]);
   const onDeck = (id: string) => (target === 'append' ? optimizers?.selected[id] : null) || null;
   const pickedOptimizers = (optimizers?.catalog || []).filter(o => picked[o.id] && !onDeck(o.id));
 
@@ -151,7 +206,7 @@ function PlatformForm({ api, access, deck, platform, onDone }: {
           ...warnings,
           'Drivers and plugins run on this computer with access to your instruments.',
         ].join('\n\n'),
-        { title: 'Install platform?', confirmLabel: 'Install' },
+        { title: link ? 'Install from the link?' : 'Install platform?', confirmLabel: 'Install' },
       );
       if (!ok) return;
 
@@ -184,6 +239,17 @@ function PlatformForm({ api, access, deck, platform, onDone }: {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
+      {link && (
+        <Notice tone="gray">
+          Opened from a link. Everything below is read from the Automation Hub, and nothing is installed until you choose Install.
+          {(link.hiddenPlugins.length > 0 || link.hiddenTemplates.length > 0) && (
+            <> The link also named {[
+              link.hiddenPlugins.length ? `${link.hiddenPlugins.length} plugin${link.hiddenPlugins.length === 1 ? '' : 's'}` : '',
+              link.hiddenTemplates.length ? `${link.hiddenTemplates.length} workflow${link.hiddenTemplates.length === 1 ? '' : 's'}` : '',
+            ].filter(Boolean).join(' and ')} that the Hub does not show you, so {link.hiddenPlugins.length + link.hiddenTemplates.length === 1 ? 'it is' : 'they are'} left out.</>
+          )}
+        </Notice>
+      )}
       <div className="flex gap-4">
         {platform.image_url && (
           // eslint-disable-next-line @next/next/no-img-element -- a remote Hub image in a static export
@@ -223,18 +289,23 @@ function PlatformForm({ api, access, deck, platform, onDone }: {
       <section>
         <SectionTitle icon={Cpu} count={`${chosen.length}/${rows.length}`}>Instruments</SectionTitle>
         {(platform.hiddenModules || []).length > 0 && (
-          <div className="mb-2"><Notice>{platform.hiddenModules!.length} driver{platform.hiddenModules!.length === 1 ? '' : 's'} in this platform {platform.hiddenModules!.length === 1 ? 'is' : 'are'} private to someone else and will not be installed.</Notice></div>
+          <div className="mb-2"><Notice>{platform.hiddenModules!.length} driver{platform.hiddenModules!.length === 1 ? '' : 's'} in this {link && !platform.id ? 'link' : 'platform'} {platform.hiddenModules!.length === 1 ? 'is' : 'are'} {link && !platform.id ? 'not on the Hub, or private to someone else,' : 'private to someone else'} and will not be installed.</Notice></div>
         )}
         <ul className="rounded-xl border border-gray-200 dark:border-white/10 divide-y divide-gray-100 dark:divide-white/5">
           {rows.map((r, i) => {
             const defs = r.module.init_args || [];
             const bad = r.include && (!NAME_RE.test(r.name) || r.name === clash);
             return (
-              <li key={r.module.id} className="px-3 py-2">
+              <li key={`${r.module.id}-${i}`} className="px-3 py-2">
                 <div className="flex items-center gap-2">
                   <input type="checkbox" checked={r.include} onChange={e => update(i, { include: e.target.checked })} className="accent-accent" />
                   <input value={r.name} disabled={!r.include} onChange={e => update(i, { name: e.target.value })} className={`${inputClass} font-mono !w-44 ${bad ? '!border-red-400' : ''}`} />
-                  <span className="min-w-0 flex-1 text-xs text-gray-500 dark:text-gray-400 truncate">{r.module.name} · {r.module.pip_name}</span>
+                  <span className="min-w-0 flex-1 text-xs text-gray-500 dark:text-gray-400 truncate">
+                    {r.module.name} · {r.module.pip_name}{r.module.contributor_name ? ` · by ${r.module.contributor_name}` : ''}
+                  </span>
+                  {r.module.is_tested_with_ivoryos && (
+                    <span title="Tested with IvoryOS" className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700 dark:text-green-300"><CheckCircle2 className="w-3 h-3" /> Tested</span>
+                  )}
                   <VisibilityBadge row={r.module} />
                   {defs.length > 0 && (
                     <button type="button" disabled={!r.include} onClick={() => update(i, { open: !r.open })} className="inline-flex items-center gap-0.5 text-xs text-gray-900 dark:text-white disabled:opacity-40">

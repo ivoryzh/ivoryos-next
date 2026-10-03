@@ -40,6 +40,7 @@ const { freeName } = require('./deckEdit');
 const report = require('./problemReport');
 const { AttentionWatcher } = require('./attention');
 const { OPTIMIZERS, selectionOf } = require('./optimizers');
+const { parseInstallLink } = require('./installLink');
 const os = require('node:os');
 const crypto = require('node:crypto');
 
@@ -90,6 +91,9 @@ let exiting = false;
 let tray = null;
 let trayMenuLabels = []; // what the tray menu last showed, for the smoke test to report
 const pendingLinks = [];
+// An `ivoryos://install` link from the Hub, waiting for the launcher to open its install screen on
+// it (installLink.js). The page takes it when told, or on load if the link started the app.
+let pendingHubLink = null;
 
 // --- Python ------------------------------------------------------------------------------------
 
@@ -447,13 +451,8 @@ function reloadEdgeTab(id) {
 
 // --- installs from links and files ---------------------------------------------------------------
 
-/** Decode an `ivoryos://install?deck=` payload (base64url JSON) or fetch `?manifest=`. */
+/** Fetch the manifest an `ivoryos://install?manifest=https://…` link points at. */
 async function manifestFromLink(url) {
-    const deck = url.searchParams.get('deck');
-    if (deck) {
-        const json = Buffer.from(deck.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
-        return { text: json, source: 'a link from the IvoryOS Hub' };
-    }
     const manifestUrl = url.searchParams.get('manifest');
     if (!manifestUrl) throw new ManifestError('The link does not say what to install.');
     const parsed = new URL(manifestUrl);
@@ -529,6 +528,15 @@ async function handleLink(link) {
         return;
     }
     try {
+        // Hub ids: shown on the launcher's own install screen, read from the Hub; nothing installs
+        // until the person chooses Install there.
+        const request = parseInstallLink(url);
+        if (request) {
+            pendingHubLink = request;
+            showLauncher();
+            broadcast('launcher:hub-link');
+            return;
+        }
         const { text, source } = await manifestFromLink(url);
         await confirmAndInstall(text, { source });
     } catch (e) {
@@ -920,6 +928,8 @@ function registerIpc() {
     handle('hub:plugin', (id) => catalog.plugin(id));
     handle('hub:templates', () => catalog.templates());
     handle('hub:template', (id) => catalog.template(id));
+    handle('hub:selection', (request) => catalog.selection(request || {}));
+    handle('hub:take-link', () => { const request = pendingHubLink; pendingHubLink = null; return request; });
     // Stars for quick access, per signed-in account ('signed-out' when nobody is).
     const starAccount = () => (account.describe().user ? account.describe().user.id : 'signed-out');
     handle('hub:starred', () => manager.starred(starAccount()));

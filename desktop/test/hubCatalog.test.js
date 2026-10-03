@@ -17,6 +17,10 @@ function fakeHub(tables, { legacy = false } = {}) {
         let rows = tables[table] || [];
         const id = u.searchParams.get('id');
         if (id && id.startsWith('eq.')) rows = rows.filter((r) => String(r.id) === id.slice(3));
+        if (id && id.startsWith('in.(')) {
+            const wanted = id.slice(4, -1).split(',');
+            rows = rows.filter((r) => wanted.includes(String(r.id)));
+        }
         const or = u.searchParams.get('or');
         if (or) {
             const own = /contributor_id\.eq\.([\w-]+)/.exec(or);
@@ -102,4 +106,35 @@ test('an early-access request is a contact inquiry, insert only', async () => {
     assert.equal(calls[0].url, 'https://hub.example/rest/v1/contact_inquiries');
     assert.deepEqual(JSON.parse(calls[0].init.body), { name: 'Ada', email: 'ada@example.org', message: 'Cloud early access' });
     assert.equal(calls[0].init.headers.Prefer, 'return=minimal');
+});
+
+test('a link\'s ids resolve against the Hub: drivers in link order, unseen ids reported, contributors named', async () => {
+    const alice = '11111111-1111-4111-8111-111111111111';
+    const hub = fakeHub({
+        modules: [{ ...modules[0], contributor_id: alice, visibility: 'public' }],
+        plugins: [{ id: 5, name: 'Sim', pip_name: 'sim', import_path: 'sim.plugin', module_name: 'plugin', plugin_api: 'v2', visibility: 'public' }],
+        templates: [],
+        profiles: [{ id: alice, full_name: 'Alice' }],
+    });
+    const c = new HubCatalog({ fetch: hub.fetch, url: 'https://hub.example', key: 'anon' });
+    const { selection } = await c.selection({ modules: [1, 99, 1], plugins: [5, 6], templates: [7] });
+    assert.deepEqual(selection.modules.map((m) => [m.id, m.contributor_name]), [[1, 'Alice'], [1, 'Alice']]);
+    assert.deepEqual(selection.hiddenModules, [99]);
+    assert.deepEqual(selection.plugins.map((p) => p.entry.plugins), [['sim.plugin:plugin']]);
+    assert.deepEqual(selection.hiddenPlugins, [6]);
+    assert.deepEqual(selection.hiddenTemplates, [7]);
+    // One request per table, whatever the repeats.
+    assert.equal(hub.calls.filter((call) => call.table === 'modules').length, 1);
+});
+
+test('contributor names are best effort: a Hub that will not say leaves the rows as they were', async () => {
+    const someone = '22222222-2222-4222-8222-222222222222';
+    const hub = fakeHub({ modules: [{ ...modules[0], contributor_id: someone, visibility: 'public' }] });
+    const failing = async (url, init) => (url.includes('/profiles?')
+        ? { ok: false, status: 401, text: async () => JSON.stringify({ message: 'permission denied' }) }
+        : hub.fetch(url, init));
+    const c = new HubCatalog({ fetch: failing, url: 'https://hub.example', key: 'anon' });
+    const { selection } = await c.selection({ modules: [1] });
+    assert.equal(selection.modules[0].name, 'Pump');
+    assert.equal(selection.modules[0].contributor_name, undefined);
 });

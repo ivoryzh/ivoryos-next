@@ -93,6 +93,8 @@ export type Snapshot = {
   cloudOnly?: boolean;
   /** A release that does not offer Cloud yet: the Cloud row asks for early access instead. */
   cloudComingSoon?: boolean;
+  /** A build with no Cloud at all (the browser tour, src/tour/): no Cloud row, no sign-up for it. */
+  noCloud?: boolean;
 };
 
 /** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
@@ -154,6 +156,8 @@ export type HubModule = {
   connection?: string[] | null;
   init_args?: ArgDef[] | null;
   is_tested_with_ivoryos?: boolean | null;
+  /** Who put it on the Hub; on a platform's or a link's modules, when the Hub says. */
+  contributor_name?: string | null;
   devices?: { name?: string; vendor?: string; category?: string | null; image_url?: string | null } | null;
 } & HubOwned;
 
@@ -204,6 +208,29 @@ export type HubPlatform = {
   plugins?: HubPlugin[];
   templates?: HubTemplate[];
 } & HubOwned;
+
+/**
+ * What an `ivoryos://install` link from the Hub asks for (desktop/src/installLink.js): Hub ids
+ * only. A platform, or drivers (in order, repeats kept), plugins and workflows of its own.
+ */
+export interface HubLinkRequest {
+  platform: number | null;
+  modules: number[];
+  plugins: number[];
+  templates: number[];
+  /** Optimizer ids (OptimizerChoice.id) to offer pre-ticked. */
+  optimizers: string[];
+}
+
+/** A link's drivers, plugins and workflows read from the Hub; ids the caller may not see are listed. */
+export interface HubSelection {
+  modules: HubModule[];
+  hiddenModules: number[];
+  plugins: HubPlugin[];
+  hiddenPlugins: number[];
+  templates: HubTemplate[];
+  hiddenTemplates: number[];
+}
 
 /** An optimizer backend IvoryOS supports and the versions tested with it (desktop/src/optimizers.js). */
 export interface OptimizerChoice { id: string; name: string; package: string; versions: string[] }
@@ -306,6 +333,11 @@ export interface DesktopApi {
   hubPlugin(id: number): Promise<{ plugin: HubPlugin }>;
   hubTemplates(): Promise<{ templates: HubTemplate[] }>;
   hubTemplate(id: number): Promise<{ template: HubTemplate & { workflow: Record<string, unknown> } }>;
+  hubSelection(request: HubLinkRequest): Promise<{ selection: HubSelection }>;
+  /** The link the app was last opened with, once: null after it has been taken. */
+  takeHubLink(): Promise<HubLinkRequest | null>;
+  /** A link arrived: take it with takeHubLink(). */
+  onHubLink(cb: () => void): () => void;
   /** Starred Hub items of the signed-in account: 'module:12', 'platform:4', 'plugin:3', 'template:9'. */
   hubStarred(): Promise<string[]>;
   hubStar(key: string, on: boolean): Promise<string[]>;

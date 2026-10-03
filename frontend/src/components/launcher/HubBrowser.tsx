@@ -164,9 +164,9 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, initial
   const lists = useMemo(() => {
     const match = (text: string) => words.every(w => text.includes(w));
     return {
-      instruments: (modules.items || []).filter(m => inScope(m, scope) && (!testedOnly || m.is_tested_with_ivoryos) && match(haystack(m))),
-      platforms: (platforms.items || []).filter(p => inScope(p, scope) && match([p.name, p.description].join(' ').toLowerCase())),
-      plugins: preferV2((plugins.items || []).filter(p => inScope(p, scope) && match([p.name, p.description, p.pip_name].join(' ').toLowerCase()))),
+      instruments: picturesFirst((modules.items || []).filter(m => inScope(m, scope) && (!testedOnly || m.is_tested_with_ivoryos) && match(haystack(m))), m => !!m.devices?.image_url),
+      platforms: picturesFirst((platforms.items || []).filter(p => inScope(p, scope) && match([p.name, p.description].join(' ').toLowerCase())), p => !!p.image_url),
+      plugins: picturesFirst(preferV2((plugins.items || []).filter(p => inScope(p, scope) && match([p.name, p.description, p.pip_name].join(' ').toLowerCase()))), p => !!p.screenshot_urls?.length),
       workflows: (templates.items || []).filter(t => inScope(t, scope) && match([templateTitle(t), t.description, ...t.instruments].join(' ').toLowerCase())),
     };
   }, [modules.items, platforms.items, plugins.items, templates.items, scope, testedOnly, words]);
@@ -399,6 +399,14 @@ const OTHER = 'Other';
 
 function categoryOf(m: HubModule): string {
   return m.devices?.category?.trim() || OTHER;
+}
+
+/**
+ * Entries with a picture first, as the Hub website lists them. The sort is stable, so each group
+ * keeps the catalog's own order (tested drivers first, then by name).
+ */
+function picturesFirst<T>(items: T[], hasPicture: (item: T) => boolean): T[] {
+  return [...items].sort((a, b) => Number(hasPicture(b)) - Number(hasPicture(a)));
 }
 
 function haystack(m: HubModule): string {

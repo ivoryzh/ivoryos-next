@@ -182,7 +182,11 @@ export default function QueueDrawer() {
                       ) : <span className="min-w-0 flex-1 text-sm font-semibold truncate" title={run.name}>{run.name}</span>}
                     </div>
                     <div className="mt-1 pl-8 flex items-center justify-between gap-2">
-                      <span className="text-xs text-gray-500 dark:text-gray-400">{runSizeLabel(run)}</span>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {/* One stage of a design queued as several runs (src/stages.ts). */}
+                        {run.parameters?.group && <span title={run.parameters.group.name}>stage {run.parameters.group.index}/{run.parameters.group.total} · </span>}
+                        {runSizeLabel(run)}
+                      </span>
                       <div className="flex items-center shrink-0 opacity-50 group-hover:opacity-100 transition-opacity">
                         <button onClick={() => { setRenamingId(run.id); setRenameValue(run.name); }} title="Rename" className={iconBtn}><Edit3 className="w-3.5 h-3.5" /></button>
                         {/* Its spreadsheet or optimization settings, on the page that made it. A full

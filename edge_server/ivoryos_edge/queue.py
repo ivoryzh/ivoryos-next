@@ -444,12 +444,15 @@ def record_failed_attempt(outputs: Optional[dict], error: str, start, end) -> di
     return kept
 
 
-def resolve_last_attempt(outputs: Optional[dict], resolution: str) -> dict:
-    """Note what was decided about the latest failed attempt: retry, skip or stop."""
+def resolve_last_attempt(outputs: Optional[dict], resolution: str, when=None) -> dict:
+    """Note what was decided about the latest failed attempt (retry, skip or stop), and when:
+    between the failure and that moment the run was waiting for a person."""
     kept = dict(outputs or {})
     attempts = [dict(a) for a in kept.get("attempts") or []]
     if attempts:
         attempts[-1]["resolution"] = resolution
+        if when is not None:
+            attempts[-1]["resolved_time"] = when.isoformat()
     kept["attempts"] = attempts
     return kept
 
@@ -749,6 +752,8 @@ class WorkflowQueueManager:
                 "row_count": len(params.get("rows") or []) if variables else None,
                 "instruments": sorted(instruments.get(r.id, [])),
                 "issues": params.get("_issues") or None,
+                # One stage of a design queued as several runs (server.py create_run_group).
+                "group": params.get("group") or None,
             })
         return {"runs": summaries, "total": total}
 
@@ -843,7 +848,9 @@ class WorkflowQueueManager:
                     raise LookupError("Run not found")
                 if run.status != "pending" or self.active_run_id == run_id:
                     raise ValueError(f"This run is {run.status if run.status != 'pending' else 'starting'} and can no longer be changed.")
-                kept = {k: v for k, v in (run.parameters or {}).items() if k == "queue_position"}
+                # Its place in the queue, and the set of stages it belongs to: editing one stage's
+                # values must not take it out of its set.
+                kept = {k: v for k, v in (run.parameters or {}).items() if k in ("queue_position", "group")}
                 await session.execute(WorkflowStep.__table__.delete().where(WorkflowStep.run_id == run_id))
                 for idx, step in enumerate(sequence):
                     session.add(WorkflowStep(
@@ -899,6 +906,7 @@ class WorkflowQueueManager:
             self.awaiting_decision = None
         action = "stop" if self.cancelled else self.error_action
         self.error_action = None
+        decided = datetime.utcnow()
         if action == "retry":
             step.status = "pending"
             step.error = None
@@ -906,13 +914,51 @@ class WorkflowQueueManager:
             step.status = "skipped"
         else:
             action = "stop"
-        step.outputs = resolve_last_attempt(step.outputs, action)
+        if action != "retry":
+            # The step's story ends when a person ended it, not when it failed. Left at the
+            # failure, the wait for a decision belonged to no step: on the timeline the rows either
+            # side of it shrank to slivers around an unexplained gap. The moment it failed is still
+            # on its record, in `attempts`. (A retry starts the step afresh, as it always has: when
+            # it started is what tells one failure of a step from the next, see pause_summary.
+            # Its earlier attempts and the waits between them are in `attempts` too, which is what
+            # the timeline draws them from.)
+            step.end_time = decided
+        step.outputs = resolve_last_attempt(step.outputs, action, decided)
         if action != "stop":
             run.status = "running"
             self.resume()
         await session.commit()
         await self.broadcast_updates(run_id)
         return action
+
+    async def _end_group_after(self, session, run) -> None:
+        """One stage of a set failed or was stopped: the stages still waiting are not run.
+
+        A design run in stages (`parameters.group`, server.py create_run_group) is one experiment
+        queued as several runs, so that a stage which has not started can still be changed. It is
+        still one experiment: solvent is not added to samples whose solids were never weighed.
+        Holding the queue is not enough for that, since Resume queue would start the next stage.
+        The stages left are marked cancelled, their steps "not run", and say why (`_issues.
+        not_started`). A stage that finished normally, or was stopped gracefully and told to let
+        the queue go on, leaves the rest alone.
+        """
+        group = (run.parameters or {}).get("group") or {}
+        if not group.get("id") or run.status not in ("error", "cancelled"):
+            return
+        pending = await session.execute(select(WorkflowRun).where(WorkflowRun.status == "pending"))
+        rest = [r for r in pending.scalars() if ((r.parameters or {}).get("group") or {}).get("id") == group["id"]]
+        if not rest:
+            return
+        for other in rest:
+            other.status = "cancelled"
+            other.end_time = datetime.utcnow()
+            other.parameters = {**(other.parameters or {}), "_issues": {"not_started": 1}}
+        await session.execute(
+            update(WorkflowStep)
+            .where(WorkflowStep.run_id.in_([r.id for r in rest]), WorkflowStep.status == "pending")
+            .values(status="skipped")
+        )
+        await session.commit()
 
     def _hold_queue_after(self, run) -> None:
         """After a run, hold the queue (nothing else starts until Resume queue) when it ended
@@ -1326,6 +1372,7 @@ class WorkflowQueueManager:
                     await session.commit()
                     await self.publish_cloud_result(run.id)
                     report_run_finished(run, issues)
+                    await self._end_group_after(session, run)
                     self._hold_queue_after(run)
                     self.active_run_id = None
                     await self.broadcast_updates(run_id)
@@ -1589,6 +1636,7 @@ class WorkflowQueueManager:
             await session.commit()
             await self.publish_cloud_result(run.id)
             report_run_finished(run, issues)
+            await self._end_group_after(session, run)
             self._hold_queue_after(run)
             self.active_run_id = None
             await self.broadcast_updates(run_id)

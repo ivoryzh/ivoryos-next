@@ -225,7 +225,7 @@ export default function Sidebar() {
       <TopNavDivider />
       <TopNavItem link={Link} href="/library" label="Library" icon={<Library className="w-4 h-4 shrink-0" />} active={isOn('/library')} labelFrom="sm" />
       <TopNavItem link={Link} href="/designer" label="Designer" icon={<Workflow className="w-4 h-4 shrink-0" />} active={isOn('/designer')} labelFrom="sm" />
-      <TopNavItem link={Link} href={runEntryHref} label="Run" icon={<Play className="w-4 h-4 shrink-0" />} active={isOn(runEntryHref, ['/once', '/execution', '/optimize'])} labelFrom="sm" />
+      <TopNavItem link={Link} href={runEntryHref} label="Run" icon={<Play className="w-4 h-4 shrink-0" />} active={isOn(runEntryHref, ['/once', '/execution', '/optimize', '/stages'])} labelFrom="sm" />
       <TopNavItem link={Link} href="/data" label="Data" icon={<Table2 className="w-4 h-4 shrink-0" />} active={isOn('/data')} labelFrom="sm" />
       <TopNavDivider />
       <TopNavItem link={Link} href="/instruments" label="Instruments" icon={<Gauge className="w-4 h-4 shrink-0" />} active={isOn('/instruments')} labelFrom="sm" />
@@ -334,7 +334,7 @@ export default function Sidebar() {
         {/* One entry for two routes. Both are "fill in this workflow's open parameters"; the tab
             strip in the page header is what switches between filling them yourself and letting
             the optimizer do it. */}
-        {navItem(runEntryHref, 'Run', <Play className="w-5 h-5 shrink-0" />, ['/once', '/execution', '/optimize'])}
+        {navItem(runEntryHref, 'Run', <Play className="w-5 h-5 shrink-0" />, ['/once', '/execution', '/optimize', '/stages'])}
         {/* No Queue entry: the queue is a drawer beside whatever page is showing, opened from
             the run panel and the status chip (openQueue in QueueDrawer.tsx). */}
         {navItem('/data', 'Data History', <Table2 className="w-5 h-5 shrink-0" />)}

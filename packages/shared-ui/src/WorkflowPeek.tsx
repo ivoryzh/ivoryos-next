@@ -40,6 +40,12 @@ type Props = {
   editLabel?: string;
   /** Replaces the default read-only note, which talks about detaching (a Designer action). */
   note?: React.ReactNode;
+  /**
+   * The workflow is being used as a step inside another, where only its main steps run
+   * (workflowBody.ts mainOnlyLink): its Prep and Cleanup are shown, marked as not run here.
+   * Cloud leaves this off: a workflow node there is the run, and runs all three.
+   */
+  mainOnly?: boolean;
 };
 
 const PHASES: { key: 'prep' | 'script' | 'cleanup'; label: string }[] = [
@@ -69,7 +75,7 @@ function resolved(value: any, params: Record<string, any>) {
 }
 
 export function WorkflowPeek({
-  target, body, isLoading, error, latestVersion, onClose, onDetach, onUpdate, onEdit, editLabel, note,
+  target, body, isLoading, error, latestVersion, onClose, onDetach, onUpdate, onEdit, editLabel, note, mainOnly,
 }: Props) {
   useEffect(() => {
     if (!target) return;
@@ -155,12 +161,14 @@ export function WorkflowPeek({
           {!isLoading && !error && PHASES.map(({ key, label }) => {
             const blocks = phaseBlocks(body, key);
             if (!blocks.length) return null;
+            const notRun = !!mainOnly && key !== 'script';
             return (
-              <section key={key} className="mb-4 last:mb-0">
+              <section key={key} className={`mb-4 last:mb-0 ${notRun ? 'opacity-50' : ''}`}
+                title={notRun ? `Not run here: used as a step, a workflow runs its main steps only. Its ${label.toLowerCase()} runs when it is run on its own or as a stage.` : undefined}>
                 <div className="flex items-center gap-2 mb-1.5">
                   <div className="h-px bg-gray-200 dark:bg-white/10 flex-1" />
                   <span className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">
-                    {label} · {blocks.length}
+                    {label} · {blocks.length}{notRun ? ' · not run as a step' : ''}
                   </span>
                   <div className="h-px bg-gray-200 dark:bg-white/10 flex-1" />
                 </div>

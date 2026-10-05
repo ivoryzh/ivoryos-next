@@ -23,7 +23,7 @@ import {
   chooseDialog,
   confirmDialog,
   notify,
-  promptDialog, useDocumentTheme, FLOW_CONTROL_PALETTE, workflowOutputs, getReturnLeaves, runtimeVarNames } from '@ivoryos/shared-ui';
+  promptDialog, useDocumentTheme, FLOW_CONTROL_PALETTE, workflowOutputs, getReturnLeaves, runtimeVarNames, mainOnlyLink } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
@@ -508,7 +508,8 @@ export default function DesignerPage() {
     const res = await fetch(`${API_BASE}/api/workflows/expand`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prep: body.prep, sequence: body.script, cleanup: body.cleanup })
+      // As Run sends them: a linked workflow is its main steps only (shared-ui mainOnlyLink).
+      body: JSON.stringify({ prep: (body.prep || []).map(mainOnlyLink), sequence: (body.script || []).map(mainOnlyLink), cleanup: (body.cleanup || []).map(mainOnlyLink) })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not expand this sequence.');
@@ -641,7 +642,8 @@ export default function DesignerPage() {
     setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
 
     try {
-      const blockToPayload = (s: SequenceBlock) => ({
+      // A linked workflow used as a step runs its main steps only (shared-ui mainOnlyLink).
+      const blockToPayload = (s: SequenceBlock) => mainOnlyLink({
         instrument: s.instrument,
         method: s.method,
         params: s.params,

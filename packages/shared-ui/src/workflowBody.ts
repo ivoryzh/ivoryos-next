@@ -615,8 +615,37 @@ export function groupAt(blocks: SequenceBlock[], index: number): SequenceBlock['
 }
 
 /**
- * How a run that repeats its main block (an optimization's trials, a spreadsheet's rows) runs a
- * linked workflow placed there: its prep once, its main block on every pass, its cleanup once.
+ * A linked workflow used as a step runs its **main steps only**.
+ *
+ * Prep and cleanup mean "once per run, around what repeats". A workflow called from the middle of
+ * another is not a run, so its own prep and cleanup have nowhere honest to go. They used to run
+ * anyway, differently depending on which button started the run: in place around the step (the
+ * Designer's Run), or hoisted to the two ends of the run (Once, Iterate, Optimize); and a workflow
+ * linked inside a linked one repeated them on every row. Now a design run as one (the Designer's
+ * Run and preview, Once, Iterate, Optimize) marks each link `phases: ['script']`, which
+ * expand_workflow_blocks honours, and the edge applies the same to a link found inside a linked
+ * workflow. A workflow's own prep and cleanup run when it is the run: on its own, or as a stage
+ * (`splitRepeatedLinks` below, src/stages.ts), which is where the run pages send people who want
+ * them. A link that already names its phases is left as it is.
+ */
+export const mainOnlyLink = <B,>(block: B): B =>
+  (block as any)?.instrument === LIBRARY_INSTRUMENT && !Array.isArray((block as any)?.phases)
+    ? { ...(block as any), phases: ['script'] }
+    : block;
+
+export function mainOnlyLinks<T extends { prep: any[]; sequence: any[]; cleanup: any[] }>(seqs: T): T {
+  return {
+    ...seqs,
+    prep: (seqs.prep || []).map(mainOnlyLink),
+    sequence: (seqs.sequence || []).map(mainOnlyLink),
+    cleanup: (seqs.cleanup || []).map(mainOnlyLink),
+  };
+}
+
+/**
+ * How a **stage** (a linked workflow run as its own run, src/stages.ts) repeats: its prep once,
+ * its main block on every pass (an optimization's trials, a spreadsheet's rows), its cleanup once.
+ * Not used for a design run as one: there a link is its main steps only (`mainOnlyLinks` above).
  *
  * A link stands for the whole saved workflow, prep and cleanup included, which is right for a
  * single run and wrong for a repeated one: an optimization over a linked colour-match workflow

@@ -44,8 +44,8 @@ export function RunDataTable({ run, title = 'data', maxHeight = '420px', batchOf
               return (
               <tr
                 key={row.row}
-                title={row.status === 'not_run' ? 'Not run: the run stopped before this row' : row.status}
-                className={`border-b border-gray-100 dark:border-white/5 ${startsBatch && idx > 0 ? 'border-t-2 border-t-purple-300 dark:border-t-purple-700/60' : ''} ${row.status === 'error' ? 'bg-red-50/60 dark:bg-red-900/10' : row.status === 'not_run' ? 'opacity-45' : 'hover:bg-gray-50 dark:hover:bg-white/[0.02]'}`}
+                title={row.status === 'not_run' ? 'Not run: the run stopped before this row' : row.status === 'failed' ? 'A step failed here and was skipped' : row.status}
+                className={`border-b border-gray-100 dark:border-white/5 ${startsBatch && idx > 0 ? 'border-t-2 border-t-purple-300 dark:border-t-purple-700/60' : ''} ${row.status === 'error' ? 'bg-red-50/60 dark:bg-red-900/10' : row.status === 'failed' ? 'bg-amber-50/70 dark:bg-amber-900/10' : row.status === 'not_run' ? 'opacity-45' : 'hover:bg-gray-50 dark:hover:bg-white/[0.02]'}`}
               >
                 <td className="px-3 py-1 text-right text-gray-400 whitespace-nowrap">
                   {startsBatch && (

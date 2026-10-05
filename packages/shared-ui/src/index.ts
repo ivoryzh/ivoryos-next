@@ -44,6 +44,8 @@ export {
   linkOutputBindings,
   runtimeVarNames,
   splitRepeatedLinks,
+  mainOnlyLink,
+  mainOnlyLinks,
 } from './workflowBody';
 export type { ReuseMode, SavedBlock, SavedWorkflowBody, DiffRow, DiffStep, StepChange } from './workflowBody';
 export { RunConfigError, resolveBlockParams, resolveFixedBlock, toWireBlock } from './runConfig';
@@ -55,6 +57,7 @@ export {
   expandSpreadsheet,
   buildSpreadsheetParameters,
   toSubmittedStep,
+  sequenceSegments,
 } from './spreadsheetRun';
 export type { SpreadsheetRow, RowGroup, ExpandedSpreadsheetStep, ExpandOptions } from './spreadsheetRun';
 export { SpreadsheetTable } from './SpreadsheetTable';
@@ -74,7 +77,7 @@ export type { WorkflowRuntime } from './workflowRuntime';
 
 export {
   formatRun, datasheetCsv, phaseOf, toDetail, cellText, csvField, isFlowStep, templateOf,
-  namedOutputsOf, isUserInputStep, userInputVarsOf, userInputValue, aggregateStatus, issuesLabel,
+  namedOutputsOf, isUserInputStep, userInputVarsOf, userInputValue, aggregateStatus, issuesLabel, failedThenSkipped,
 } from './runRecord';
 export type { FormattedRun, RunRow, RunIssues } from './runRecord';
 export { RunDataTable, SectionTitle } from './RunDataTable';

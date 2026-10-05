@@ -808,7 +808,17 @@ def expand_workflow_blocks(
         # balance twice and cooled the reactor down twice, which is wrong both as chemistry and
         # as a record. The bench Configure page never had the problem, because there prep and
         # cleanup are separate lists it submits once.
+        #
+        # A link found *inside* a linked workflow is that workflow calling another as a step, and
+        # a step is its main steps only: prep and cleanup mean "once per run", and a call from the
+        # middle of someone else's body is not a run. Left whole it repeated the inner workflow's
+        # setup and teardown every time the outer body ran, once per row in a spreadsheet. The
+        # bench says the same for its own top-level links by sending `phases: ["script"]`
+        # (shared-ui mainOnlyLink); a top-level link that says nothing is still the whole workflow,
+        # which is what Cloud's "run this workflow" node and a stage mean by one.
         wanted_phases = block.get("phases") or block.get("_phases")
+        if not wanted_phases and _depth >= 1:
+            wanted_phases = ("script",)
         phase_keys = (
             tuple(p for p in ("prep", "script", "cleanup") if p in wanted_phases)
             if wanted_phases else ("prep", "script", "cleanup")

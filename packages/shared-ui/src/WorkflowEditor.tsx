@@ -2423,6 +2423,8 @@ export default function WorkflowEditor({
       />
 
       <WorkflowPeek
+        // In a design a linked workflow is a step: its main steps only.
+        mainOnly
         target={peek?.target ?? null}
         body={peekBody}
         isLoading={peekLoading}

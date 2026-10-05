@@ -86,12 +86,22 @@ export const userInputValue = (steps: any[], name: string) => {
  */
 export const neverRan = (steps: any[]) => steps.length > 0 && steps.every(s => s.status === 'skipped' && !s.error);
 
+/**
+ * A step that failed and that a person then chose to skip: it carries the error it failed with.
+ * The run went on, so it is not an error that stopped anything, and it is not done either: the
+ * value it was there to produce does not exist. Every view reads a row or trial holding one as
+ * 'failed', drawn amber like a run that completed with issues. Counted as 'completed' it showed
+ * green beside an empty result cell.
+ */
+export const failedThenSkipped = (step: any) => step?.status === 'skipped' && !!step?.error;
+
 export const aggregateStatus = (steps: any[]) =>
   steps.some(s => s.status === 'error') ? 'error'
     : steps.some(s => s.status === 'running' || s.status === 'waiting_input') ? 'running'
-      : neverRan(steps) ? 'not_run'
-        : steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped') ? 'completed'
-          : 'pending';
+      : steps.some(failedThenSkipped) ? 'failed'
+        : neverRan(steps) ? 'not_run'
+          : steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped') ? 'completed'
+            : 'pending';
 
 export type RunRow = { row: number; status: string; values: unknown[]; details: ReturnType<typeof toDetail>[] };
 
@@ -158,7 +168,7 @@ export function formatRun(r: any): FormattedRun {
       const hasError = iterSteps.some((s: any) => s.status === 'error');
       const isRunning = iterSteps.some((s: any) => s.status === 'running');
       const isPending = iterSteps.every((s: any) => s.status === 'pending');
-      const status = hasError ? 'error' : isRunning ? 'running' : neverRan(iterSteps) ? 'not_run' : isPending ? 'pending' : 'completed';
+      const status = hasError ? 'error' : isRunning ? 'running' : iterSteps.some(failedThenSkipped) ? 'failed' : neverRan(iterSteps) ? 'not_run' : isPending ? 'pending' : 'completed';
 
       // The suggested value for each search-space parameter shows up as a step argument
       // somewhere in this iteration's steps (whichever templated call actually used it).
@@ -246,7 +256,7 @@ export function formatRun(r: any): FormattedRun {
       const hasError = rowSteps.some((s: any) => s.status === 'error');
       const isRunning = rowSteps.some((s: any) => s.status === 'running');
       const isPending = rowSteps.every((s: any) => s.status === 'pending');
-      const status = hasError ? 'error' : isRunning ? 'running' : neverRan(rowSteps.filter(Boolean)) ? 'not_run' : isPending ? 'pending' : 'completed';
+      const status = hasError ? 'error' : isRunning ? 'running' : rowSteps.some(failedThenSkipped) ? 'failed' : neverRan(rowSteps.filter(Boolean)) ? 'not_run' : isPending ? 'pending' : 'completed';
 
       const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
       // Match each returnVar to the step at the same position in the per-row template —
@@ -297,7 +307,7 @@ export const datasheetCsv = (run: { variables: string[]; rows: { values?: unknow
  * recorded it when the run finished (queue.py run_issues) -- `{retried, skipped}` counts, absent
  * when nothing failed. Words only; the counting happens once, on the edge, for every view.
  */
-export type RunIssues = { retried?: number; skipped?: number; stopped_early?: number };
+export type RunIssues = { retried?: number; skipped?: number; stopped_early?: number; not_started?: number };
 
 export function issuesLabel(issues?: RunIssues | null): string {
   if (!issues) return '';
@@ -305,5 +315,7 @@ export function issuesLabel(issues?: RunIssues | null): string {
   if (issues.retried) parts.push(`${issues.retried} failed attempt${issues.retried === 1 ? '' : 's'} retried`);
   if (issues.skipped) parts.push(`${issues.skipped} failed step${issues.skipped === 1 ? '' : 's'} skipped`);
   if (issues.stopped_early) parts.push('stopped early');
+  // One stage of a design run in stages, never begun because an earlier stage failed or was stopped.
+  if (issues.not_started) parts.push('not started: an earlier stage stopped');
   return parts.join(', ');
 }

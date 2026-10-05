@@ -3,11 +3,13 @@ import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Settings2, Info, Zap, ChevronDown, ChevronRight, Plus, X, ShieldCheck } from 'lucide-react';
+import Link from 'next/link';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
 import LiveRun from '@/components/LiveRun';
 import { useQueueBusy } from '@/queueBusy';
 import { editRunIdFromUrl, hydrateBlocks, leaveEdit, loadQueuedRun, saveQueuedRun, sourceBlock, type QueuedEdit } from '@/queuedEdit';
+import { currentStages, loadStage, stageKeeper, type EmbeddedStage } from '@/stages';
 import {
   buildRunName,
   getReturnLeaves,
@@ -17,7 +19,7 @@ import {
   getVarMode as sharedGetVarMode,
   getVarModeType as sharedGetVarModeType,
   isPerIteration as sharedIsPerIteration,
-  getIterationValue as sharedGetIterationValue, useDocumentTheme, LIBRARY_INSTRUMENT, linkOutputBindings, runtimeVarNames, splitRepeatedLinks , confirmDialog , notify,
+  getIterationValue as sharedGetIterationValue, useDocumentTheme, LIBRARY_INSTRUMENT, linkOutputBindings, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks , confirmDialog , notify,
   guardHint, guardProblem, guardsFor, type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
@@ -44,7 +46,13 @@ const RequiredColumns = ({ params, objectives }: { params: string[]; objectives:
   </div>
 );
 
-export default function OptimizePage() {
+/**
+ * The Run page's Optimize tab (app/optimize/page.tsx), and, given `stage`, the same configuration
+ * drawn inside the Stages page for one stage of a design (src/stages.ts): that stage alone,
+ * without the page around it, kept for the Stages page as it changes. There is no Start or Save
+ * there: that page starts every stage together.
+ */
+export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {}) {
   const theme = useDocumentTheme();
   const [variables, setVariables] = useState<string[]>([]);
   const [globalVariables, setGlobalVariables] = useState<string[]>([]);
@@ -77,6 +85,9 @@ export default function OptimizePage() {
   // Editing a queued optimization (?edit=<id>, queuedEdit.ts): its settings, not the last-used
   // ones, and nothing saved over the person's own while it is shown.
   const [editing, setEditing] = useState<QueuedEdit | null>(null);
+  const [stageCount, setStageCount] = useState(0);
+  // Keeps a stage's settings as they change (stages.ts stageKeeper); set once the stage is loaded.
+  const keepStage = useRef<ReturnType<typeof stageKeeper> | null>(null);
   const editingRef = useRef(false);
   const [experimentName, setExperimentName] = useState('');
   const [historyRuns, setHistoryRuns] = useState<any[]>([]);
@@ -184,11 +195,16 @@ export default function OptimizePage() {
       .catch(err => { console.error(err); setOptimizersLoaded(true); });
 
     // Load sequence and extract variables: a queued run being edited, or the Designer's workflow.
-    const editId = editRunIdFromUrl();
+    const editId = stage ? null : editRunIdFromUrl();
+    const stageIndex = stage ? stage.index : null;
     const savedSequence = localStorage.getItem('ivoryos_sequence');
     const savedPrep = localStorage.getItem('ivoryos_prep_sequence');
     const savedCleanup = localStorage.getItem('ivoryos_cleanup_sequence');
-    if (savedSequence || editId) {
+    {
+      const design = currentStages();
+      setStageCount(!design.problem && design.stages.some(p => p.kind === 'workflow') ? design.stages.length : 0);
+    }
+    if (savedSequence || editId || stageIndex !== null) {
       (async () => {
       try {
         let parsedSeq: any[];
@@ -211,6 +227,27 @@ export default function OptimizePage() {
           } catch (e: any) {
             await notify(e.message, { title: 'Cannot edit this run', tone: 'error' });
             leaveEdit();
+            return;
+          }
+        } else if (stageIndex !== null) {
+          try {
+            const loaded = await loadStage(stageIndex, 'optimize');
+            editingRef.current = true;
+            parsedSeq = loaded.stage.blocks.sequence;
+            pSeq = loaded.stage.blocks.prep;
+            cSeq = loaded.stage.blocks.cleanup;
+            // What was last set for this stage's optimization, if anything.
+            const kept = loaded.settings?.state || {};
+            if (kept.optConfig) setOptConfig(kept.optConfig);
+            setSelectedHistoryIds(kept.selectedHistoryIds || []);
+            setUploadedExistingRows(kept.uploaded?.rows || []);
+            setUploadFileName(kept.uploaded?.name || '');
+            restoredGlobals = kept.globalValues || {};
+            // From here on it is kept as it changes. Told what was just loaded, so that opening
+            // a stage to look at it writes nothing.
+            if (stage) keepStage.current = stageKeeper(loaded.stage, 'optimize', loaded.settings?.state, stage.onChange);
+          } catch (e: any) {
+            await notify(e.message, { title: 'Cannot set up this stage', tone: 'error' });
             return;
           }
         } else {
@@ -299,53 +336,39 @@ export default function OptimizePage() {
   }, []);
 
 
-  const startOptimization = async () => {
-    if (isStarting) return; // guard against double-click while the request/optimizer init is in flight
-    // Like Run everywhere else: with something queued or under way, this waits behind it, so ask.
-    if (queueBusy && !editing && !await confirmDialog('A task is already running. Add this optimization to the execution queue?', {
-      title: 'Queue this run?', confirmLabel: 'Add to queue',
-    })) return;
-    setIsStarting(true);
-
-    // Everything from here to the payload — the Optimize/Fixed/Per-Iteration partition, the
-    // search-space and objective mapping, early-stop, and resolving Fixed vars to literals —
-    // lives in @ivoryos/shared-ui. The Cloud orchestrator builds the same `parameters` for a node
-    // it dispatches, and a Cloud-launched optimization has to *be* this run rather than a second
-    // implementation of it: a drifted copy would mean an optimizer silently searching a different
-    // space depending on which screen started it.
-    let parameters: Record<string, any>;
-    let resolvedPrep: any[] = [];
-    let resolvedCleanup: any[] = [];
-    try {
-        parameters = buildOptimizationParameters({
-            config: optConfig,
-            variables,
-            returns,
-            sequence,
-            existingData,
-        });
-        // Lets the edge time runs of a saved workflow (runtime.py).
-        const savedName = unmodifiedSavedWorkflowName();
-        if (savedName) parameters.workflow_name = savedName;
-        // A linked workflow in Main runs its own prep once, its main block per trial and its
-        // cleanup once (splitRepeatedLinks). Split after Fixed values are filled in, so they
-        // reach its prep; before this every trial ran the whole workflow, setup included.
-        const split = splitRepeatedLinks({ prep: prepSequence, sequence: parameters.sequence_template, cleanup: cleanupSequence });
-        parameters.sequence_template = split.sequence;
-        // Prep/Cleanup run once for the whole campaign, so their #vars come from the Fixed Values
-        // panel. Lenient numeric casting here preserves this page's long-standing behaviour —
-        // the backend's own cast_arguments has the last word on a value it can't convert.
-        const runtime = runtimeVarNames(prepSequence, sequence, cleanupSequence);
-        const skip = (v: string) => runtime.has(v);
-        resolvedPrep = split.prep.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient', skip }));
-        resolvedCleanup = split.cleanup.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient', skip }));
-    } catch (err: any) {
-        // notify, not alert(): the desktop app's webview drops alert() without showing it.
-        await notify(err.message, { title: 'Check the configuration', tone: 'error' });
-        setIsStarting(false);
-        return;
-    }
-
+  /**
+   * The optimization this page makes, without its name. Throws saying what is incomplete.
+   *
+   * The Optimize/Fixed/Per-Iteration partition, the search-space and objective mapping, early-stop
+   * and resolving Fixed vars to literals live in @ivoryos/shared-ui. The Cloud orchestrator builds
+   * the same `parameters` for a node it dispatches, and a Cloud-launched optimization has to *be*
+   * this run rather than a second implementation of it: a drifted copy would mean an optimizer
+   * silently searching a different space depending on which screen started it.
+   */
+  const buildBody = () => {
+    const parameters: Record<string, any> = buildOptimizationParameters({
+        config: optConfig,
+        variables,
+        returns,
+        sequence,
+        existingData,
+    });
+    // Lets the edge time runs of a saved workflow (runtime.py).
+    const savedName = unmodifiedSavedWorkflowName();
+    if (savedName && !stage && !editing) parameters.workflow_name = savedName;
+    // A stage is its workflow as a run: its own prep once, its main block per trial, its
+    // cleanup once (splitRepeatedLinks, after Fixed values are filled in so they reach its
+    // prep). In a design run as one, a linked workflow is its main steps only (mainOnlyLinks).
+    const lists = { prep: prepSequence, sequence: parameters.sequence_template, cleanup: cleanupSequence };
+    const split = stage ? splitRepeatedLinks(lists) : mainOnlyLinks(lists);
+    parameters.sequence_template = split.sequence;
+    // Prep/Cleanup run once for the whole campaign, so their #vars come from the Fixed Values
+    // panel. Lenient numeric casting here preserves this page's long-standing behaviour —
+    // the backend's own cast_arguments has the last word on a value it can't convert.
+    const runtime = runtimeVarNames(prepSequence, sequence, cleanupSequence);
+    const skip = (v: string) => runtime.has(v);
+    const resolvedPrep = split.prep.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient', skip }));
+    const resolvedCleanup = split.cleanup.map(b => resolveFixedBlock(b, globalValues, { numeric: 'lenient', skip }));
     // What this page needs to show the run again while it waits (queuedEdit.ts): the workflow as
     // authored here, the settings, and which existing data was chosen.
     parameters._source = {
@@ -358,15 +381,31 @@ export default function OptimizePage() {
         selectedHistoryIds,
         uploaded: uploadedExistingRows.length ? { rows: uploadedExistingRows, name: uploadFileName } : null,
     };
-    if (editing) delete parameters.workflow_name;
+    return { parameters, prep: resolvedPrep, cleanup: resolvedCleanup, sequence: [] as any[] };
+  };
+
+  const startOptimization = async () => {
+    if (isStarting) return; // guard against double-click while the request/optimizer init is in flight
+    // Like Run everywhere else: with something queued or under way, this waits behind it, so ask.
+    if (queueBusy && !editing && !await confirmDialog('A task is already running. Add this optimization to the execution queue?', {
+      title: 'Queue this run?', confirmLabel: 'Add to queue',
+    })) return;
+    setIsStarting(true);
+
+    let body: ReturnType<typeof buildBody>;
+    try {
+        body = buildBody();
+    } catch (err: any) {
+        // notify, not alert(): the desktop app's webview drops alert() without showing it.
+        await notify(err.message, { title: 'Check the configuration', tone: 'error' });
+        setIsStarting(false);
+        return;
+    }
 
     const payload = {
         // Editing keeps the queued run's name unless a new one is typed.
         name: editing ? experimentName.trim() : await buildRunName(`${localStorage.getItem('ivoryos_editing_workflow') || 'Optimization'} Run`, experimentName, API_BASE),
-        parameters,
-        prep: resolvedPrep,
-        cleanup: resolvedCleanup,
-        sequence: []
+        ...body,
     };
 
     if (editing) {
@@ -547,21 +586,53 @@ export default function OptimizePage() {
     ...uploadedExistingRows
   ];
 
+  // A stage keeps its optimization as it is set: no Save. A moment after the last change, the
+  // settings and the run they make (or what is still missing) go to the Stages page's draft.
+  useEffect(() => {
+    if (!keepStage.current) return;
+    const timer = setTimeout(() => {
+      keepStage.current?.(
+        { optConfig, globalValues, selectedHistoryIds, uploaded: uploadedExistingRows.length ? { rows: uploadedExistingRows, name: uploadFileName } : null,
+          // Not settings, but they change the run: which variables and objectives were found, and
+          // how much existing data has loaded.
+          found: [variables, returns, existingData.length] },
+        () => {
+          if (!optConfig.optimizer) throw new Error('No optimizer is chosen.');
+          if (!returns.length) throw new Error('This stage saves nothing an optimizer could aim for.');
+          return { name: '', ...buildBody() };
+        },
+      );
+    }, 300);
+    return () => clearTimeout(timer);
+    // Below `existingData` on purpose: it is read here, in the dependencies, during render.
+  }, [optConfig, globalValues, selectedHistoryIds, uploadedExistingRows, uploadFileName, variables, returns, existingData.length, sequence]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Embedded in the Stages page, only the configuration itself is drawn: that page has the
+  // sidebar, the tabs and the run bar.
   return (
-    <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
-      <Sidebar />
+    <div className={stage ? 'text-gray-900 dark:text-white' : `flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
+      {!stage && <Sidebar />}
       
-      <div className="flex-1 flex flex-col relative z-0">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+      <div className={stage ? '' : 'flex-1 flex flex-col relative z-0'}>
+        {!stage && <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <RunTabs active="optimize" />
           {variables.length > 0 && returns.length > 0 && (
             <span className="text-xs font-semibold text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-white/5 px-2 py-0.5 rounded-full">
               {optConfig.budget} {optConfig.budget === 1 ? 'iteration' : 'iterations'}
             </span>
           )}
-        </header>
+        </header>}
 
-        <div className="p-8 flex-1 overflow-y-auto">
+        <div className={stage ? '' : 'p-8 flex-1 overflow-y-auto'}>
+          {!stage && !editing && stageCount > 0 && (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+              <span className="flex-1 min-w-0">
+                This design uses saved workflows. Here only their main steps run, under one optimization; their own prep and cleanup do not.
+                To run each one whole, with its own settings, set it up in stages.
+              </span>
+              <Link href="/stages" className="shrink-0 font-semibold text-accent-fg hover:underline">Set up in {stageCount} stages</Link>
+            </div>
+          )}
           {editing && (
             <div className="mb-4 flex items-center gap-3 rounded-lg border border-gray-300 bg-gray-100 px-4 py-2.5 text-sm text-gray-800 dark:border-white/15 dark:bg-white/10 dark:text-gray-100">
               <span className="flex-1 min-w-0">
@@ -1019,15 +1090,15 @@ export default function OptimizePage() {
                 {optimizersLoaded && Object.keys(optimizerSchemas).length === 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">No optimizer installed. In the IvoryOS app: this deck&apos;s Settings, Optimizers. Otherwise pip install ax-platform, baybe or nimo.</p>
                 )}
-                <input
+                {!stage && <input
                   type="text"
                   value={experimentName}
                   onChange={e => setExperimentName(e.target.value)}
                   placeholder="Experiment name (optional)"
                   title="Shown in Data History instead of the default run label"
                   className="w-56 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-purple-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-500"
-                />
-                <button
+                />}
+                {!stage && <button
                   onClick={startOptimization}
                   disabled={!optConfig.optimizer || isStarting}
                   className="flex items-center space-x-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition-colors font-bold shadow-lg shadow-purple-500/20"
@@ -1043,13 +1114,13 @@ export default function OptimizePage() {
                       <span>{editing ? 'Save changes' : queueBusy ? 'Add to Queue' : 'Start Optimization'}</span>
                     </>
                   )}
-                </button>
+                </button>}
               </div>
             </div>
           )}
         </div>
         {/* The idle chip, widening into the run bar when the run starts (LiveRun). */}
-        <LiveRun />
+        {!stage && <LiveRun />}
       </div>
     </div>
   );

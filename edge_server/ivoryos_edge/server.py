@@ -1411,6 +1411,62 @@ async def create_run(req: Request):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
+async def _next_group_name(prefix: str, custom: str) -> str:
+    """A set's name: what the person typed, or '<prefix> #N' counting the sets already made with
+    that prefix. Counted in sets, not runs: a three-stage set is one experiment, and counting its
+    runs made the next one '#4'."""
+    custom = (custom or "").strip()
+    if custom:
+        return custom[:90]
+    async with async_session() as session:
+        rows = await session.execute(select(WorkflowRun.parameters))
+        seen = {group.get("id") for (params,) in rows
+                for group in [((params or {}).get("group") or {})] if group.get("prefix") == prefix}
+    return f"{prefix} #{len(seen) + 1}"
+
+
+@app.post("/api/queue/groups")
+async def create_run_group(req: Request):
+    """Queue one design as several runs that belong together: its stages.
+
+    A design whose steps are saved workflows can give each one its own settings (its own table,
+    or its own optimization) instead of one table for everything; each then goes to the queue as
+    its own run, in order, so a stage that has not started can still be changed (PUT
+    /api/queue/runs/{id}, as for any queued run). Each stage is the body POST /api/queue/runs
+    takes, plus a `name`.
+
+    All of them are checked before any is queued. Posted one by one, a third stage the safety
+    guard refuses would be found after the first had started moving.
+    """
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    stages = data.get("stages") or []
+    if not isinstance(stages, list) or not stages:
+        return JSONResponse(status_code=400, content={"error": "There are no stages to run."})
+
+    prepared = []
+    for index, stage in enumerate(stages):
+        label = str((stage or {}).get("name") or f"Stage {index + 1}").strip()[:60]
+        try:
+            parameters, steps = prepare_run(
+                dict(stage.get("parameters") or {}), stage.get("prep") or [], stage.get("sequence") or [], stage.get("cleanup") or [],
+            )
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": f"{label}: {e}", "stage": index})
+        prepared.append((label, parameters, steps))
+
+    prefix = str(data.get("prefix") or "Run").strip()[:60]
+    group = {"id": uuid.uuid4().hex[:12], "name": await _next_group_name(prefix, data.get("name")),
+             "prefix": prefix, "total": len(prepared)}
+    run_ids = []
+    for index, (label, parameters, steps) in enumerate(prepared):
+        parameters["group"] = {**group, "index": index + 1, "stage": label}
+        run_ids.append(await queue_manager.submit_sequence(f"{group['name']} · {label}", steps, parameters))
+    return {"status": "started", "group": group, "run_ids": run_ids}
+
+
 @app.put("/api/queue/runs/{run_id}")
 async def edit_queued_run(run_id: int, req: Request):
     """Replace a queued run with a changed one (new spreadsheet values, a new optimization

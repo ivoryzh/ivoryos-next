@@ -91,9 +91,10 @@ export function generatePythonCode(
     return `${outputs.length ? `${outputs.join(', ')} = ` : ''}${fn}(${args})`;
   }
 
-  // The function for one saved workflow: its open #variables as arguments, its prep, body and
-  // cleanup in order, and what it saves as the return value. Defined once however many steps
-  // call it; a workflow it links becomes a function of its own.
+  // The function for one saved workflow: its open #variables as arguments, its main steps, and
+  // what it saves as the return value. Main only, as the run does it: a workflow used as a step
+  // does not run its own prep and cleanup (workflowBody.ts mainOnlyLink). Defined once however
+  // many steps call it; a workflow it links becomes a function of its own.
   function defineWorkflow(name: string): string {
     const fn = fnName(name);
     if (workflowDefs.has(name)) return fn;
@@ -104,11 +105,7 @@ export function generatePythonCode(
         `def ${fn}(**kwargs):\n    # "${name}" is a saved workflow whose steps are not available here\n    raise NotImplementedError(${JSON.stringify(name)})\n`);
       return fn;
     }
-    const steps = [
-      ...toSequenceBlocks(body.prep, opts.instruments || {}),
-      ...toSequenceBlocks(body.script || body.sequence, opts.instruments || {}),
-      ...toSequenceBlocks(body.cleanup, opts.instruments || {}),
-    ];
+    const steps = toSequenceBlocks(body.script || body.sequence, opts.instruments || {});
     const params = Object.keys(scanDynamicParams(body));
     const outputs = workflowOutputs(body, () => []).map(o => o.path);
     const doc = `${name}${body.version ? ` (v${body.version})` : ''}, from the Library.`.replace(/"/g, "'");

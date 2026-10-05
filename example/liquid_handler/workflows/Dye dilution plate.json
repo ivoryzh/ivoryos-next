@@ -1,6 +1,6 @@
 {
   "name": "Dye dilution plate",
-  "description": "One row per sample (a well, a buffer volume, a dye volume). Each transfer and the plate read are batch steps: with a batch size of 8 the handler fills a column of eight wells per call and the reader reads it, and every sample still gets its own absorbance.",
+  "description": "One row per sample: a well (assay_plate[A1]), a buffer volume and a dye volume. Each transfer and the plate read are batch steps: with a batch size of 8 the handler fills a column of eight wells per call and the reader reads it, and every sample still gets its own absorbance.",
   "prep": [],
   "script": [
     {
@@ -9,20 +9,16 @@
       "instrument": "liquid_handler",
       "action": "transfer",
       "args": {
-        "source": "reservoir",
-        "source_wells": "A1",
-        "dest": "assay_plate",
-        "dest_wells": "#well",
-        "new_tip": "once",
-        "vols": "#buffer_ul",
-        "tip_rack": "tips_300"
+        "source": "reservoir[A1]",
+        "targets": "#well",
+        "target_vols": "#buffer_ul",
+        "tip_rack": "tips_300",
+        "new_tip": "once"
       },
       "arg_types": {
-        "source": "str",
-        "source_wells": "wells",
-        "dest": "str",
-        "dest_wells": "wells",
-        "vols": "float",
+        "source": "wells",
+        "targets": "wells",
+        "target_vols": "float",
         "tip_rack": "str",
         "new_tip": "Literal"
       },
@@ -36,20 +32,16 @@
       "instrument": "liquid_handler",
       "action": "transfer",
       "args": {
-        "source": "reservoir",
-        "source_wells": "A2",
-        "dest": "assay_plate",
-        "dest_wells": "#well",
-        "new_tip": "always",
-        "vols": "#dye_ul",
-        "tip_rack": "tips_300"
+        "source": "reservoir[A2]",
+        "targets": "#well",
+        "target_vols": "#dye_ul",
+        "tip_rack": "tips_300",
+        "new_tip": "always"
       },
       "arg_types": {
-        "source": "str",
-        "source_wells": "wells",
-        "dest": "str",
-        "dest_wells": "wells",
-        "vols": "float",
+        "source": "wells",
+        "targets": "wells",
+        "target_vols": "float",
         "tip_rack": "str",
         "new_tip": "Literal"
       },
@@ -63,13 +55,11 @@
       "instrument": "plate_reader",
       "action": "read_absorbance",
       "args": {
-        "plate": "assay_plate",
-        "wells": "#well",
+        "resources": "#well",
         "wavelength_nm": 520
       },
       "arg_types": {
-        "plate": "str",
-        "wells": "wells",
+        "resources": "wells",
         "wavelength_nm": "int"
       },
       "return": "absorbance",

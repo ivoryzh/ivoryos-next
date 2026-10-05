@@ -10,8 +10,12 @@
  * will accept what the run then refuses, but never the other way round.
  */
 
+import { referencesProblem, wellChoices, type TrayChoice } from './labware';
+
 export interface TrayView {
   label: string;
+  /** A labware a driver declared (plate, tip_rack, reservoir, ...); absent for a lab's own tray. */
+  category?: string;
   rows: number;
   columns: number;
   /** 'A1' | 'A01' | '1' | '0' */
@@ -30,6 +34,8 @@ export interface FieldGuard {
   note?: string;
   /** The instrument, or `class:<Name>`, the limit was written for. */
   source?: string;
+  /** Wells written with their labware (`plate[A1:H1]`) on this instrument's worktable (labware.ts). */
+  wells?: { instrument: string; labware: string[] };
 }
 
 export interface SafetyView {
@@ -45,11 +51,8 @@ export interface FieldRef {
   instrument: string;
   method: string;
   param: string;
-  /**
-   * The tray this field's value is a position on, when the step itself says so: a wells argument
-   * of a step whose labware argument is already chosen (labware.ts `wellsTray`).
-   */
-  tray?: string;
+  /** Set for a wells argument: the kinds of labware it takes (labware.ts). */
+  wells?: { labware: string[] };
 }
 
 export const fieldGuard = (
@@ -66,7 +69,7 @@ export const trayOf = (safety: SafetyView | null | undefined, guard: FieldGuard 
 export const guardsFor = (safety: SafetyView | null | undefined, refs: FieldRef[] | undefined): FieldGuard[] =>
   (refs || []).flatMap((r) => [
     fieldGuard(safety, r.instrument, r.method, r.param),
-    r.tray && safety?.trays?.[r.tray] ? { tray: r.tray, source: r.instrument } : undefined,
+    r.wells ? { wells: { instrument: r.instrument, labware: r.wells.labware }, source: r.instrument } : undefined,
   ]).filter((g): g is FieldGuard => !!g);
 
 const show = (n: number) => String(Number(n.toPrecision(12)));
@@ -84,6 +87,7 @@ export function guardHint(guard: FieldGuard | undefined, safety: SafetyView | nu
   else if (guard.min !== undefined) parts.push(`at least ${show(guard.min)}`);
   else if (guard.max !== undefined) parts.push(`at most ${show(guard.max)}`);
   if (guard.allowed) parts.push(`one of ${guard.allowed.map(String).join(', ')}`);
+  if (guard.wells) parts.push('wells, written plate[A1:H1]');
   const tray = trayOf(safety, guard);
   if (tray) parts.push(`${tray.label}, ${tray.rows} x ${tray.columns}`);
   return parts.join(' · ');
@@ -107,6 +111,7 @@ export function guardProblem(
     return null;
   }
   if (value === undefined || value === null || value === '' || isReference(value)) return null;
+  if (guard.wells) return referencesProblem(value, wellChoices(safety, guard.wells.instrument, guard.wells.labware));
   if (Array.isArray(value)) {
     for (const item of value) {
       const problem = guardProblem(guard, item, safety);
@@ -135,17 +140,33 @@ export function guardProblem(
 /** The values worth offering as the field is typed: a tray's usable positions, or the allowed list. */
 export function guardSuggestions(guard: FieldGuard | undefined, safety: SafetyView | null | undefined): string[] {
   if (!guard) return [];
+  if (guard.wells) return wellChoices(safety, guard.wells.instrument, guard.wells.labware).map((c) => `${c.label}[`);
   const tray = trayOf(safety, guard);
   if (tray) return tray.grid.flat().filter((p) => !tray.blocked.includes(p));
   return (guard.allowed || []).map(String);
 }
 
-/** The first tray among a variable's limits, with its name: what a column's picker opens. */
+/**
+ * The first tray among a variable's limits, with its name: what a column's picker opens. For a
+ * wells argument, `choices` are the plates it may name, and what is picked is written
+ * `plate[A1]` (labware.ts formatReference).
+ */
 export function trayForGuards(
   guards: FieldGuard[] | undefined,
   safety: SafetyView | null | undefined,
-): { name: string; tray: TrayView } | undefined {
+): { name: string; tray: TrayView; choices?: TrayChoice[] } | undefined {
+  // A column feeding several wells arguments offers only labware every one of them takes (the
+  // plate reader's plates, not the reservoir a transfer could also draw from).
+  const wellGuards = (guards || []).filter((g) => g.wells);
+  if (wellGuards.length) {
+    const choices = wellGuards
+      .map((g) => wellChoices(safety, g.wells!.instrument, g.wells!.labware))
+      // By labware name: an instrument sharing the worktable publishes the same plates under its own.
+      .reduce((kept, next) => kept.filter((c) => next.some((n) => n.label === c.label)));
+    if (choices.length) return { name: choices[0].name, tray: choices[0].tray, choices };
+  }
   for (const g of guards || []) {
+    if (g.wells) continue;
     const tray = trayOf(safety, g);
     if (tray && g.tray) return { name: g.tray, tray };
   }

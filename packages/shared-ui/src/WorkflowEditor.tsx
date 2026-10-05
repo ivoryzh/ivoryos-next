@@ -26,8 +26,8 @@ import { WorkflowDiff } from './WorkflowDiff';
 import { SuggestInput } from './SuggestInput';
 import { AutoFillToggle, LOGIC_TOOLS, ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, logicStepLook } from './Toolbox';
 import { FLOW_CONTROL_INSTRUMENTS } from './flowControl';
-import { fieldGuard, guardHint, guardProblem, guardSuggestions, type TrayView } from './safety';
-import { compactWells, expandWells, wellCount, wellsProblem, wellsTray } from './labware';
+import { fieldGuard, guardHint, guardProblem, guardSuggestions } from './safety';
+import { formatReference, referenceCount, referenceStart, referencesProblem, wellChoices, type TrayChoice } from './labware';
 import { TrayPicker } from './TrayPicker';
 
 // One named variable bound to one addressable leaf of a step's return value. `path` is the
@@ -483,9 +483,9 @@ export default function WorkflowEditor({
     setSequenceList(listId, list.map(b => b.id === blockId ? updater(b) : b));
   };
 
-  // The plate a wells argument is being picked on (labware.ts), if a picker is open.
+  // A wells argument being picked (labware.ts): the plates it may name, and where the picker opens.
   const [wellPick, setWellPick] = useState<{
-    listId: string; blockId: string; paramKey: string; tray: TrayView; title: string; initial: string[];
+    listId: string; blockId: string; paramKey: string; choices: TrayChoice[]; start: TrayChoice; title: string; initial: string[];
   } | null>(null);
 
   const handleParamChange = (blockId: string, param: string, value: any, type: string, listId: string) => {
@@ -1514,10 +1514,10 @@ export default function WorkflowEditor({
                               blockWarnings.push(`'${fullKey}' = ${guarded} ${refused} (safety guard)`);
                           }
 
-                          // Wells that are not on the plate this same step names (labware.ts). The
-                          // edge refuses the run for it; said here, on the step.
+                          // Wells that are not on the worktable (`plate[A13]`, a plate that is not
+                          // there; labware.ts). The edge refuses the run for it; said here, on the step.
                           if (pData?.wells && !isFlowBlock) {
-                              const offPlate = wellsProblem(guarded, wellsTray(statusData?.safety, block.instrument, pData, block.params, effectiveSchema as any)?.tray);
+                              const offPlate = referencesProblem(guarded, wellChoices(statusData?.safety, block.instrument, pData.wells.labware));
                               if (offPlate) blockWarnings.push(`'${fullKey}': ${offPlate}`);
                           }
                       }
@@ -1765,7 +1765,7 @@ export default function WorkflowEditor({
                                           {isFlowBlock && !isUserInputBlock && block.schema?.parameters && Object.keys(block.schema.parameters).map(paramKey => {
                                             const pData = block.schema!.parameters[paramKey];
                                             const val = block.params[paramKey];
-                                            const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
+                                            const actualVal = val !== undefined ? val : (pData.default !== undefined && pData.default !== null ? String(pData.default) : '');
                                             const hashInvalid = emptyHashFields.has(hashFieldKey(listId, block.id, paramKey));
                                             return (
                                               <div key={paramKey} className="relative flex items-center min-w-0">
@@ -1785,7 +1785,7 @@ export default function WorkflowEditor({
                                                     clearHashWarning(listId, block.id, paramKey);
                                                   }}
                                                   onBlur={(e) => {
-                                                    if (e.target.value === '' && pData.default !== undefined) {
+                                                    if (e.target.value === '' && pData.default !== undefined && pData.default !== null) {
                                                       handleParamChange(block.id, paramKey, String(pData.default), pData.type || '', listId);
                                                     }
                                                     handleHashBlur(listId, block.id, paramKey, e.target.value);
@@ -1998,18 +1998,18 @@ export default function WorkflowEditor({
 
                                                 const displayType = (pData.type || '').replace(/<class '([^']+)'>/, '$1').replace('typing.', '');
                                                 const val = paramKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, paramsObj);
-                                                const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
+                                                const actualVal = val !== undefined ? val : (pData.default !== undefined && pData.default !== null ? String(pData.default) : '');
                                                 const hashInvalid = emptyHashFields.has(hashFieldKey(lId, bId, paramKey));
                                                 // The safety guard's limit on this field, if any: its
                                                 // values are offered, and the shield says what it allows.
                                                 const guard = fieldGuard(statusData?.safety, block.instrument, block.method, paramKey);
                                                 const guardText = guardHint(guard, statusData?.safety);
-                                                // A wells argument is picked on the plate its sibling
-                                                // argument names (labware.ts).
-                                                const plate = pData.wells ? wellsTray(statusData?.safety, block.instrument, pData, paramsObj, effectiveSchema as any) : undefined;
-                                                const picked = pData.wells ? wellCount(actualVal, plate?.tray) : null;
+                                                // A wells argument names its plate and wells together,
+                                                // `plate[A1:H1]`, picked on the worktable's plates (labware.ts).
+                                                const plates = pData.wells ? wellChoices(statusData?.safety, block.instrument, pData.wells.labware) : [];
+                                                const picked = pData.wells ? referenceCount(actualVal, plates) : null;
                                                 const guardRefuses = !!guardProblem(guard, actualVal, statusData?.safety)
-                                                  || (!!pData.wells && !!wellsProblem(actualVal, plate?.tray));
+                                                  || (!!pData.wells && !!referencesProblem(actualVal, plates));
 
                                                 return (
                                                     // name = value, as the call would be written (the folded card reads the same).
@@ -2029,13 +2029,13 @@ export default function WorkflowEditor({
                                                           ...availableVars.map((v: string) => ({ value: `#${v}`, label: 'earlier step' })),
                                                         ]}
                                                         value={actualVal}
-                                                        placeholder={pData.default !== undefined ? String(pData.default) : displayType}
+                                                        placeholder={pData.default === null ? 'None' : pData.default !== undefined ? String(pData.default) : displayType}
                                                         onChange={(e) => {
                                                           handleParamChange(bId, paramKey, e.target.value, pData.type || '', lId);
                                                           clearHashWarning(lId, bId, paramKey);
                                                         }}
                                                         onBlur={(e) => {
-                                                          if (e.target.value === '' && pData.default !== undefined) {
+                                                          if (e.target.value === '' && pData.default !== undefined && pData.default !== null) {
                                                             handleParamChange(bId, paramKey, String(pData.default), pData.type || '', lId);
                                                           }
                                                           handleHashBlur(lId, bId, paramKey, e.target.value);
@@ -2045,14 +2045,13 @@ export default function WorkflowEditor({
                                                       {pData.wells && (
                                                         <button
                                                           type="button"
-                                                          disabled={!plate}
-                                                          title={plate ? `Pick wells on ${plate.tray.label}` : `Choose '${pData.wells.on}' first, then pick wells on it`}
+                                                          disabled={!plates.length || (typeof actualVal === 'string' && actualVal.trim().startsWith('#'))}
+                                                          title={plates.length ? 'Pick the plate and its wells' : 'Nothing on this worktable can be picked here'}
                                                           onClick={(e) => {
                                                             e.stopPropagation();
-                                                            if (!plate) return;
-                                                            let initial: string[] = [];
-                                                            try { initial = expandWells(actualVal, plate.tray.grid); } catch { /* a typo: start empty */ }
-                                                            setWellPick({ listId: lId, blockId: bId, paramKey, tray: plate.tray, title: `${block.method}: ${paramName} on ${plate.tray.label}`, initial });
+                                                            const { choice, positions } = referenceStart(actualVal, plates);
+                                                            if (!choice) return;
+                                                            setWellPick({ listId: lId, blockId: bId, paramKey, choices: plates, start: choice, title: `${block.method}: ${paramName}`, initial: positions });
                                                           }}
                                                           className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-accent-tint bg-accent-soft px-1.5 font-sans text-[11px] font-semibold text-accent-fg hover:bg-accent hover:text-on-accent disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-transparent disabled:text-gray-300 dark:disabled:border-white/10 dark:disabled:text-gray-600"
                                                         >
@@ -2489,12 +2488,13 @@ export default function WorkflowEditor({
       />
       {wellPick && (
         <TrayPicker
-          tray={wellPick.tray}
+          tray={wellPick.start.tray}
+          choices={wellPick.choices}
           title={wellPick.title}
           multiple
           initial={wellPick.initial}
-          onPick={(positions) => handleParamChange(
-            wellPick.blockId, wellPick.paramKey, compactWells(positions, wellPick.tray.grid), 'wells', wellPick.listId)}
+          onPick={(positions, choice) => handleParamChange(
+            wellPick.blockId, wellPick.paramKey, formatReference(choice ?? wellPick.start, positions), 'wells', wellPick.listId)}
           onClose={() => setWellPick(null)}
         />
       )}

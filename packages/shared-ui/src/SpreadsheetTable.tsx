@@ -6,6 +6,7 @@ import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea
 import { groupSizeFor, SpreadsheetRow } from './spreadsheetRun';
 import { guardHint, guardProblem, trayForGuards, type FieldGuard, type SafetyView } from './safety';
 import { TrayPicker } from './TrayPicker';
+import { referenceStart } from './labware';
 
 /**
  * The iteration table: one column per `#variable`, one row per sample.
@@ -201,7 +202,7 @@ export function SpreadsheetTable({
                     <button
                       type="button"
                       onClick={() => setPicking(v)}
-                      title={`Pick positions on ${trays[v]!.tray.label}: one row per position`}
+                      title={trays[v]!.choices ? 'Pick a plate and its wells: one row per well' : `Pick positions on ${trays[v]!.tray.label}: one row per position`}
                       className="inline-flex items-center gap-1 rounded border border-accent-tint bg-accent-soft px-1.5 py-0.5 font-semibold text-accent-fg hover:bg-accent hover:text-on-accent"
                     >
                       <Grid3x3 className="h-3 w-3" /> Pick
@@ -323,16 +324,25 @@ export function SpreadsheetTable({
         {header}
         {onReorder ? draggableBody : staticBody}
       </table>
-      {picking && trays[picking] && onFillColumn && (
-        <TrayPicker
-          tray={trays[picking]!.tray}
-          title={`${picking}: one row per position`}
-          multiple
-          initial={rows.map((r) => String(r?.[picking] ?? '').trim()).filter(Boolean)}
-          onPick={(positions) => onFillColumn(picking, positions)}
-          onClose={() => setPicking(null)}
-        />
-      )}
+      {picking && trays[picking] && onFillColumn && (() => {
+        const found = trays[picking]!;
+        const cells = rows.map((r) => String(r?.[picking] ?? '').trim()).filter(Boolean);
+        // A wells column holds `plate[A1]` per row (labware.ts): the picker chooses the plate too.
+        const start = found.choices ? referenceStart(cells, found.choices) : null;
+        return (
+          <TrayPicker
+            tray={start?.choice?.tray ?? found.tray}
+            choices={found.choices}
+            title={`${picking}: one row per ${found.choices ? 'well' : 'position'}`}
+            multiple
+            initial={start ? start.positions : cells}
+            onPick={(positions, choice) => onFillColumn(picking, choice && found.choices
+              ? positions.map((position) => `${choice.label}[${position}]`)
+              : positions)}
+            onClose={() => setPicking(null)}
+          />
+        );
+      })()}
       {onAddRow && (
         <div className={compact
           ? 'border-t border-gray-100 px-2 py-1.5 dark:border-white/5'

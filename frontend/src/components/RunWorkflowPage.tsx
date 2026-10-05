@@ -21,7 +21,7 @@ import {
   toSubmittedStep,
   toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks,
   TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, SuggestInput,
-  labwareTrayName, rowListVariables,
+  formatReference, referenceStart, rowListVariables,
   type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 import Link from 'next/link';
 import { useQueueBusy } from '@/queueBusy';
@@ -315,10 +315,9 @@ export default function RunWorkflowPage({ mode, stage }: {
                     if (pData?.type) vTypes[varName] = pData.type;
                     if (pData?.options) vOptions[varName] = pData.options;
                     const ref: FieldRef = { instrument: scanningBlock.instrument, method: scanningBlock.method, param: `${prefix}${k}` };
-                    // A wells column is a position on the plate its step names (shared-ui labware.ts),
-                    // so it gets that plate's picker and its positions checked as they are typed.
-                    const plate = pData?.wells?.on ? scanningBlock.params?.[pData.wells.on] : undefined;
-                    if (typeof plate === 'string' && plate && !plate.startsWith('#')) ref.tray = labwareTrayName(ref.instrument, plate);
+                    // A wells column holds `plate[A1]` per row (shared-ui labware.ts): it gets a
+                    // picker for the instrument's plates, and is checked against them as it is typed.
+                    if (pData?.wells) ref.wells = { labware: pData.wells.labware || [] };
                     const known = (vFields[varName] ||= []);
                     if (!known.some(f => f.instrument === ref.instrument && f.method === ref.method && f.param === ref.param)) known.push(ref);
                 } else if (typeof v === 'object' && v !== null) {
@@ -785,7 +784,7 @@ export default function RunWorkflowPage({ mode, stage }: {
                           className={`${field} ${isInvalidNumericCell(v, value) || refused ? '!border-red-400' : ''}`} />
                       )}
                       {tray && (
-                        <button type="button" onClick={() => setPickingTray(v)} title={`Pick a position on ${tray.tray.label}`}
+                        <button type="button" onClick={() => setPickingTray(v)} title={tray.choices ? 'Pick a plate and its wells' : `Pick a position on ${tray.tray.label}`}
                           className="shrink-0 rounded-lg border border-gray-200 p-2 text-gray-500 hover:bg-gray-50 hover:text-gray-800 dark:border-white/10 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100">
                           <Grid3x3 className="h-4 w-4" />
                         </button>
@@ -894,15 +893,25 @@ export default function RunWorkflowPage({ mode, stage }: {
         {!stage && <LiveRun />}
       </div>
 
-      {pickingTray && trayForGuards(varGuards[pickingTray], safety) && (
-        <TrayPicker
-          tray={trayForGuards(varGuards[pickingTray], safety)!.tray}
-          title={pickingTray}
-          initial={[String(rows[0]?.[pickingTray] ?? '')]}
-          onPick={([position]) => updateRow(0, pickingTray, position)}
-          onClose={() => setPickingTray(null)}
-        />
-      )}
+      {pickingTray && trayForGuards(varGuards[pickingTray], safety) && (() => {
+        const found = trayForGuards(varGuards[pickingTray], safety)!;
+        const value = String(rows[0]?.[pickingTray] ?? '');
+        // A wells value names its plate too (`plate[A1:H1]`): choose both, and any number of wells.
+        const start = found.choices ? referenceStart(value, found.choices) : null;
+        return (
+          <TrayPicker
+            tray={start?.choice?.tray ?? found.tray}
+            choices={found.choices}
+            title={pickingTray}
+            multiple={!!found.choices}
+            initial={start ? start.positions : [value]}
+            onPick={(positions, choice) => updateRow(0, pickingTray, choice && found.choices
+              ? formatReference(choice, positions)
+              : positions[0])}
+            onClose={() => setPickingTray(null)}
+          />
+        );
+      })()}
 
       <WorkflowMap
         isOpen={isMapOpen}

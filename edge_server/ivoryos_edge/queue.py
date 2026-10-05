@@ -281,6 +281,18 @@ def with_aliases(values: Dict[str, Any], aliases) -> Dict[str, Any]:
     return out
 
 
+def _result_key(result: dict, given: Any) -> Any:
+    """The key a row's own value has in a result: the argument as given (`assay_plate[A1]`), or
+    the well alone (`A1`), which is how most readers key a plate."""
+    if given in result:
+        return given
+    text = str(given)
+    if text in result:
+        return text
+    match = re.fullmatch(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*\[\s*([^\],:;]+?)\s*\]\s*", text)
+    return match.group(1) if match else text
+
+
 def spread_over_rows(parameters: Optional[dict], values: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
     """Each row's own share of what a batch step returned for a whole group of rows.
 
@@ -289,7 +301,8 @@ def spread_over_rows(parameters: Optional[dict], values: Dict[str, Any]) -> Dict
     returns covers all of them: a plate read gives `{"A1": 0.31, "B1": 0.52, ...}`. Left as one
     value, every row of the group would show the whole plate and a per-sample `If absorbance > 1`
     could not be written. So a result is handed back out to the rows it covers: a dict keyed by
-    the values of one of those arguments (the wells) goes to each row by its own key, and a list
+    the values of one of those arguments (the wells, `assay_plate[A1]` or just `A1`) goes to each
+    row by its own key, and a list
     as long as the group goes by position. Anything else stays one value for the group.
     """
     parameters = parameters or {}
@@ -304,7 +317,7 @@ def spread_over_rows(parameters: Optional[dict], values: Dict[str, Any]) -> Dict
                 given = parameters.get(argument)
                 if not isinstance(given, list) or len(given) != len(rows):
                     continue
-                keys = [g if g in value else str(g) for g in given]
+                keys = [_result_key(value, g) for g in given]
                 if all(k in value for k in keys):
                     per_row = [value[k] for k in keys]
                     break

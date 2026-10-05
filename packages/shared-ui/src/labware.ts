@@ -2,45 +2,44 @@
  * Labware, as the forms see it: wells picked on a plate, and arguments a batch step is given once
  * per row.
  *
- * The edge owns all of it (edge_server/ivoryos_edge/labware.py). A driver marks an argument as
- * "wells on the labware named by that other argument", the schema carries the mark (`wells`,
- * `per_well`), and every labware on an instrument's worktable is published among the safety
- * guard's trays as `<instrument>:<labware>`, so the tray picker draws a plate with nothing new to
- * learn. `expandWells` / `compactWells` mirror `expand_wells` / `compact_wells` there: the edge's
- * are the ones a run is checked and executed with, these only fill a picker and mark a typo as
- * it is typed. Change them together.
+ * The edge owns all of it (edge_server/ivoryos_edge/labware.py). Wells are written as PyLabRobot
+ * writes them, as text: `assay_plate[A1:H1]` is PyLabRobot's `assay_plate["A1:H1"]`, one argument
+ * naming the labware and its wells together. A driver marks such an argument (`wells` in the
+ * schema, with the kinds of labware it takes) and every labware on an instrument's worktable is
+ * published among the safety guard's trays as `<instrument>:<labware>`, so the tray picker draws a
+ * plate with nothing new to learn. `expandWells` / `compactWells` / `parseReferences` mirror
+ * `expand_wells` / `compact_wells` / `parse_references` there: the edge's are the ones a run is
+ * checked and executed with, these only fill a picker and mark a typo as it is typed. Change them
+ * together.
  */
 
 import type { SafetyView, TrayView } from './safety';
 
 /**
  * A parameter a batch step is handed one value per row for, in one call, instead of the first
- * row's value: a well selection, or a number per well (`Wells` / `PerWell`).
+ * row's value: wells, or a number per well (`Wells` / `PerWell`).
  */
 export const takesRowList = (declared: any): boolean => !!(declared && (declared.wells || declared.per_well));
 
-export const labwareTrayName = (instrument: string, labware: unknown) => `${instrument}:${labware}`;
+/** One labware a wells argument can be picked on: its tray key, its name, and its grid. */
+export interface TrayChoice {
+  name: string;
+  label: string;
+  tray: TrayView;
+}
 
 const isReference = (value: unknown) => typeof value === 'string' && value.trim().startsWith('#');
 
-/**
- * The plate a wells argument picks on: the labware its sibling argument names, when that is
- * already a name rather than a '#variable'. `params` are the step's own arguments.
- */
-export function wellsTray(
+/** The labware on `instrument`'s worktable a wells argument may name (of these kinds, if any). */
+export function wellChoices(
   safety: SafetyView | null | undefined,
   instrument: string,
-  declared: any,
-  params: Record<string, any> | undefined,
-  schemaParams?: Record<string, any>,
-): { name: string; tray: TrayView } | undefined {
-  const on = declared?.wells?.on;
-  if (!on) return undefined;
-  const labware = params?.[on] ?? schemaParams?.[on]?.default;
-  if (labware === undefined || labware === null || labware === '' || isReference(labware)) return undefined;
-  const name = labwareTrayName(instrument, labware);
-  const tray = safety?.trays?.[name];
-  return tray ? { name, tray } : undefined;
+  categories: string[] = [],
+): TrayChoice[] {
+  const prefix = `${instrument}:`;
+  return Object.entries(safety?.trays || {})
+    .filter(([name, tray]) => name.startsWith(prefix) && (!categories.length || !tray.category || categories.includes(tray.category)))
+    .map(([name, tray]) => ({ name, label: name.slice(prefix.length), tray }));
 }
 
 const indexOf = (grid: string[][]) => {
@@ -123,26 +122,81 @@ export function compactWells(positions: string[], grid: string[][]): string {
   return merged.map((run) => (run.length > 1 ? `${run[0]}:${run[1]}` : run[0])).join(', ');
 }
 
-/** Why a wells value would be refused on this plate, or null. '#references' are not judged. */
-export function wellsProblem(value: unknown, tray: TrayView | undefined): string | null {
-  if (!tray || value === undefined || value === null || value === '') return null;
+const REFERENCE = /\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[([^\]]*)\])?\s*[,;]?\s*/y;
+const WELL_NAME = /^[A-Za-z]{1,2}[0-9]{1,3}$/;
+
+/** `assay_plate[A1:H1], reservoir[A1]` (or a list) as [{labware, selection}]; null selection = all. */
+export function parseReferences(value: unknown): { labware: string; selection: string | null }[] {
+  const items = Array.isArray(value) ? value : [value];
+  const out: { labware: string; selection: string | null }[] = [];
+  for (const item of items) {
+    const text = String(item ?? '').trim();
+    let at = 0;
+    while (at < text.length) {
+      REFERENCE.lastIndex = at;
+      const m = REFERENCE.exec(text);
+      if (!m || REFERENCE.lastIndex === at) throw new Error(`'${text}' is not written as labware[wells], e.g. assay_plate[A1:H1]`);
+      out.push({ labware: m[1], selection: m[2] ?? null });
+      at = REFERENCE.lastIndex;
+    }
+  }
+  if (!out.length) throw new Error('no wells were given');
+  return out;
+}
+
+/** Every {labware, well} a value names on these choices, in order. Throws saying what is wrong. */
+export function expandReferences(value: unknown, choices: TrayChoice[]): { labware: string; well: string }[] {
+  const out: { labware: string; well: string }[] = [];
+  for (const { labware, selection } of parseReferences(value)) {
+    const choice = choices.find((c) => c.label === labware);
+    if (!choice) {
+      const hint = WELL_NAME.test(labware) ? ' (write wells with their labware, e.g. assay_plate[A1])' : '';
+      throw new Error(`'${labware}' is not on this worktable${hint}`);
+    }
+    try {
+      expandWells(selection ?? 'all', choice.tray.grid).forEach((well) => out.push({ labware, well }));
+    } catch (e: any) {
+      throw new Error(`${e.message} on ${labware}`);
+    }
+  }
+  return out;
+}
+
+/** Positions picked on one labware, as the shortest text that names them: `assay_plate[A1:H3]`. */
+export const formatReference = (choice: TrayChoice, positions: string[]) =>
+  `${choice.label}[${compactWells(positions, choice.tray.grid)}]`;
+
+/** Why a wells value would be refused, or null. Empty values and '#references' are not judged. */
+export function referencesProblem(value: unknown, choices: TrayChoice[]): string | null {
+  if (value === undefined || value === null || value === '') return null;
   const listed = Array.isArray(value) ? value : [value];
-  if (listed.some(isReference)) return null;
-  if (typeof value === 'string' && value.trim().toLowerCase() === 'next') return null;
+  if (listed.some(isReference) || !choices.length) return null;
   try {
-    expandWells(value, tray.grid);
+    expandReferences(value, choices);
     return null;
   } catch (e: any) {
-    return `${e.message} on ${tray.label} (${tray.rows} x ${tray.columns})`;
+    return e.message;
   }
 }
 
-/** How many wells a value names on this plate, for a step's one-line summary; null if unknown. */
-export function wellCount(value: unknown, tray: TrayView | undefined): number | null {
-  if (!tray || value === undefined || value === null || value === '') return null;
+/** How many wells a value names, for a step's one-line summary; null if it cannot be read. */
+export function referenceCount(value: unknown, choices: TrayChoice[]): number | null {
+  if (value === undefined || value === null || value === '' || !choices.length) return null;
   try {
-    return expandWells(value, tray.grid).length;
+    return expandReferences(value, choices).length;
   } catch {
     return null;
   }
+}
+
+/** Where a picker opens for a value: the labware it names first (else the first choice), and the
+ *  positions already picked on it. */
+export function referenceStart(values: unknown, choices: TrayChoice[]): { choice: TrayChoice | undefined; positions: string[] } {
+  let found: { labware: string; well: string }[] = [];
+  const items = (Array.isArray(values) ? values : [values]).filter((v) => v !== undefined && v !== null && String(v).trim() !== '');
+  for (const item of items) {
+    try { found = found.concat(expandReferences(item, choices)); } catch { /* a typo: skip it */ }
+  }
+  const choice = choices.find((c) => c.label === found[0]?.labware) ?? choices[0];
+  return { choice, positions: choice ? found.filter((f) => f.labware === choice.label).map((f) => f.well) : [] };
 }

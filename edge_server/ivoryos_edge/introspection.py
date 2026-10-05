@@ -324,10 +324,15 @@ def _resolve_markers(func):
         return {}
     out = {}
     for name, hint in hints.items():
-        if get_origin(hint) is typing.Annotated:
-            found = [m for m in get_args(hint)[1:] if callable(getattr(m, "ivoryos_schema", None))]
-            if found:
-                out[name] = found
+        # Python before 3.11 wraps `Annotated[Optional[str], ...] = None` in another Optional, so
+        # the Annotated can sit one Union down.
+        candidates = [hint] + (list(get_args(hint)) if get_origin(hint) is typing.Union else [])
+        for candidate in candidates:
+            if get_origin(candidate) is typing.Annotated:
+                found = [m for m in get_args(candidate)[1:] if callable(getattr(m, "ivoryos_schema", None))]
+                if found:
+                    out[name] = found
+                    break
     return out
 
 

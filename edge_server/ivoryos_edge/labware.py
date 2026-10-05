@@ -8,17 +8,17 @@ knows nothing about any robot or library. The PyLabRobot liquid handler that spe
 the edge reads them by duck typing (anything in `Annotated[...]` with an `ivoryos_schema()`, and
 the dunder methods below), so a driver package needs nothing from ivoryos_edge.
 
-A driver marks its arguments:
+A well is written the way PyLabRobot writes it, as text: `assay_plate[A1:H1]` is PyLabRobot's
+`assay_plate["A1:H1"]`, so one argument names the labware and its wells together, as a PyLabRobot
+`Well` does. A driver marks its arguments:
 
     from typing import Annotated
     from ivoryos_edge.labware import Labware, Wells, PerWell, WellSelection
 
-    async def transfer(self,
-        source: Annotated[str, Labware("plate", "reservoir")],
-        source_wells: Annotated[WellSelection, Wells("source")],
-        dest: Annotated[str, Labware("plate")],
-        dest_wells: Annotated[WellSelection, Wells("dest")],
-        volume_ul: Annotated[Union[float, List[float]], PerWell("dest_wells")]): ...
+    def transfer(self,
+        source: Annotated[WellSelection, Wells("plate", "reservoir")],      # "reservoir[A1]"
+        targets: Annotated[WellSelection, Wells("plate")],                  # "assay_plate[A1:H3]"
+        target_vols: Annotated[Union[float, List[float]], PerWell("targets")]): ...
 
 and says what is on its worktable through one method the edge looks for:
 
@@ -29,9 +29,9 @@ From that the edge gets, with no further configuration:
 
 - `Labware(...)` arguments offered as a list of the names on the worktable (schema `options`,
   so the safety guard holds a step to them like any Enum).
-- `Wells("plate")` arguments picked on a picture of that plate, and checked against it: every
-  labware is a tray the driver declared (safety.py `declared_trays`), so "A13 is not a position
-  on assay_plate" is refused before a run starts.
+- `Wells(...)` arguments picked on a picture of the plate (the picker chooses the plate too), and
+  checked against it: every labware is a tray the driver declared (safety.py `declared_trays`),
+  so "A13 is not a position on assay_plate" is refused before a run starts.
 - `Wells` and `PerWell` arguments of a *batch* step given the whole batch: one value per row of
   the spreadsheet, in one call (shared-ui spreadsheetRun.ts). That is what makes one row per
   sample and one call per column of eight the same workflow.
@@ -43,7 +43,8 @@ underscore).
 import re
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-# What a wells argument carries: "A1", "A1:H1", "A1:H1, A3", a list of those, or "all".
+# What a wells argument carries: "plate[A1]", "plate[A1:H1, A3]", "plate" (all of it), several
+# separated by commas, or a list of those (a batch step's rows).
 WellSelection = Union[str, List[str]]
 
 LAYOUT_METHOD = "__ivoryos_labware__"
@@ -71,19 +72,19 @@ class Labware:
 
 
 class Wells:
-    """`Annotated[WellSelection, Wells("plate")]`: positions on the labware named by the argument
-    `plate` of the same call."""
+    """`Annotated[WellSelection, Wells("plate")]`: wells written with their labware,
+    `assay_plate[A1:H1]`. Categories narrow which labware ("plate", "tip_rack", ...)."""
 
-    def __init__(self, on: str):
-        self.on = on
+    def __init__(self, *categories: str):
+        self.categories = list(categories)
 
     def ivoryos_schema(self) -> dict:
-        return {"type": "wells", "wells": {"on": self.on}}
+        return {"type": "wells", "wells": {"labware": self.categories}}
 
 
 class PerWell:
-    """`Annotated[Union[float, List[float]], PerWell("dest_wells")]`: one value for every well of
-    that argument, or one per well in the same order."""
+    """`Annotated[Union[float, List[float]], PerWell("targets")]`: one value for every well of that
+    argument, or one per well in the same order."""
 
     def __init__(self, of: str):
         self.of = of
@@ -262,3 +263,50 @@ def compact_wells(positions: Iterable[str], grid: List[List[str]]) -> str:
                 continue
         merged.append([run[0], run[-1]] if len(run) > 1 else run)
     return ", ".join(f"{run[0]}:{run[-1]}" if len(run) > 1 else run[0] for run in merged)
+
+
+# --- Wells with their labware ---------------------------------------------------------------------
+
+_REFERENCE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[([^\]]*)\])?\s*[,;]?\s*")
+_WELL_NAME = re.compile(r"[A-Za-z]{1,2}[0-9]{1,3}")
+
+
+def parse_references(value: Any) -> List[tuple]:
+    """`assay_plate[A1:H1], reservoir[A1]` (or a list of such) as [(labware, selection or None)].
+    A bare name (`assay_plate`) has no selection. Raises ValueError for anything else."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out: List[tuple] = []
+    for item in items:
+        text = str(item if item is not None else "").strip()
+        position = 0
+        while position < len(text):
+            match = _REFERENCE.match(text, position)
+            if not match or match.end() == position:
+                raise ValueError(f"'{text}' is not written as labware[wells], e.g. assay_plate[A1:H1]")
+            out.append((match.group(1), match.group(2)))
+            position = match.end()
+    if not out:
+        raise ValueError("no wells were given")
+    return out
+
+
+def expand_references(value: Any, grids: Dict[str, List[List[str]]], kinds: Optional[Dict[str, str]] = None,
+                      categories: Iterable[str] = ()) -> List[tuple]:
+    """Every (labware, well) a value names, in order. `grids` is each labware's position names;
+    a bare name is all of them. Raises ValueError saying what is wrong, naming the labware."""
+    wanted = list(categories or ())
+    out: List[tuple] = []
+    for labware, selection in parse_references(value):
+        if labware not in grids:
+            hint = " (write wells with their labware, e.g. assay_plate[A1])" if _WELL_NAME.fullmatch(labware) else ""
+            raise ValueError(f"'{labware}' is not on this worktable{hint}; it has {', '.join(grids) or 'nothing'}")
+        kind = (kinds or {}).get(labware)
+        if wanted and kind and kind not in wanted:
+            raise ValueError(f"'{labware}' is a {kind.replace('_', ' ')}, not a {' or '.join(c.replace('_', ' ') for c in wanted)}")
+        grid = grids[labware]
+        try:
+            wells = expand_wells(ALL if selection is None else selection, grid)
+        except ValueError as e:
+            raise ValueError(f"{e} on {labware}") from None
+        out.extend((labware, well) for well in wells)
+    return out

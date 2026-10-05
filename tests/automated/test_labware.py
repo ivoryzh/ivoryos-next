@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 
 from ivoryos_edge.introspection import inspect_device_module
 from ivoryos_edge.labware import (Labware, PerWell, Site, WellSelection, Wells, compact_wells, declared_trays,
+                                  expand_references, parse_references,
                                   expand_wells)
 from ivoryos_edge.queue import spread_over_rows
 from ivoryos_edge.safety import guard
@@ -38,17 +39,16 @@ class Bench:
             "fixtures": [],
         }
 
-    def dispense(self, plate: Annotated[str, Labware("plate")],
-                 wells: Annotated[WellSelection, Wells("plate")],
+    def dispense(self, wells: Annotated[WellSelection, Wells("plate")],
                  volume_ul: Annotated[Union[float, List[float]], PerWell("wells")] = 10.0,
                  tips: Annotated[str, Labware("tip_rack")] = "tips") -> None:
-        self.calls.append((plate, wells, volume_ul))
+        self.calls.append((wells, volume_ul))
 
-    def read(self, plate: Annotated[str, Labware("plate")],
-             wells: Annotated[WellSelection, Wells("plate")]) -> Dict[str, float]:
-        """One number per well: its position in the plate, so a test can tell them apart."""
+    def read(self, wells: Annotated[WellSelection, Wells("plate")]) -> Dict[str, float]:
+        """One number per well (its position in the plate, so a test can tell them apart), keyed
+        by the well alone, the way most readers key a plate."""
         order = [name for row in GRID for name in row]
-        return {name: float(order.index(name)) for name in expand_wells(wells, GRID)}
+        return {well: float(order.index(well)) for _, well in expand_references(wells, {"plate_1": GRID})}
 
     def move(self, plate: Annotated[str, Labware()], to: Annotated[str, Site()]) -> None:
         pass
@@ -102,14 +102,29 @@ def test_compacting_a_selection_gives_text_that_expands_back_to_it(selection):
     assert compact_wells(positions, PLATE96) == selection
 
 
+def test_wells_are_written_with_their_labware_as_pylabrobot_writes_them():
+    assert parse_references("assay_plate[A1:H1]") == [("assay_plate", "A1:H1")]
+    assert parse_references("p1[A1, B2], p2[C3]; p3") == [("p1", "A1, B2"), ("p2", "C3"), ("p3", None)]
+    assert parse_references(["p1[A1]", "p1[B1]"]) == [("p1", "A1"), ("p1", "B1")]
+    grids, kinds = {"p1": PLATE96, "tips": PLATE96}, {"p1": "plate", "tips": "tip_rack"}
+    assert expand_references("p1[A1:B1], p1[H12]", grids) == [("p1", "A1"), ("p1", "B1"), ("p1", "H12")]
+    assert len(expand_references("p1", grids)) == 96, "a bare name is every well"
+    for bad, why in [("A1", "write wells with their labware"), ("p9[A1]", "not on this worktable"),
+                     ("p1[A13]", "'A13' is not a position on p1"), ("p1[A1", "labware\\[wells\\]")]:
+        with pytest.raises(ValueError, match=why):
+            expand_references(bad, grids)
+    with pytest.raises(ValueError, match="is a tip rack, not a plate"):
+        expand_references("tips[A1]", grids, kinds, ("plate",))
+
+
 # --- what the schema says ----------------------------------------------------------------------
 
 def test_markers_reach_the_schema_and_labware_arguments_list_the_worktable(bench):
     schema = app.state.instrument_schemas["bench"]
     params = schema["dispense"]["parameters"]
-    assert params["plate"]["options"] == ["plate_1"], "only labware of the category asked for"
-    assert params["tips"]["options"] == ["tips"]
-    assert params["wells"]["type"] == "wells" and params["wells"]["wells"] == {"on": "plate"}
+    assert params["tips"]["options"] == ["tips"], "only labware of the category asked for"
+    assert params["wells"]["type"] == "wells" and params["wells"]["wells"] == {"labware": ["plate"]}
+    assert "options" not in params["wells"], "wells are picked on a plate, not chosen from a list"
     assert params["volume_ul"]["per_well"] == "wells" and params["volume_ul"]["numeric"] is True
     assert params["volume_ul"]["default"] == 10.0 and params["volume_ul"]["required"] is False
     move = schema["move"]["parameters"]
@@ -134,24 +149,24 @@ def test_every_labware_is_offered_to_the_pages_as_a_tray(bench):
 
 
 def test_wells_off_the_plate_are_refused_with_nothing_configured(bench):
-    def check(wells, plate="plate_1"):
-        return guard.check_params("bench", "dispense", {"plate": plate, "wells": wells})
+    def check(wells):
+        return guard.check_params("bench", "dispense", {"wells": wells})
 
-    assert check("A1:B2") == [] and check(["A1", "B3"]) == [] and check("all") == []
-    assert check("#well") == [] and check("A1", plate="#plate") == [], "checked once the run fills them in"
-    problems = check("A1:B4")
-    assert len(problems) == 1 and "'B4' is not a position" in problems[0] and "Plate 1 (2 x 3, A1 to B3)" in problems[0]
-    assert "'C1'" in check(["A1", "C1"])[0]
-    # A labware that is not there is the labware argument's own error (its choices), said once.
-    unknown = check("A1", plate="plate_9")
-    assert len(unknown) == 1 and "plate_9" in unknown[0]
+    assert check("plate_1[A1:B2]") == [] and check(["plate_1[A1]", "plate_1[B3]"]) == [] and check("plate_1") == []
+    assert check("#well") == [] and check(["#well"]) == [], "checked once the run fills them in"
+    problems = check("plate_1[A1:B4]")
+    assert len(problems) == 1 and "'B4' is not a position on plate_1" in problems[0]
+    assert "'C1'" in check(["plate_1[A1]", "plate_1[C1]"])[0]
+    assert "'plate_9' is not on this worktable" in check("plate_9[A1]")[0]
+    assert "write wells with their labware" in check("A1")[0]
+    assert "is a tip rack, not a plate" in check("tips[A1]")[0]
 
 
 @pytest.mark.asyncio
 async def test_a_run_naming_a_well_the_plate_does_not_have_never_starts(bench):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.post("/api/queue/runs", json={"name": "Off the plate", "sequence": [
-            {"instrument": "bench", "method": "dispense", "params": {"plate": "plate_1", "wells": "A1:A4"}},
+            {"instrument": "bench", "method": "dispense", "params": {"wells": "plate_1[A1:A4]"}},
         ]})
         assert resp.status_code >= 400 and "'A4' is not a position" in resp.text
     assert bench.calls == []
@@ -160,9 +175,12 @@ async def test_a_run_naming_a_well_the_plate_does_not_have_never_starts(bench):
 # --- one call for a group of rows ---------------------------------------------------------------
 
 def test_a_result_keyed_by_well_goes_to_each_row_by_its_own_well():
-    step = {"_rows": [4, 5, 6], "_per_row": ["wells", "volume_ul"], "wells": ["A1", "B1", "A2"], "volume_ul": [1, 2, 3]}
-    shares = spread_over_rows(step, {"absorbance": {"A1": 0.1, "B1": 0.2, "A2": 0.3, "B2": 9}, "note": "ok"})
-    assert shares == {4: {"absorbance": 0.1}, 5: {"absorbance": 0.2}, 6: {"absorbance": 0.3}}
+    step = {"_rows": [4, 5, 6], "_per_row": ["wells", "volume_ul"],
+            "wells": ["p[A1]", "p[B1]", "p[A2]"], "volume_ul": [1, 2, 3]}
+    # Keyed the way the step was given its wells, or by the well alone (most readers).
+    for result in ({"p[A1]": 0.1, "p[B1]": 0.2, "p[A2]": 0.3, "p[B2]": 9}, {"A1": 0.1, "B1": 0.2, "A2": 0.3, "B2": 9}):
+        shares = spread_over_rows(step, {"absorbance": result, "note": "ok"})
+        assert shares == {4: {"absorbance": 0.1}, 5: {"absorbance": 0.2}, 6: {"absorbance": 0.3}}
 
 
 def test_a_list_as_long_as_the_group_goes_by_position_and_anything_else_stays_whole():
@@ -175,15 +193,14 @@ def test_a_list_as_long_as_the_group_goes_by_position_and_anything_else_stays_wh
 
 @pytest.mark.asyncio
 async def test_a_batch_step_over_three_rows_is_one_call_and_each_row_reads_its_own_result(bench):
-    wells = ["A1", "B1", "B3"]
+    wells = ["plate_1[A1]", "plate_1[B1]", "plate_1[B3]"]
     sequence = [
         # What the Iterate page sends for a batch step whose wells and volumes are columns.
         {"instrument": "bench", "method": "dispense",
-         "params": {"plate": "plate_1", "wells": wells, "volume_ul": [10, 20, 30],
+         "params": {"wells": wells, "volume_ul": [10, 20, 30],
                     "_row": 0, "_block": 0, "_rows": [0, 1, 2], "_per_row": ["wells", "volume_ul"]}},
         {"instrument": "bench", "method": "read", "returnVar": "reading",
-         "params": {"plate": "plate_1", "wells": wells,
-                    "_row": 0, "_block": 1, "_rows": [0, 1, 2], "_per_row": ["wells"]}},
+         "params": {"wells": wells, "_row": 0, "_block": 1, "_rows": [0, 1, 2], "_per_row": ["wells"]}},
     ]
     for row in range(3):
         sequence += [
@@ -200,7 +217,7 @@ async def test_a_batch_step_over_three_rows_is_one_call_and_each_row_reads_its_o
         assert resp.status_code == 200, resp.text
         run = await _finish(ac, resp.json()["run_id"])
     assert run["status"] == "completed", run
-    assert bench.calls == [("plate_1", wells, [10, 20, 30])], "one call, carrying every row's value"
+    assert bench.calls == [(wells, [10, 20, 30])], "one call, carrying every row's value"
 
     read = next(s for s in run["steps"] if s["method"] == "read")
     assert read["outputs"]["result"] == {"A1": 0.0, "B1": 3.0, "B3": 5.0}
@@ -241,9 +258,9 @@ def handler(tmp_path, capsys):
 def test_the_edge_reads_a_plr_liquid_handler_with_nothing_shared_but_names(handler):
     schema = inspect_device_module(handler)
     transfer = schema["transfer"]["parameters"]
-    assert transfer["source"]["options"] == ["reservoir", "assay_plate"]
+    assert transfer["targets"]["wells"] == {"labware": ["plate", "reservoir", "tube_rack"]}
     assert transfer["tip_rack"]["options"] == ["tips_300"]
-    assert transfer["dest_wells"]["wells"] == {"on": "dest"} and transfer["vols"]["per_well"] == "dest_wells"
+    assert transfer["target_vols"]["per_well"] == "targets"
     assert schema["move_plate"]["parameters"]["to"]["options"][:3] == ["1", "2", "3"]
     assert schema["transfer"]["is_coroutine"] is False, "synchronous, on the package's own loop"
     assert not any(name.startswith("__ivoryos") for name in schema)
@@ -254,11 +271,12 @@ def test_a_plr_step_with_wells_off_the_plate_is_refused_by_the_guard(handler):
     app.state.instruments["lh"] = handler
     app.state.instrument_schemas["lh"] = inspect_device_module(handler)
     try:
-        call = {"source": "reservoir", "source_wells": "A1", "dest": "assay_plate", "vols": 10, "tip_rack": "tips_300"}
-        assert guard.check_params("lh", "transfer", {**call, "dest_wells": "A1:H12"}) == []
-        problems = guard.check_params("lh", "transfer", {**call, "dest_wells": "A1:A13"})
+        call = {"source": "reservoir[A1]", "target_vols": 10, "tip_rack": "tips_300"}
+        assert guard.check_params("lh", "transfer", {**call, "targets": "assay_plate[A1:H12]"}) == []
+        problems = guard.check_params("lh", "transfer", {**call, "targets": "assay_plate[A1:A13]"})
         assert len(problems) == 1 and "'A13' is not a position" in problems[0]
-        assert "is not one of its choices" in guard.check_params("lh", "transfer", {**call, "dest": "plate_9", "dest_wells": "A1"})[0]
+        assert "'plate_9' is not on this worktable" in guard.check_params("lh", "transfer", {**call, "targets": "plate_9[A1]"})[0]
+        assert "is a tip rack" in guard.check_params("lh", "transfer", {**call, "targets": "tips_300[A1]"})[0]
     finally:
         app.state.instruments.pop("lh")
         app.state.instrument_schemas.pop("lh")
@@ -279,7 +297,7 @@ def test_the_labware_view_serves_the_worktable_follows_it_and_changes_it(handler
     assert labware_view.state()["worktables"]["lh"]["labware"]["reservoir"]["A2"]["liquids"] == {"dye": 5000.0}
 
     labware_view._start(labware_view.plugin.instruments)
-    handler.load_liquid("assay_plate", "A1:B1", "sample", 50)
+    handler.load_liquid("assay_plate[A1:B1]", "sample", 50)
     assert published[-1]["worktable"] == "lh" and published[-1]["event"]["action"] == "load"
     assert published[-1]["state"]["labware"]["assay_plate"]["B1"]["volume_ul"] == 50.0 and not published[-1]["relayout"]
     handler.move_plate("assay_plate", "9")

@@ -93,6 +93,7 @@ export { ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeade
 export { TopNavBar, TopNavItem, TopNavButton, TopNavIconLink, TopNavDivider, TopNavBrand, TopNavMenu, TopNavMenuItem, topNavPill, BRAND_MARK } from './TopNav';
 export { fieldGuard, trayOf, guardsFor, guardHint, guardProblem, guardSuggestions, trayForGuards, orderPositions } from './safety';
 export type { SafetyView, FieldGuard, TrayView, FieldRef } from './safety';
-export { takesRowList, labwareTrayName, wellsTray, expandWells, compactWells, wellsProblem, wellCount } from './labware';
+export { takesRowList, wellChoices, expandWells, compactWells, parseReferences, expandReferences, formatReference, referencesProblem, referenceCount, referenceStart } from './labware';
+export type { TrayChoice } from './labware';
 export { TrayPicker } from './TrayPicker';
 export type { TrayPickerProps } from './TrayPicker';

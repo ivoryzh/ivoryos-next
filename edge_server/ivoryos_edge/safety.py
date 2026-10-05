@@ -86,7 +86,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import paths
-from .labware import declared_trays, expand_wells, layout_of, tray_of
+from .labware import declared_trays, expand_references, layout_of
 from .introspection import has_member, resolve_callable, resolve_output_path, serialize_result, _MISSING
 
 SAFETY_FORMAT = "ivoryos-safety/1"
@@ -1035,29 +1035,29 @@ class Guard:
 
     @staticmethod
     def _check_wells(instrument: str, method: str, params: dict, method_schema: dict, deck: Deck) -> List[str]:
-        """Wells that are not on the labware the same call names (labware.py). Declared by the
-        driver, like an Enum's choices, so nothing has to be configured for it to hold."""
+        """Wells that are not on the worktable: an unknown labware, the wrong kind, or a position it
+        does not have (labware.py). Declared by the driver, like an Enum's choices, so nothing has
+        to be configured for it to hold."""
         out = []
         layout = None
         for param, info in (method_schema.get("parameters") or {}).items():
-            on = (info.get("wells") or {}).get("on") if isinstance(info, dict) else None
-            if not on:
+            if not isinstance(info, dict) or not isinstance(info.get("wells"), dict):
                 continue
-            value, labware = _argument(params, method_schema, param), _argument(params, method_schema, on)
+            value = _argument(params, method_schema, param)
             listed = value if isinstance(value, (list, tuple)) else [value]
-            if value is _MISSING or labware is _MISSING or _is_reference(labware) or any(_is_reference(v) for v in listed):
+            if value is _MISSING or value is None or value == "" or any(_is_reference(v) for v in listed):
                 continue
-            if isinstance(value, str) and value.strip().lower() == "next":
-                continue  # "the next unused tips": not a position
-            layout = layout if layout is not None else (layout_of(deck.instruments.get(instrument)) or {})
-            entry = (layout.get("labware") or {}).get(str(labware))
-            if entry is None:
-                continue  # an unknown labware is refused by its own argument's choices
-            tray = tray_of(str(labware), entry)
+            if layout is None:
+                layout = layout_of(deck.instruments.get(instrument)) or {}
+            labware = layout.get("labware") or {}
+            if not labware:
+                continue  # an instrument that reports no worktable cannot be checked here
             try:
-                expand_wells(value, tray["grid"])
+                expand_references(value, {name: entry.get("grid") or [] for name, entry in labware.items()},
+                                  {name: entry.get("category") for name, entry in labware.items()},
+                                  info["wells"].get("labware") or ())
             except ValueError as e:
-                out.append(f"{instrument}.{method}: {param}: {e} on {describe_tray(str(labware), tray)}.")
+                out.append(f"{instrument}.{method}: {param}: {e}.")
         return out
 
     def check_run(self, parameters: dict, prep: list, sequence: list, cleanup: list) -> List[str]:

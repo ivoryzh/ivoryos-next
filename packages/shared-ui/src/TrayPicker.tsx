@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { orderPositions, type TrayView } from './safety';
+import type { TrayChoice } from './labware';
 
 /**
  * A tray seen from above: rows by columns, pick the positions to use.
@@ -15,23 +16,37 @@ import { orderPositions, type TrayView } from './safety';
  * `multiple` is a column of a spreadsheet (click, drag a rectangle, or click a row or column
  * heading); without it one click picks a position and closes. Blocked positions are drawn and
  * cannot be picked. The grid comes from the edge (safety.ts): nothing here names a position.
+ *
+ * With `choices` (a wells argument that names its own labware, `plate[A1:H1]`), the plate is
+ * chosen here too, and `onPick` says which one. Changing plate starts the picking over.
  */
 export interface TrayPickerProps {
   tray: TrayView;
   title?: string;
   multiple?: boolean;
-  /** Positions already chosen, e.g. what the column holds now. */
+  /** Positions already chosen, e.g. what the column holds now (on `tray`). */
   initial?: string[];
-  onPick: (positions: string[]) => void;
+  /** Labware to choose between; `tray` is the one shown first. */
+  choices?: TrayChoice[];
+  onPick: (positions: string[], choice?: TrayChoice) => void;
   onClose: () => void;
 }
 
-export function TrayPicker({ tray, title, multiple = false, initial = [], onPick, onClose }: TrayPickerProps) {
+export function TrayPicker({ tray: first, title, multiple = false, initial = [], choices, onPick, onClose }: TrayPickerProps) {
+  const [choiceName, setChoiceName] = useState(() => choices?.find((c) => c.tray === first)?.name ?? choices?.[0]?.name);
+  const choice = choices?.find((c) => c.name === choiceName);
+  const tray = choice?.tray ?? first;
   const blocked = useMemo(() => new Set(tray.blocked), [tray]);
   const usable = useMemo(() => tray.grid.flat().filter((p) => !blocked.has(p)), [tray, blocked]);
   const [picked, setPicked] = useState<Set<string>>(() => new Set(initial.filter((p) => usable.includes(p))));
   // A plate on a liquid handler is worked column by column; a tray says which way it runs.
   const [order, setOrder] = useState<'row' | 'column'>(tray.order === 'column' ? 'column' : 'row');
+  const choose = (name: string) => {
+    setChoiceName(name);
+    setPicked(new Set());
+    const next = choices?.find((c) => c.name === name)?.tray;
+    if (next) setOrder(next.order === 'column' ? 'column' : 'row');
+  };
   // A drag paints a rectangle: adding when it started on an empty well, removing otherwise.
   const drag = useRef<{ r: number; c: number; add: boolean; base: Set<string> } | null>(null);
 
@@ -82,15 +97,25 @@ export function TrayPicker({ tray, title, multiple = false, initial = [], onPick
       data-ivoryos-popover
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div role="dialog" aria-label={title || tray.label} className="flex max-h-[90vh] max-w-[95vw] flex-col rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-white/10 dark:bg-[#1a1a1a]">
+      <div role="dialog" aria-label={title || tray.label} className="flex max-h-[90vh] min-w-[min(30rem,95vw)] max-w-[95vw] flex-col rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-white/10 dark:bg-[#1a1a1a]">
         <header className="flex items-center gap-3 border-b border-gray-200 px-5 py-3 dark:border-white/10">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-sm font-bold text-gray-900 dark:text-gray-100">{title || tray.label}</h2>
             <p className="text-[11px] text-gray-500 dark:text-gray-400">
-              {tray.label} · {tray.rows} x {tray.columns}
+              {choices ? '' : `${tray.label} · `}{tray.rows} x {tray.columns}
               {multiple ? ' · click, drag, or click a row or column heading' : ' · click a position'}
             </p>
           </div>
+          {choices && choices.length > 0 && (
+            <select
+              aria-label="Labware"
+              value={choiceName}
+              onChange={(e) => choose(e.target.value)}
+              className="h-8 max-w-[14rem] shrink-0 rounded-lg border border-gray-200 bg-white px-2 font-mono text-xs text-gray-800 focus:border-accent focus:outline-none dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+            >
+              {choices.map((c) => <option key={c.name} value={c.name}>{c.label}</option>)}
+            </select>
+          )}
           <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-white/10 dark:hover:text-gray-200">
             <X className="h-4 w-4" />
           </button>
@@ -135,7 +160,7 @@ export function TrayPicker({ tray, title, multiple = false, initial = [], onPick
                             paint(r, c);
                           }}
                           onMouseEnter={() => { if (multiple) paint(r, c); }}
-                          onClick={() => { if (!multiple && !isBlocked) { onPick([name]); onClose(); } }}
+                          onClick={() => { if (!multiple && !isBlocked) { onPick([name], choice); onClose(); } }}
                           className={`${size} flex items-center justify-center rounded-full border font-mono leading-none transition-colors ${
                             isBlocked
                               ? 'cursor-not-allowed border-dashed border-gray-300 text-gray-300 line-through dark:border-white/10 dark:text-gray-600'
@@ -156,7 +181,10 @@ export function TrayPicker({ tray, title, multiple = false, initial = [], onPick
         </div>
 
         {multiple && (
-          <footer className="flex flex-wrap items-center gap-2 border-t border-gray-200 px-5 py-3 text-xs dark:border-white/10">
+          // `w-0 min-w-full`: the footer fills the dialog but never widens it, so the count and the
+          // first/last text changing as wells are picked cannot change the dialog's width. Those
+          // two also have room for their longest text, so nothing in the row shifts either.
+          <footer className="flex w-0 min-w-full flex-wrap items-center gap-2 border-t border-gray-200 px-5 py-3 text-xs dark:border-white/10">
             <span className="text-gray-500 dark:text-gray-400">Visit</span>
             {(['row', 'column'] as const).map((o) => (
               <button
@@ -170,17 +198,20 @@ export function TrayPicker({ tray, title, multiple = false, initial = [], onPick
             ))}
             <button type="button" onClick={() => setPicked(new Set(usable))} className="ml-2 rounded-md px-2 py-1 font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10">All</button>
             <button type="button" onClick={() => setPicked(new Set())} className="rounded-md px-2 py-1 font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10">Clear</button>
-            <span className="ml-auto text-gray-500 dark:text-gray-400">
-              {ordered.length === 0 ? 'Nothing picked' : `${ordered[0]} first, ${ordered[ordered.length - 1]} last`}
-            </span>
-            <button
-              type="button"
-              disabled={ordered.length === 0}
-              onClick={() => { onPick(ordered); onClose(); }}
-              className="rounded-lg bg-accent px-3 py-1.5 font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-50"
-            >
-              Use {ordered.length} {ordered.length === 1 ? 'position' : 'positions'}
-            </button>
+            {/* Kept together, so on a narrow tray they wrap as one, to the right. */}
+            <div className="ml-auto flex items-center gap-2">
+              <span className="min-w-[8.5rem] text-right tabular-nums text-gray-500 dark:text-gray-400">
+                {ordered.length === 0 ? 'Nothing picked' : `${ordered[0]} first, ${ordered[ordered.length - 1]} last`}
+              </span>
+              <button
+                type="button"
+                disabled={ordered.length === 0}
+                onClick={() => { onPick(ordered, choice); onClose(); }}
+                className="min-w-[8.5rem] rounded-lg bg-accent px-3 py-1.5 text-center font-semibold tabular-nums text-on-accent hover:bg-accent-hover disabled:opacity-50"
+              >
+                Use {ordered.length} {ordered.length === 1 ? 'position' : 'positions'}
+              </button>
+            </div>
           </footer>
         )}
       </div>

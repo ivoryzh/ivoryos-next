@@ -1,9 +1,9 @@
 """Labware: wells as arguments, labware as driver-declared trays, and a batch step that acts on
-every row of its group in one call (labware.py, plr.py, queue.spread_over_rows).
+every row of its group in one call (labware.py, queue.spread_over_rows, labware_view).
 
 The first half uses a small driver with no robot library behind it, because none of the edge's
-side depends on one. The second half runs the PyLabRobot adapter on its simulator and is skipped
-where PyLabRobot is not installed.
+side depends on one. The second half reads plr-ivoryos's PyLabRobot liquid handler on its
+simulator and is skipped where that package (0.2) is not installed.
 """
 
 import asyncio
@@ -214,115 +214,58 @@ async def test_a_batch_step_over_three_rows_is_one_call_and_each_row_reads_its_o
     assert [s["outputs"]["result"] for s in echoes[1:]] == ["3.0", "5.0"]
 
 
-# --- the PyLabRobot adapter, on its simulator ----------------------------------------------------
+# --- a PyLabRobot liquid handler (plr-ivoryos), as the edge reads it ----------------------------------
+# The adapter's own behaviour is tested in the plr-ivoryos repository. What is checked here is the
+# meeting point: the edge reads that package's markers and worktable by duck typing, with nothing
+# imported either way. Skipped where plr-ivoryos 0.2 is not installed:
+#     uv run --extra test --with-editable ../IvoryOS-PyLabRobot-Integration pytest ...
 
-OT2 = [
-    {"slot": 1, "labware": "opentrons_96_tiprack_300ul", "name": "tips_300"},
-    {"slot": 2, "labware": "nest_12_troughplate_15000uL_Vb", "name": "reservoir"},
-    {"slot": 5, "labware": "cor_96_wellplate_360uL_Fb", "name": "assay_plate"},
-]
-LIQUIDS = [{"labware": "reservoir", "wells": "A1", "liquid": "buffer", "volume_ul": 10000},
-           {"labware": "reservoir", "wells": "A2", "liquid": "dye", "volume_ul": 5000}]
+WORKTABLE = {"deck_type": "OTDeck", "resources": [
+    {"name": "tips_300", "type": "opentrons_96_tiprack_300ul", "slot": 1},
+    {"name": "reservoir", "type": "nest_12_troughplate_15000uL_Vb", "slot": 2},
+    {"name": "assay_plate", "type": "cor_96_wellplate_360uL_Fb", "slot": 5},
+], "liquids": [{"labware": "reservoir", "wells": "A2", "liquid": "dye", "volume_ul": 5000}]}
 
 
 @pytest.fixture
-def handler(capsys):
-    pytest.importorskip("pylabrobot")
-    from ivoryos_edge.plr import PLRLiquidHandler
-    return PLRLiquidHandler(deck="ot2", channels=8, layout=OT2, liquids=LIQUIDS)
+def handler(tmp_path, capsys):
+    plr_ivoryos = pytest.importorskip("plr_ivoryos")
+    if not hasattr(plr_ivoryos, "worktable"):
+        pytest.skip("plr-ivoryos older than 0.2")
+    import json
+    path = tmp_path / "worktable.json"
+    path.write_text(json.dumps(WORKTABLE))
+    return plr_ivoryos.LiquidHandler(simulated=True, deck_json=str(path))
 
 
-def test_the_adapter_reports_its_worktable_and_its_steps_name_what_is_on_it(handler):
+def test_the_edge_reads_a_plr_liquid_handler_with_nothing_shared_but_names(handler):
     schema = inspect_device_module(handler)
     transfer = schema["transfer"]["parameters"]
-    assert transfer["source"]["options"] == ["reservoir", "assay_plate"], "the trash is not a place to pipette"
-    assert transfer["tips"]["options"] == ["tips_300"]
-    assert transfer["dest_wells"]["wells"] == {"on": "dest"} and transfer["volume_ul"]["per_well"] == "dest_wells"
+    assert transfer["source"]["options"] == ["reservoir", "assay_plate"]
+    assert transfer["tip_rack"]["options"] == ["tips_300"]
+    assert transfer["dest_wells"]["wells"] == {"on": "dest"} and transfer["vols"]["per_well"] == "dest_wells"
     assert schema["move_plate"]["parameters"]["to"]["options"][:3] == ["1", "2", "3"]
-    assert schema["transfer"]["is_coroutine"] is True
-
-    layout = handler.__ivoryos_labware__()
-    plate = layout["labware"]["assay_plate"]
-    assert plate["category"] == "plate" and plate["site"] == "5" and plate["max_volume_ul"] == 360
-    assert len(plate["grid"]) == 8 and plate["grid"][7][11] == "H12" and len(plate["spots"]) == 96
-    assert layout["labware"]["reservoir"]["category"] == "reservoir" and len(layout["labware"]["reservoir"]["grid"][0]) == 12
-    assert layout["deck"]["kind"] == "OTDeck" and len(layout["sites"]) == 12
-    assert [f["category"] for f in layout["fixtures"]] == ["trash"]
+    assert schema["transfer"]["is_coroutine"] is False, "synchronous, on the package's own loop"
+    assert not any(name.startswith("__ivoryos") for name in schema)
     assert set(declared_trays({"lh": handler})) == {"lh:tips_300", "lh:reservoir", "lh:assay_plate"}
 
 
-@pytest.mark.asyncio
-async def test_a_reservoir_feeds_three_columns_eight_channels_at_a_time(handler):
-    events = []
-    handler.__ivoryos_labware_events__(events.append)
-    delivered = await handler.transfer(source="reservoir", source_wells="A1", dest="assay_plate",
-                                       dest_wells="A1:H3", volume_ul=100, tips="tips_300")
-    assert len(delivered) == 24 and set(delivered.values()) == {100.0}
-    assert await handler.tips_left("tips_300") == 96 - 24
-    assert await handler.read_volumes("reservoir", "A1") == {"A1": 10000 - 2400}
-    # Three groups of eight: tips, aspirate, dispense, drop, each once per group.
-    assert [e["action"] for e in events] == ["pick_up_tips", "aspirate", "dispense", "drop_tips"] * 3
-    assert events[2]["labware"] == "assay_plate" and events[2]["wells"] == expand_wells("A1:H1", PLATE96)
-
-    # One volume per well, a well given nothing skipped, and what each well holds remembered.
-    second = await handler.transfer(source="reservoir", source_wells="A2", dest="assay_plate",
-                                    dest_wells=["A1", "B1", "C1"], volume_ul=[10, 0, 30], tips="tips_300",
-                                    new_tip="once")
-    assert second == {"A1": 10.0, "C1": 30.0}
-    state = handler.__ivoryos_labware_state__()
-    assert state["labware"]["assay_plate"]["A1"] == {"volume_ul": 110.0, "liquids": {"buffer": 100.0, "dye": 10.0}}
-    assert state["labware"]["assay_plate"]["B1"]["liquids"] == {"buffer": 100.0}
-    assert state["labware"]["tips_300"]["A1"] == {"tip": False} and state["labware"]["tips_300"]["A12"] == {"tip": True}
-    assert state["channels"] == [False] * 8
+def test_a_plr_step_with_wells_off_the_plate_is_refused_by_the_guard(handler):
+    app.state.instruments["lh"] = handler
+    app.state.instrument_schemas["lh"] = inspect_device_module(handler)
+    try:
+        call = {"source": "reservoir", "source_wells": "A1", "dest": "assay_plate", "vols": 10, "tip_rack": "tips_300"}
+        assert guard.check_params("lh", "transfer", {**call, "dest_wells": "A1:H12"}) == []
+        problems = guard.check_params("lh", "transfer", {**call, "dest_wells": "A1:A13"})
+        assert len(problems) == 1 and "'A13' is not a position" in problems[0]
+        assert "is not one of its choices" in guard.check_params("lh", "transfer", {**call, "dest": "plate_9", "dest_wells": "A1"})[0]
+    finally:
+        app.state.instruments.pop("lh")
+        app.state.instrument_schemas.pop("lh")
 
 
-@pytest.mark.asyncio
-async def test_what_cannot_be_done_is_said_before_anything_moves(handler):
-    async def refused(**changes):
-        call = {"source": "reservoir", "source_wells": "A1", "dest": "assay_plate", "dest_wells": "A1",
-                "volume_ul": 10, "tips": "tips_300", **changes}
-        with pytest.raises(ValueError) as error:
-            await handler.transfer(**call)
-        return str(error.value)
-
-    assert "'A13' is not a position on assay_plate" in await refused(dest_wells="A13")
-    assert "not a labware on this worktable" in await refused(dest="plate_9")
-    assert "do not pair up" in await refused(source_wells="A1:A3", dest_wells="A1:B1")
-    assert "2 values for 3 wells" in await refused(dest_wells="A1:C1", volume_ul=[1, 2])
-    assert "no tips are on the head" in await refused(new_tip="never")
-    assert await handler.tips_left("tips_300") == 96
-
-
-@pytest.mark.asyncio
-async def test_moving_a_plate_changes_where_the_worktable_says_it_is(handler):
-    await handler.move_plate("assay_plate", "6")
-    layout = handler.__ivoryos_labware__()
-    assert layout["labware"]["assay_plate"]["site"] == "6"
-    assert next(s for s in layout["sites"] if s["label"] == "5")["holds"] is None
-    with pytest.raises(ValueError, match="already holds reservoir"):
-        await handler.move_plate("assay_plate", "2")
-
-
-def test_a_hamilton_worktable_puts_labware_on_carriers(capsys):
-    pytest.importorskip("pylabrobot")
-    from ivoryos_edge.plr import PLRLiquidHandler
-    star = PLRLiquidHandler(deck="starlet", layout=[
-        {"rails": 3, "carrier": "TIP_CAR_480_A00", "name": "tip_carrier",
-         "sites": {"0": {"labware": "hamilton_96_tiprack_300uL_filter", "name": "tips"}}},
-        {"rails": 15, "carrier": "PLT_CAR_L5AC_A00", "name": "plates",
-         "sites": {"1": {"labware": "cor_96_wellplate_360uL_Fb", "name": "assay_plate"}}},
-    ])
-    layout = star.__ivoryos_labware__()
-    assert layout["deck"]["kind"] == "HamiltonSTARDeck"
-    assert layout["labware"]["assay_plate"]["site"] == "plates-1" and layout["labware"]["tips"]["site"] == "tip_carrier-0"
-    assert {f["name"] for f in layout["fixtures"] if f["category"] == "carrier"} == {"tip_carrier", "plates"}
-    assert sum(1 for s in layout["sites"] if s["name"].startswith("plates-")) == 5
-    with pytest.raises(ValueError, match="Did you mean"):
-        PLRLiquidHandler(deck="ot2", layout=[{"slot": 1, "labware": "cor_96_wellplate_360ul", "name": "p"}])
-
-
-@pytest.mark.asyncio
-async def test_the_labware_view_serves_the_worktable_and_follows_it(handler, monkeypatch):
+def test_the_labware_view_serves_the_worktable_follows_it_and_changes_it(handler, monkeypatch):
+    from fastapi.testclient import TestClient
     from ivoryos_edge import labware_view
 
     class Reader:  # shares the handler's worktable; must not be drawn as a second one
@@ -336,68 +279,23 @@ async def test_the_labware_view_serves_the_worktable_and_follows_it(handler, mon
     assert labware_view.state()["worktables"]["lh"]["labware"]["reservoir"]["A2"]["liquids"] == {"dye": 5000.0}
 
     labware_view._start(labware_view.plugin.instruments)
-    await handler.load_liquid("assay_plate", "A1:B1", "sample", 50)
+    handler.load_liquid("assay_plate", "A1:B1", "sample", 50)
     assert published[-1]["worktable"] == "lh" and published[-1]["event"]["action"] == "load"
     assert published[-1]["state"]["labware"]["assay_plate"]["B1"]["volume_ul"] == 50.0 and not published[-1]["relayout"]
-    await handler.move_plate("assay_plate", "9")
+    handler.move_plate("assay_plate", "9")
     assert published[-1]["relayout"] is True
 
-
-def test_a_worktable_is_rearranged_as_data_and_the_saved_layout_is_used_next_time(tmp_path, capsys):
-    pytest.importorskip("pylabrobot")
-    from ivoryos_edge.plr import PLRLiquidHandler, catalog
-
-    kinds = {entry["definition"]: entry["category"] for entry in catalog()}
-    assert kinds["cor_96_wellplate_360uL_Fb"] == "plate" and kinds["opentrons_96_tiprack_300ul"] == "tip_rack"
-    assert kinds["nest_12_troughplate_15000uL_Vb"] == "reservoir"
-    assert "Cor_96_wellplate_360ul_Fb" not in kinds, "an old spelling kept as an alias is not offered twice"
-
-    saved = str(tmp_path / "worktable.json")
-    first = PLRLiquidHandler(deck="ot2", layout=OT2, liquids=LIQUIDS, layout_file=saved)
-    seen = []
-    first.__ivoryos_labware_events__(seen.append)
-    first.__ivoryos_labware_edit__("place", site="6", definition="cor_96_wellplate_360uL_Fb", name="plate_2")
-    assert first.__ivoryos_labware__()["labware"]["plate_2"]["site"] == "6" and seen[-1]["action"] == "layout"
-    for change, why in [
-        ({"site": "6", "definition": "cor_96_wellplate_360uL_Fb", "name": "plate_3"}, "already holds plate_2"),
-        ({"site": "7", "definition": "cor_96_wellplate_360uL_Fb", "name": "plate_2"}, "already called 'plate_2'"),
-        ({"site": "7", "definition": "cor_96_wellplate_360uL_Fb", "name": "my plate"}, "starts with a letter"),
-        ({"site": "7", "definition": "no_such_plate", "name": "plate_3"}, "not a labware definition"),
-        ({"site": "99", "definition": "cor_96_wellplate_360uL_Fb", "name": "plate_3"}, "not a place"),
-    ]:
-        with pytest.raises(ValueError, match=why):
-            first.__ivoryos_labware_edit__("place", **change)
-    first.__ivoryos_labware_edit__("remove", name="reservoir")
-    assert "reservoir" not in first.__ivoryos_labware__()["labware"]
-
-    # The next start builds the worktable that was saved, not the one written in the script, and
-    # a liquid meant for a labware that is gone is left out rather than failing the deck.
-    again = PLRLiquidHandler(deck="ot2", layout=OT2, liquids=LIQUIDS, layout_file=saved)
-    assert set(again.__ivoryos_labware__()["labware"]) == {"tips_300", "assay_plate", "plate_2"}
-    assert inspect_device_module(again)["transfer"]["parameters"]["dest"]["options"] == ["assay_plate", "plate_2"]
-    # A layout saved for another kind of deck is not this one's.
-    other = PLRLiquidHandler(deck="starlet", layout=[], layout_file=saved)
-    assert "plate_2" not in other.__ivoryos_labware__()["labware"]
-
-
-def test_a_carrier_position_is_filled_and_emptied_the_same_way(tmp_path, capsys):
-    pytest.importorskip("pylabrobot")
-    from ivoryos_edge.plr import PLRLiquidHandler
-    saved = str(tmp_path / "worktable.json")
-    layout = [{"rails": 15, "carrier": "PLT_CAR_L5AC_A00", "name": "plates", "sites": {}}]
-    star = PLRLiquidHandler(deck="starlet", layout=layout, layout_file=saved)
-    star.__ivoryos_labware_edit__("place", site="plates-2", definition="cor_96_wellplate_360uL_Fb", name="assay_plate")
-    again = PLRLiquidHandler(deck="starlet", layout=layout, layout_file=saved)
-    assert again.__ivoryos_labware__()["labware"]["assay_plate"]["site"] == "plates-2"
-    again.__ivoryos_labware_edit__("remove", name="assay_plate")
-    # Only what the deck itself comes with is left (a STARlet has a rack of teaching needles).
-    left = PLRLiquidHandler(deck="starlet", layout=layout, layout_file=saved).__ivoryos_labware__()["labware"]
-    assert set(left) == {"teaching_tip_rack"}
-
-
-def test_a_worktable_built_in_a_script_is_not_rearranged_from_the_view(handler):
-    from ivoryos_edge.plr import PLRLiquidHandler
-    wrapped = PLRLiquidHandler(handler=handler._lh)
-    assert wrapped.__ivoryos_labware_catalog__() == []
-    with pytest.raises(ValueError, match="built in a script"):
-        wrapped.__ivoryos_labware_edit__("remove", name="assay_plate")
+    from fastapi import FastAPI
+    page = FastAPI()
+    page.include_router(labware_view.plugin.router)
+    with TestClient(page) as client:
+        catalog = client.get("/api/catalog").json()["worktables"]["lh"]
+        assert catalog["deck"] == "OTDeck" and "STARLetDeck" in [d["kind"] for d in catalog["decks"]]
+        assert any(e["definition"] == "cor_96_wellplate_360uL_Fb" for e in catalog["labware"])
+        refused = client.post("/api/edit", json={"worktable": "lh", "action": "place", "site": "2",
+                                                 "definition": "cor_96_wellplate_360uL_Fb", "name": "p2"})
+        assert refused.status_code == 400 and "already holds reservoir" in refused.json()["error"]
+        switched = client.post("/api/edit", json={"worktable": "lh", "action": "deck", "deck": "STARLetDeck"}).json()
+        assert switched["restart_needed"] and switched["layout"]["worktables"]["lh"]["deck"]["kind"] == "STARLetDeck"
+        assert switched["catalog"]["lh"]["deck"] == "STARLetDeck"
+        assert published[-1]["relayout"] is True

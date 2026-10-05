@@ -66,25 +66,29 @@ def get_state():
 
 @plugin.router.get("/api/catalog")
 def get_catalog():
-    """What can be put on each worktable that allows it: empty for one that cannot be rearranged here."""
+    """Per worktable, what can be put on it and which robots it can become (labware.py
+    CATALOG_METHOD). Empty lists for one that cannot be rearranged here."""
     out = {}
     for name, (instrument, _) in _worktables().items():
         catalog = getattr(instrument, CATALOG_METHOD, None)
-        out[name] = catalog() if callable(catalog) else []
+        found = catalog() if callable(catalog) else None
+        out[name] = found if isinstance(found, dict) else {"labware": [], "decks": [], "deck": None}
     return {"worktables": out}
 
 
 @plugin.router.post("/api/edit")
 def edit(change: dict):
-    """Place or remove a labware: {"worktable", "action": "place" | "remove", "site", "definition",
-    "name"}. This records what a person put on the worktable; nothing moves. Steps offer the new
-    labware after the deck restarts, since the edge reads those names into its schema at startup."""
+    """Change a worktable: {"worktable", "action": "place", "site", "definition", "name"},
+    {"action": "remove", "name"}, or {"action": "deck", "deck"} (start over on another robot's
+    worktable; the simulator only). This records what a person put on the worktable; nothing
+    moves. Steps offer the new labware after the deck restarts, since the edge reads those names
+    into its schema at startup."""
     found = _worktables().get(str(change.get("worktable")))
     apply = getattr(found[0], EDIT_METHOD, None) if found else None
-    if not callable(apply):
+    if not callable(apply):  # a driver that reports a worktable but cannot change it
         return JSONResponse(status_code=400, content={"error": "This worktable cannot be rearranged from here."})
     try:
         apply(str(change.get("action")), **{k: v for k, v in change.items() if k not in ("worktable", "action")})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
-    return {"layout": layout(), "restart_needed": True}
+    return {"layout": layout(), "catalog": get_catalog()["worktables"], "restart_needed": True}

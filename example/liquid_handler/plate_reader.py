@@ -4,7 +4,7 @@ It stands in for a real reader (PyLabRobot has backends for BioTek, BMG, Molecul
 others) so the example has a measurement that depends on what was pipetted: absorbance through
 the bottom of a well grows with the amount of dye in it, whatever it was diluted in.
 
-It shares the handler's worktable rather than owning one: its `plate` argument offers the
+It shares the plr-ivoryos LiquidHandler's worktable rather than owning one: its `plate` argument offers the
 handler's plates and its `wells` are picked on them (`__ivoryos_labware__` below), and the
 Labware view draws the worktable once, for the handler.
 """

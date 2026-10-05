@@ -3,7 +3,10 @@
 Every other instrument on a deck is a bag of methods taking numbers and names. A liquid handler
 is not: its arguments are *places* (well A1 of the assay plate), and one call acts on many of
 them at once. This module is the vocabulary that lets a driver say so, and nothing more. It
-knows nothing about any robot or library; `plr.py` is the PyLabRobot adapter built on it.
+knows nothing about any robot or library. The PyLabRobot liquid handler that speaks it is the
+`plr-ivoryos` package (`plr_ivoryos.LiquidHandler`), which defines its own copies of these markers:
+the edge reads them by duck typing (anything in `Annotated[...]` with an `ivoryos_schema()`, and
+the dunder methods below), so a driver package needs nothing from ivoryos_edge.
 
 A driver marks its arguments:
 
@@ -46,9 +49,11 @@ WellSelection = Union[str, List[str]]
 LAYOUT_METHOD = "__ivoryos_labware__"
 STATE_METHOD = "__ivoryos_labware_state__"
 EVENTS_METHOD = "__ivoryos_labware_events__"
-# Optional: a worktable that can be rearranged from the Labware view. `catalog()` lists what can
-# be put on it ([{"definition", "category"}]); `edit("place", site=, definition=, name=)` and
-# `edit("remove", name=)` change it and raise ValueError for what cannot be done.
+# Optional: a worktable that can be rearranged from the Labware view. `catalog()` says what can be
+# put on it and which robots it can become: {"labware": [{"definition", "category"}], "decks":
+# [{"kind", "label"}], "deck": <current kind>}. `edit("place", site=, definition=, name=)`,
+# `edit("remove", name=)` and `edit("deck", deck=)` change it and raise ValueError for what
+# cannot be done.
 CATALOG_METHOD = "__ivoryos_labware_catalog__"
 EDIT_METHOD = "__ivoryos_labware_edit__"
 ALL = "all"

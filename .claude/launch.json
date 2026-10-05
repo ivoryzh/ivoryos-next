@@ -21,30 +21,12 @@
         "run",
         "--project",
         "edge_server",
-        "--extra",
-        "plr",
+        "--with-editable",
+        "../IvoryOS-PyLabRobot-Integration",
         "python",
         "example/liquid_handler/demo.py"
       ],
       "port": 8083,
-      "autoPort": false
-    },
-    {
-      "name": "liquid-handler-starlet",
-      "runtimeExecutable": "env",
-      "runtimeArgs": [
-        "IVORYOS_LH_DECK=starlet",
-        "IVORYOS_PORT=8084",
-        "uv",
-        "run",
-        "--project",
-        "edge_server",
-        "--extra",
-        "plr",
-        "python",
-        "example/liquid_handler/demo.py"
-      ],
-      "port": 8084,
       "autoPort": false
     },
     {

@@ -102,7 +102,9 @@
     let layouts = {}, states = {}, current = null, zoomed = null;
     let hit = { labware: null, wells: new Set() }, hitTimer = null;
     // Rearranging the worktable: what can be placed, what is picked up, where it is about to go.
+    // Per worktable: {labware: [{definition, category}], decks: [{kind, label}], deck} (labware.py CATALOG_METHOD).
     let catalogs = {}, editing = false, armed = null, pending = null, changed = false, notice = null, query = "", removing = null;
+    let switching = null;  // the robot a person is about to start over on
 
     // The app's theme: its own setting in a browser, the system's inside the desktop app.
     function applyTheme() {
@@ -159,7 +161,7 @@
       }
       const layout = layouts[current], state = (states[current] || {}).labware || {};
       document.getElementById("title").textContent = current;
-      document.getElementById("kind").textContent = layout.deck.kind;
+      document.getElementById("kind").textContent = (layout.deck.label || layout.deck.kind) + (layout.deck.simulated ? " · simulated" : "");
 
       // Everything is in millimetres from the front left; the page's y runs the other way.
       const boxes = [...layout.sites, ...layout.fixtures, ...Object.values(layout.labware)];
@@ -234,7 +236,8 @@
         }
         return `<tr class="row ${zoomed === name ? "sel" : ""}" data-ware="${esc(name)}"><td class="name">${esc(name)}</td><td class="dim">${esc(ware.category.replace("_", " "))}</td><td class="dim">${ware.site ? esc(ware.site) : ""}</td><td class="grow">${esc(what)}</td>${editing ? `<td><button class="plain" data-remove="${esc(name)}">${removing === name ? "Really remove" : "Remove"}</button></td>` : ""}</tr>`;
       }).join("");
-      const canEdit = (catalogs[current] || []).length > 0, button = document.getElementById("edit");
+      const offered = catalogs[current] || {};
+      const canEdit = (offered.labware || []).length > 0 || (offered.decks || []).length > 0, button = document.getElementById("edit");
       button.hidden = !canEdit;
       button.classList.toggle("on", editing);
       button.textContent = editing ? "Done" : "Edit layout";
@@ -249,7 +252,7 @@
 
     function renderPalette() {
       const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-      const shown = (catalogs[current] || []).filter(d => words.every(w => d.definition.toLowerCase().includes(w)));
+      const shown = ((catalogs[current] || {}).labware || []).filter(d => words.every(w => d.definition.toLowerCase().includes(w)));
       let html = "", group = null;
       for (const d of shown) {
         if (d.category !== group) { group = d.category; html += `<div class="group">${esc(group.replace("_", " "))}s</div>`; }
@@ -265,6 +268,15 @@
       let html = "";
       if (notice) html += `<div id="notice" class="error">${esc(notice)}</div>`;
       else if (changed) html += `<div id="notice">The worktable changed. Steps offer the new labware once the deck restarts.<button class="act" id="restart">Restart deck</button></div>`;
+      const decks = (catalogs[current] || {}).decks || [], here = (catalogs[current] || {}).deck;
+      if (editing && decks.length) {
+        // Which robot this is, as configuration: the simulator can be any of them. Saved in the
+        // worktable file, so the next start is the same robot, with no flag or second script.
+        const target = switching && decks.find(d => d.kind === switching);
+        html += `<div id="placer">Robot <select id="deck">${decks.map(d => `<option value="${esc(d.kind)}" ${d.kind === (switching || here) ? "selected" : ""}>${esc(d.label)}</option>`).join("")}</select>`
+          + (target ? ` <span>Start over on ${target.starter ? "a ready-made" : "an empty"} ${esc(target.label)} worktable? What is on this one is taken off.</span><button class="act" id="switch">Switch</button><button class="plain" id="keep">Cancel</button>` : "")
+          + `</div>`;
+      }
       if (editing) {
         html += pending
           ? `<div id="placer">Place <b>${esc(pending.definition)}</b> at ${esc(pending.site)} as <input type="text" id="name" value="${esc(pending.name)}" size="14"><button class="act" id="place">Place</button><button class="plain" id="cancel">Cancel</button></div>`
@@ -281,8 +293,9 @@
       const response = await fetch("api/edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ worktable: current, ...change }) });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) { notice = result.error || "That could not be done."; renderEditor(); return; }
-      notice = null; changed = true; pending = null; armed = null; removing = null;
+      notice = null; changed = true; pending = null; armed = null; removing = null; switching = null;
       layouts = result.layout.worktables || layouts;
+      catalogs = result.catalog || catalogs;
       states = (await (await fetch("api/state")).json()).worktables || {};
       render(); renderEditor();
     }
@@ -295,6 +308,11 @@
     }
 
     document.addEventListener("input", e => { if (e.target.id === "query") { query = e.target.value; renderPalette(); } });
+    document.addEventListener("change", e => {
+      if (e.target.id !== "deck") return;
+      switching = e.target.value === (catalogs[current] || {}).deck ? null : e.target.value;
+      renderEditor();
+    });
     document.addEventListener("keydown", e => { if (e.target.id === "name" && e.key === "Enter") document.getElementById("place").click(); });
     document.addEventListener("dragstart", e => {
       const def = e.target.closest && e.target.closest("[data-def]");
@@ -314,7 +332,7 @@
 
     document.addEventListener("click", e => {
       const def = e.target.closest("[data-def]"), site = e.target.closest("[data-site]"), remove = e.target.closest("[data-remove]");
-      if (e.target.id === "edit") { editing = !editing; armed = pending = removing = notice = null; render(); renderEditor(); return; }
+      if (e.target.id === "edit") { editing = !editing; armed = pending = removing = notice = switching = null; render(); renderEditor(); return; }
       if (def) { armed = armed && armed.definition === def.dataset.def ? null : { definition: def.dataset.def, category: def.dataset.cat }; pending = null; render(); renderEditor(); return; }
       if (site) { choose(site.dataset.site); return; }
       if (remove) {
@@ -324,6 +342,8 @@
       }
       if (e.target.id === "place") { applyEdit({ action: "place", site: pending.site, definition: pending.definition, name: document.getElementById("name").value }); return; }
       if (e.target.id === "cancel") { pending = null; renderEditor(); return; }
+      if (e.target.id === "switch") { applyEdit({ action: "deck", deck: switching }); return; }
+      if (e.target.id === "keep") { switching = null; renderEditor(); return; }
       if (e.target.id === "restart") {
         fetch("/api/system/restart", { method: "POST" }).then(async r => {
           if (r.ok) { changed = false; editing = false; notice = null; }

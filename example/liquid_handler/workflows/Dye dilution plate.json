@@ -13,17 +13,17 @@
         "source_wells": "A1",
         "dest": "assay_plate",
         "dest_wells": "#well",
-        "volume_ul": "#buffer_ul",
-        "tips": "tips_300",
-        "new_tip": "once"
+        "new_tip": "once",
+        "vols": "#buffer_ul",
+        "tip_rack": "tips_300"
       },
       "arg_types": {
         "source": "str",
         "source_wells": "wells",
         "dest": "str",
         "dest_wells": "wells",
-        "volume_ul": "float",
-        "tips": "str",
+        "vols": "float",
+        "tip_rack": "str",
         "new_tip": "Literal"
       },
       "return": "",
@@ -40,17 +40,17 @@
         "source_wells": "A2",
         "dest": "assay_plate",
         "dest_wells": "#well",
-        "volume_ul": "#dye_ul",
-        "tips": "tips_300",
-        "new_tip": "always"
+        "new_tip": "always",
+        "vols": "#dye_ul",
+        "tip_rack": "tips_300"
       },
       "arg_types": {
         "source": "str",
         "source_wells": "wells",
         "dest": "str",
         "dest_wells": "wells",
-        "volume_ul": "float",
-        "tips": "str",
+        "vols": "float",
+        "tip_rack": "str",
         "new_tip": "Literal"
       },
       "return": "",

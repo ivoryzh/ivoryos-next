@@ -13,6 +13,13 @@ import { emptyConfig, type Problem, type SafetyConfig, type SafetyInfo, type Sch
 
 type Tab = 'limits' | 'trays' | 'states' | 'rules' | 'blocked';
 
+/**
+ * Drafting states, limits and rules from a sentence (POST /api/agent/safety, edge
+ * agent/safety_draft.py). Off the page for now, until there is a better way to offer it: the box
+ * below, `describe` and the edge route are all kept, and turning this back on brings it back.
+ */
+const DRAFT_FROM_WORDS = false;
+
 /** What the assistant drafted from a sentence (POST /api/agent/safety). */
 type Drafted = {
   ok: boolean;
@@ -247,7 +254,7 @@ export default function SafetyPage() {
               </div>
 
               {/* Say it in words. What comes back lands in the tabs, unsaved. */}
-              <div className="shrink-0 space-y-2">
+              {DRAFT_FROM_WORDS && <div className="shrink-0 space-y-2">
                 <div className="flex items-center gap-2">
                   <div className="relative min-w-0 flex-1">
                     <Sparkles className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
@@ -282,7 +289,7 @@ export default function SafetyPage() {
                     <button type="button" onClick={() => setDrafted(null)} aria-label="Dismiss" className="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10"><X className="h-3.5 w-3.5" /></button>
                   </div>
                 )}
-              </div>
+              </div>}
 
               {(errors.length > 0 || warnings.length > 0) && (
                 <ul className="max-h-32 shrink-0 space-y-1 overflow-y-auto rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-xs dark:border-white/10 dark:bg-white/5">

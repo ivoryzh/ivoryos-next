@@ -135,6 +135,10 @@ export default function RunWorkflowPage({ mode, stage }: {
   // Columns a batch step takes from every row of its group, in one call (spreadsheetRun.ts).
   const [listVariables, setListVariables] = useState<string[]>([]);
   const [batchSize, setBatchSize] = useState<string>('');
+  // Set once the page has read what it starts from. The batch size is saved only after that: saved
+  // on mount, the empty starting value removed the one kept from the last visit before the load
+  // (which awaits) could read it, so every visit began at batch size 1.
+  const [hasLoaded, setHasLoaded] = useState(false);
   
   const [executionState, setExecutionState] = useState<{
     isRunning: boolean;
@@ -386,16 +390,20 @@ export default function RunWorkflowPage({ mode, stage }: {
         }
       } catch (e) {
         console.error("Failed to load sequence", e);
+      } finally {
+        setHasLoaded(true);
       }
       })();
+    } else {
+      setHasLoaded(true);
     }
   }, []);
 
   useEffect(() => {
-    if (editingRef.current) return;
+    if (!hasLoaded || editingRef.current) return;
     if (batchSize) localStorage.setItem('ivoryos_batch_size', batchSize);
     else localStorage.removeItem('ivoryos_batch_size');
-  }, [batchSize]);
+  }, [batchSize, hasLoaded]);
 
   useEffect(() => {
     if (editingRef.current) return;

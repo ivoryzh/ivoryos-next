@@ -17,9 +17,16 @@
  * 2. **Groups are chunked by plain row POSITION, never by which rows currently hold data.** With
  *    5 rows and batch size 4, row 5 begins batch 2 on a freshly loaded, completely empty table —
  *    grouping that waits for content never appears at all until someone starts typing.
+ *
+ * One exception to rule 1, declared by the driver and never guessed: a parameter that takes one
+ * value per row (`takesRowList` in labware.ts: wells, a volume per well) is given every active
+ * row's value of its group, as a list, in the one call. A liquid handler with eight channels acts
+ * on eight samples at once; with this the table still has one row per sample, and "Batch" on the
+ * step with a batch size of 8 is what makes it one call per column. `rowListVariables` names
+ * those columns so the table draws them as read on every row.
  */
 
-import { RunConfigError, dynamicArgumentsOf, resolveBlockParams } from './runConfig';
+import { RunConfigError, dynamicArgumentsOf, resolveBlockParams, rowListArgumentsOf } from './runConfig';
 import { isFlowControlInstrument } from './flowControl';
 
 export type SpreadsheetRow = Record<string, any>;
@@ -80,6 +87,13 @@ export interface ExpandedSpreadsheetStep {
   returnBindings?: any[];
   /** `{argument: name}` for arguments that came from a `#name` — see `dynamicArgumentsOf`. */
   vars?: Record<string, string>;
+  /**
+   * A batch step that was handed one value per row: the rows, in the order of those values, and
+   * the arguments that carry them. The edge uses both to give each row its own share of what the
+   * step returns (`spread_over_rows` in queue.py).
+   */
+  rows?: number[];
+  perRow?: string[];
 }
 
 export interface ExpandOptions {
@@ -127,6 +141,19 @@ export function sequenceSegments(sequence: any[]): { start: number; end: number 
     i = end + 1;
   }
   return segments;
+}
+
+/**
+ * The columns a batch step takes from every row of its group rather than from the first: the
+ * exception to rule 1 above. Empty unless a driver declares such parameters.
+ */
+export function rowListVariables(sequence: any[], skip?: (name: string) => boolean): string[] {
+  const names = new Set<string>();
+  sequenceSegments(sequence).forEach(({ start, end }) => {
+    if (!sequence[start]?.isBatchAction) return;
+    for (let i = start; i <= end; i++) Object.values(rowListArgumentsOf(sequence[i], skip)).forEach((n) => names.add(n));
+  });
+  return Array.from(names);
 }
 
 const outputsOf = (block: any) => ({
@@ -183,7 +210,11 @@ export function expandSpreadsheet(opts: ExpandOptions): ExpandedSpreadsheetStep[
       const blocks = sequence.slice(segment.start, segment.end + 1);
 
       if (sequence[segment.start].isBatchAction) {
+        const active = group.rows
+          .map((row, r) => ({ row, index: group.start + r }))
+          .filter(({ row }) => isRowActive(row));
         blocks.forEach((block, k) => {
+          const perRow = Object.keys(rowListArgumentsOf(block, skip));
           out.push({
             instrument: block.instrument,
             method: block.method,
@@ -192,6 +223,8 @@ export function expandSpreadsheet(opts: ExpandOptions): ExpandedSpreadsheetStep[
               lookup: (v) => group.rows[0]?.[v],
               describe: (v) =>
                 `'${v}' for ${groupDesc} — fill it in on the first row of that group (row ${group.start + 1})`,
+              // ...except a parameter that takes one value per row, which gets every row's.
+              rowValues: (v) => active.map(({ row, index }) => ({ value: row[v], where: `'${v}' in row ${index + 1}` })),
               onMissing: 'throw',
               numeric: 'strict',
               skip,
@@ -199,6 +232,7 @@ export function expandSpreadsheet(opts: ExpandOptions): ExpandedSpreadsheetStep[
             originalRow: group.start,
             originalBlockIndex: segment.start + k,
             vars: dynamicArgumentsOf(block, skip),
+            ...(perRow.length ? { rows: active.map(({ index }) => index), perRow } : {}),
             ...outputsOf(block),
           });
         });
@@ -261,6 +295,7 @@ export function toSubmittedStep(step: ExpandedSpreadsheetStep) {
       _row: step.originalRow,
       _block: step.originalBlockIndex,
       ...(step.vars && Object.keys(step.vars).length ? { _vars: step.vars } : {}),
+      ...(step.rows && step.perRow?.length ? { _rows: step.rows, _per_row: step.perRow } : {}),
     },
     ...(step.returnVar ? { returnVar: step.returnVar } : {}),
     ...(step.returnBindings?.length ? { returnBindings: step.returnBindings } : {}),

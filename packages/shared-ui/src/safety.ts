@@ -45,6 +45,11 @@ export interface FieldRef {
   instrument: string;
   method: string;
   param: string;
+  /**
+   * The tray this field's value is a position on, when the step itself says so: a wells argument
+   * of a step whose labware argument is already chosen (labware.ts `wellsTray`).
+   */
+  tray?: string;
 }
 
 export const fieldGuard = (
@@ -59,9 +64,10 @@ export const trayOf = (safety: SafetyView | null | undefined, guard: FieldGuard 
 
 /** Every limit on the fields a variable feeds. A value has to satisfy all of them. */
 export const guardsFor = (safety: SafetyView | null | undefined, refs: FieldRef[] | undefined): FieldGuard[] =>
-  (refs || [])
-    .map((r) => fieldGuard(safety, r.instrument, r.method, r.param))
-    .filter((g): g is FieldGuard => !!g);
+  (refs || []).flatMap((r) => [
+    fieldGuard(safety, r.instrument, r.method, r.param),
+    r.tray && safety?.trays?.[r.tray] ? { tray: r.tray, source: r.instrument } : undefined,
+  ]).filter((g): g is FieldGuard => !!g);
 
 const show = (n: number) => String(Number(n.toPrecision(12)));
 

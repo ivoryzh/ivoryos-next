@@ -30,7 +30,8 @@ export function TrayPicker({ tray, title, multiple = false, initial = [], onPick
   const blocked = useMemo(() => new Set(tray.blocked), [tray]);
   const usable = useMemo(() => tray.grid.flat().filter((p) => !blocked.has(p)), [tray, blocked]);
   const [picked, setPicked] = useState<Set<string>>(() => new Set(initial.filter((p) => usable.includes(p))));
-  const [order, setOrder] = useState<'row' | 'column'>('row');
+  // A plate on a liquid handler is worked column by column; a tray says which way it runs.
+  const [order, setOrder] = useState<'row' | 'column'>(tray.order === 'column' ? 'column' : 'row');
   // A drag paints a rectangle: adding when it started on an empty well, removing otherwise.
   const drag = useRef<{ r: number; c: number; add: boolean; base: Set<string> } | null>(null);
 

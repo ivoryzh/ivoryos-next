@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, Scissors, ListChecks, MoreHorizontal, Wrench, ShieldCheck, Workflow as WorkflowIcon } from 'lucide-react';
+import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, Scissors, ListChecks, MoreHorizontal, Wrench, ShieldCheck, Grid3x3, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   LIBRARY_INSTRUMENT,
   collectReturnVars,
@@ -26,7 +26,9 @@ import { WorkflowDiff } from './WorkflowDiff';
 import { SuggestInput } from './SuggestInput';
 import { AutoFillToggle, LOGIC_TOOLS, ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, logicStepLook } from './Toolbox';
 import { FLOW_CONTROL_INSTRUMENTS } from './flowControl';
-import { fieldGuard, guardHint, guardProblem, guardSuggestions } from './safety';
+import { fieldGuard, guardHint, guardProblem, guardSuggestions, type TrayView } from './safety';
+import { compactWells, expandWells, wellCount, wellsProblem, wellsTray } from './labware';
+import { TrayPicker } from './TrayPicker';
 
 // One named variable bound to one addressable leaf of a step's return value. `path` is the
 // dotted pointer the backend's introspection published in `schema.return_paths`
@@ -480,6 +482,11 @@ export default function WorkflowEditor({
     const list = getSequenceList(listId);
     setSequenceList(listId, list.map(b => b.id === blockId ? updater(b) : b));
   };
+
+  // The plate a wells argument is being picked on (labware.ts), if a picker is open.
+  const [wellPick, setWellPick] = useState<{
+    listId: string; blockId: string; paramKey: string; tray: TrayView; title: string; initial: string[];
+  } | null>(null);
 
   const handleParamChange = (blockId: string, param: string, value: any, type: string, listId: string) => {
     updateBlock(listId, blockId, block => {
@@ -1506,6 +1513,13 @@ export default function WorkflowEditor({
                           if (refused) {
                               blockWarnings.push(`'${fullKey}' = ${guarded} ${refused} (safety guard)`);
                           }
+
+                          // Wells that are not on the plate this same step names (labware.ts). The
+                          // edge refuses the run for it; said here, on the step.
+                          if (pData?.wells && !isFlowBlock) {
+                              const offPlate = wellsProblem(guarded, wellsTray(statusData?.safety, block.instrument, pData, block.params, effectiveSchema as any)?.tray);
+                              if (offPlate) blockWarnings.push(`'${fullKey}': ${offPlate}`);
+                          }
                       }
                   };
                   checkRequiredParams(effectiveSchema);
@@ -1990,7 +2004,12 @@ export default function WorkflowEditor({
                                                 // values are offered, and the shield says what it allows.
                                                 const guard = fieldGuard(statusData?.safety, block.instrument, block.method, paramKey);
                                                 const guardText = guardHint(guard, statusData?.safety);
-                                                const guardRefuses = !!guardProblem(guard, actualVal, statusData?.safety);
+                                                // A wells argument is picked on the plate its sibling
+                                                // argument names (labware.ts).
+                                                const plate = pData.wells ? wellsTray(statusData?.safety, block.instrument, pData, paramsObj, effectiveSchema as any) : undefined;
+                                                const picked = pData.wells ? wellCount(actualVal, plate?.tray) : null;
+                                                const guardRefuses = !!guardProblem(guard, actualVal, statusData?.safety)
+                                                  || (!!pData.wells && !!wellsProblem(actualVal, plate?.tray));
 
                                                 return (
                                                     // name = value, as the call would be written (the folded card reads the same).
@@ -2023,6 +2042,24 @@ export default function WorkflowEditor({
                                                         }}
                                                         className={`w-28 h-6 rounded-md border bg-white px-1.5 font-mono text-[12px] focus:outline-none focus:border-accent dark:bg-white/5 placeholder:text-gray-300 dark:placeholder:text-gray-600 ${typeof actualVal === 'string' && actualVal.startsWith('#') ? 'font-semibold text-gray-900 bg-gray-50 dark:text-white dark:bg-white/10' : 'text-gray-900 dark:text-gray-100'} ${hashInvalid || guardRefuses ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}
                                                       />
+                                                      {pData.wells && (
+                                                        <button
+                                                          type="button"
+                                                          disabled={!plate}
+                                                          title={plate ? `Pick wells on ${plate.tray.label}` : `Choose '${pData.wells.on}' first, then pick wells on it`}
+                                                          onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (!plate) return;
+                                                            let initial: string[] = [];
+                                                            try { initial = expandWells(actualVal, plate.tray.grid); } catch { /* a typo: start empty */ }
+                                                            setWellPick({ listId: lId, blockId: bId, paramKey, tray: plate.tray, title: `${block.method}: ${paramName} on ${plate.tray.label}`, initial });
+                                                          }}
+                                                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-accent-tint bg-accent-soft px-1.5 font-sans text-[11px] font-semibold text-accent-fg hover:bg-accent hover:text-on-accent disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-transparent disabled:text-gray-300 dark:disabled:border-white/10 dark:disabled:text-gray-600"
+                                                        >
+                                                          <Grid3x3 className="h-3 w-3" />
+                                                          {picked !== null ? `${picked} ${picked === 1 ? 'well' : 'wells'}` : 'Pick'}
+                                                        </button>
+                                                      )}
                                                       {guardText && (
                                                         <span title={`Safety guard: ${guardText}`} className="cursor-help shrink-0">
                                                           <ShieldCheck className={`w-3 h-3 ${guardRefuses ? 'text-red-500' : 'text-gray-400 dark:text-gray-500'}`} />
@@ -2450,6 +2487,17 @@ export default function WorkflowEditor({
           onEditWorkflow(name, mode === 'latest' ? undefined : version);
         } : undefined}
       />
+      {wellPick && (
+        <TrayPicker
+          tray={wellPick.tray}
+          title={wellPick.title}
+          multiple
+          initial={wellPick.initial}
+          onPick={(positions) => handleParamChange(
+            wellPick.blockId, wellPick.paramKey, compactWells(positions, wellPick.tray.grid), 'wells', wellPick.listId)}
+          onClose={() => setWellPick(null)}
+        />
+      )}
     </DragDropContext>
   );
 }

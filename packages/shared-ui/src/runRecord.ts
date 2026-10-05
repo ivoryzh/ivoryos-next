@@ -251,6 +251,18 @@ export function formatRun(r: any): FormattedRun {
       return templateKeys.map((k) => byKey.get(k));
     };
 
+    // A batch step that acted on a whole group of rows in one call records each row's share of
+    // what it returned (`outputs.by_row`, queue.py spread_over_rows): a plate read is one step
+    // and one reading per sample. That share is the row's value; without it the step's result
+    // showed under the group's first row only, as the whole plate.
+    const sharedOutput = (row: number, name: string) => {
+      for (const s of mainSteps) {
+        const own = s.outputs?.by_row?.[String(row)];
+        if (own && name in own) return own[name];
+      }
+      return undefined;
+    };
+
     for (let i = 0; i < rowCount; i++) {
       const rowSteps = stepsForRow(i);
       const hasError = rowSteps.some((s: any) => s.status === 'error');
@@ -261,7 +273,8 @@ export function formatRun(r: any): FormattedRun {
       const inputVals = inputVars.map((v: string) => r.parameters.rows[i][v]);
       // Match each returnVar to the step at the same position in the per-row template —
       // rowSteps mirrors seqTemplate's order since every row repeats the same block sequence.
-      const outputVals = returnVars.map((rv: string) => readNamedOutput(rv, seqTemplate, aligned(rowSteps) as any[]));
+      const outputVals = returnVars.map((rv: string) =>
+        sharedOutput(i, rv) ?? readNamedOutput(rv, seqTemplate, aligned(rowSteps) as any[]));
 
       rows.push({
         row: i + 1,

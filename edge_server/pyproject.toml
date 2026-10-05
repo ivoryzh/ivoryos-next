@@ -41,3 +41,12 @@ mcp = [
 claude = [
     "anthropic>=1.0"
 ]
+# Liquid handlers through PyLabRobot (plr.py): worktables, labware definitions and backends for
+# Hamilton, Opentrons and Tecan, plus a simulator. Nothing else in the edge imports it.
+plr = [
+    "pylabrobot>=0.2.2"
+]
+
+# The Labware view's page ships with the package (labware_view/__init__.py).
+[tool.setuptools.package-data]
+"ivoryos_edge.labware_view" = ["page/*"]

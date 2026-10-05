@@ -37,6 +37,11 @@ export interface SpreadsheetTableProps {
   varOptions?: Record<string, any[]>;
   /** Variables belonging to a batch step: only the group's first row is read. */
   batchVariables?: string[];
+  /**
+   * Columns a batch step takes from every row of its group, in one call (`rowListVariables` in
+   * spreadsheetRun.ts: wells, a volume per well). Every row of these is read, so none is muted.
+   */
+  rowListVariables?: string[];
   /** Rows per batch group. Blank/0 means one group holding every row. */
   batchSize?: string | number;
   /** False hides all batch affordances — there is no batch step in this sequence. */
@@ -74,6 +79,7 @@ export function SpreadsheetTable({
   varTypes = {},
   varOptions = {},
   batchVariables = [],
+  rowListVariables = [],
   batchSize,
   showBatchGrouping = false,
   compact = false,
@@ -98,7 +104,7 @@ export function SpreadsheetTable({
   const headPad = compact ? 'p-2' : 'p-3';
 
   const renderCell = (row: SpreadsheetRow, idx: number, v: string) => {
-    const isBatchVar = batchVariables.includes(v);
+    const isBatchVar = batchVariables.includes(v) && !rowListVariables.includes(v);
     // Rule 1 made visible: for a batch column only the group's first row is ever read.
     const isDesignatedRow = !isBatchVar || idx % groupSize === 0;
     const invalid = isInvalidNumericCell(varTypes[v], row[v]);
@@ -165,7 +171,15 @@ export function SpreadsheetTable({
             <div className="flex flex-col">
               <div className="flex items-center gap-1">
                 <span>{v}</span>
-                {batchVariables.includes(v) && (
+                {rowListVariables.includes(v) && (
+                  <span
+                    title="A batch step takes this from every row of its group and acts on all of them in one call"
+                    className="inline-flex items-center gap-0.5 rounded bg-purple-50 px-1 py-0.5 text-[9px] font-bold normal-case text-purple-600 dark:bg-purple-500/10 dark:text-purple-400"
+                  >
+                    <Layers className="h-2.5 w-2.5" /> each row · 1 call/batch
+                  </span>
+                )}
+                {batchVariables.includes(v) && !rowListVariables.includes(v) && (
                   <span
                     title="Batch step value — only needs to be filled in on one row per batch group"
                     className="inline-flex items-center gap-0.5 rounded bg-purple-50 px-1 py-0.5 text-[9px] font-bold normal-case text-purple-600 dark:bg-purple-500/10 dark:text-purple-400"
@@ -181,7 +195,8 @@ export function SpreadsheetTable({
               )}
               {(varGuards[v] || []).length > 0 && (
                 <span className="flex items-center gap-1.5 text-[10px] font-normal normal-case text-gray-500 dark:text-gray-400">
-                  <span title="What the safety guard allows here">{(varGuards[v] || []).map((g) => guardHint(g, safety)).filter(Boolean).join(' · ')}</span>
+                  {/* One line per distinct limit: a column feeding three steps on one plate says so once. */}
+                  <span title="What the safety guard allows here">{Array.from(new Set((varGuards[v] || []).map((g) => guardHint(g, safety)).filter(Boolean))).join(' · ')}</span>
                   {trays[v] && onFillColumn && (
                     <button
                       type="button"

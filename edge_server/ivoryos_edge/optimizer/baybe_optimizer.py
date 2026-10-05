@@ -154,9 +154,14 @@ class BaybeOptimizer(OptimizerBase):
             step_2_recommender = NaiveHybridSpaceRecommender()
         elif step_2.get("model") == "BOTorch":
             step_2_recommender = BotorchRecommender()
+        # How long step 1 lasts. BayBE switches once this many measurements are on record
+        # (existing data counts, a failed trial does not) and takes only a real int of at
+        # least 1, which is also its default. The Optimize page sends 0 for an emptied field.
+        switch_after = max(1, int(step_1.get("num_samples") or 1))
         return TwoPhaseMetaRecommender(
             initial_recommender=step_1_recommender,
-            recommender=step_2_recommender
+            recommender=step_2_recommender,
+            switch_after=switch_after,
         )
 
     def get_plots(self, plot_type):

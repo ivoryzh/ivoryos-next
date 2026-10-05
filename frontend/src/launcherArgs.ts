@@ -26,7 +26,9 @@ export function toForm(defs: ArgDef[], args: Record<string, unknown> = {}): Form
         : {};
       out[def.name] = toForm(def.args || [], inner as Record<string, unknown>);
     } else if (def.type === 'bool') {
-      out[def.name] = v === true;
+      // A checkbox always sends something, so unset starts at the driver's own default: an
+      // unticked box for a `True` default would switch it off without anyone choosing to.
+      out[def.name] = v === undefined || v === null ? def.default === true : v === true;
     } else {
       out[def.name] = v === undefined || v === null ? '' : String(v);
     }
@@ -84,12 +86,13 @@ export function showLiteral(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** Text settings left empty, by dotted name: they are left out of the constructor call. */
+/** Text settings left empty, by dotted name: they are left out of the constructor call. One with
+ * a `default` is not listed: left out, it is that default (which the field shows). */
 export function emptyFields(defs: ArgDef[], values: FormValues, prefix = ''): string[] {
   return defs.flatMap(def => {
     const v = values[def.name];
     if (def.type === 'object') return emptyFields(def.args || [], (v as FormValues) || {}, `${prefix}${def.name}.`);
-    if (def.type === 'bool') return [];
+    if (def.type === 'bool' || (def.default !== undefined && def.default !== null)) return [];
     return v === undefined || v === null || String(v).trim() === '' ? [`${prefix}${def.name}`] : [];
   });
 }

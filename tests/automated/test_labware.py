@@ -133,6 +133,23 @@ def test_markers_reach_the_schema_and_labware_arguments_list_the_worktable(bench
     assert "__ivoryos_labware__" not in schema
 
 
+def test_the_hubs_class_level_schema_carries_the_same_markers(bench):
+    """schema_worker describes a class without building it (the Hub stores what it says), so it
+    has no worktable to list: the markers match the edge's, the options are the deck's."""
+    import importlib.util
+    import os
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "schema_worker", "introspection.py")
+    spec = importlib.util.spec_from_file_location("schema_worker_introspection", path)
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    hub = worker.inspect_class(Bench)
+    edge = app.state.instrument_schemas["bench"]
+    for method in ("dispense", "read", "move"):
+        for name, entry in edge[method]["parameters"].items():
+            assert {k: v for k, v in entry.items() if k != "options"} == hub[method]["parameters"][name], (method, name)
+    assert "options" not in hub["dispense"]["parameters"]["tips"]
+
+
 def test_a_driver_without_a_worktable_is_untouched():
     schema = app.state.instrument_schemas["dummy"]
     assert all("labware" not in p and "wells" not in p

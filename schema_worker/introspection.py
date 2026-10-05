@@ -310,6 +310,32 @@ def _resolve_hints(func):
         return {}
 
 
+def _resolve_markers(func):
+    """What a driver says about a parameter beyond its type: `Annotated[str, Labware("plate")]`.
+
+    Any annotation metadata with an `ivoryos_schema()` method contributes its keys to that
+    parameter's entry, as in edge_server/ivoryos_edge/introspection.py (the same function): which
+    argument names a labware, which picks wells on it, which takes one value per well. Class level
+    has no worktable, so a labware argument gets no `options` here; a running deck fills them in.
+    """
+    try:
+        hints = typing.get_type_hints(func, include_extras=True)
+    except Exception:
+        return {}
+    out = {}
+    for name, hint in hints.items():
+        # Python before 3.11 wraps `Annotated[Optional[str], ...] = None` in another Optional, so
+        # the Annotated can sit one Union down.
+        candidates = [hint] + (list(get_args(hint)) if get_origin(hint) is typing.Union else [])
+        for candidate in candidates:
+            if get_origin(candidate) is typing.Annotated:
+                found = [m for m in get_args(candidate)[1:] if callable(getattr(m, "ivoryos_schema", None))]
+                if found:
+                    out[name] = found
+                    break
+    return out
+
+
 # Modelling frameworks put properties on their own base class -- pydantic's `model_extra` and
 # `model_fields_set`, for instance. They describe the library, not the instrument, and nobody is
 # going to drive one from a workflow, so they don't belong in the schema.
@@ -526,6 +552,7 @@ def inspect_class(cls):
             # first where we can; if a forward reference cannot be resolved, fall back to the raw
             # annotations rather than losing the method.
             hints = _resolve_hints(described)
+            markers = _resolve_markers(described)
 
             params = {}
             # A **kwargs method takes arguments this schema cannot enumerate, so anything not
@@ -564,6 +591,8 @@ def inspect_class(cls):
                     continue
                 annotation = hints.get(param_name, param.annotation)
                 params[param_name] = extract_type_info(annotation, param.default)
+                for marker in markers.get(param_name, ()):
+                    params[param_name].update(marker.ivoryos_schema())
                 if param.kind is inspect.Parameter.POSITIONAL_ONLY:
                     # Unlike a variadic, this one *is* an argument the caller supplies — it just
                     # cannot be supplied by name, and everything downstream calls with keywords

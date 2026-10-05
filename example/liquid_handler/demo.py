@@ -7,9 +7,10 @@ PyLabRobot's simulator with a tip rack, a reagent reservoir and two 96-well plat
 volumes are tracked, nothing is connected. A simulated plate reader measures what was pipetted.
 Open the Labware panel to watch the worktable.
 
-Which robot it is lives in the worktable file, not in this script: Labware -> Edit layout ->
-Robot switches the simulator between an Opentrons OT-2, a Hamilton STARlet or STAR and a Tecan
-EVO, and the choice is saved for the next start. A real robot is the same line with its backend
+Which robot it is lives in the worktable file, not in this script: in the Labware panel (part of
+plr-ivoryos), Edit layout -> Robot switches the simulator between an Opentrons OT-2, a Hamilton
+STARlet or STAR and a Tecan EVO, each keeping its own worktable, saved for the next start. Labware
+is dragged on and moved there, and wells are filled with the liquids a run starts from. A real robot is the same line with its backend
 (`LiquidHandler(backend=OpentronsOT2Backend(host=...), deck_json=...)`), which is what a Hub
 install writes.
 
@@ -27,9 +28,9 @@ os.environ.setdefault("IVORYOS_EDGE_HOME", os.path.join(HERE, ".edge"))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "edge_server"))
 
 import ivoryos_edge  # noqa: E402
-from ivoryos_edge.labware_view import plugin as labware_view  # noqa: E402
 from ivoryos_edge.paths import DATA_DIR, WORKFLOWS_DIR  # noqa: E402
 from plr_ivoryos import LiquidHandler  # noqa: E402
+from plr_ivoryos.labware_view import plugin as labware_view  # noqa: E402
 from plate_reader import SimulatedPlateReader  # noqa: E402
 
 # The worktable this deck uses, kept in its data folder so the Labware view can change it. The

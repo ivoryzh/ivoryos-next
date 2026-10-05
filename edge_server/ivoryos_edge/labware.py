@@ -4,7 +4,8 @@ Every other instrument on a deck is a bag of methods taking numbers and names. A
 is not: its arguments are *places* (well A1 of the assay plate), and one call acts on many of
 them at once. This module is the vocabulary that lets a driver say so, and nothing more. It
 knows nothing about any robot or library. The PyLabRobot liquid handler that speaks it is the
-`plr-ivoryos` package (`plr_ivoryos.LiquidHandler`), which defines its own copies of these markers:
+`plr-ivoryos` package (`plr_ivoryos.LiquidHandler`, and its Labware view plugin,
+`plr_ivoryos.labware_view`), which defines its own copies of these markers:
 the edge reads them by duck typing (anything in `Annotated[...]` with an `ivoryos_schema()`, and
 the dunder methods below), so a driver package needs nothing from ivoryos_edge.
 

@@ -12,7 +12,7 @@
         "source": "reservoir[A1]",
         "targets": "#well",
         "target_vols": "#buffer_ul",
-        "tip_rack": "tips_300",
+        "tip_rack": "tips",
         "new_tip": "once"
       },
       "arg_types": {
@@ -35,7 +35,7 @@
         "source": "reservoir[A2]",
         "targets": "#well",
         "target_vols": "#dye_ul",
-        "tip_rack": "tips_300",
+        "tip_rack": "tips",
         "new_tip": "always"
       },
       "arg_types": {

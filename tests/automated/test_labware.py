@@ -1,9 +1,10 @@
 """Labware: wells as arguments, labware as driver-declared trays, and a batch step that acts on
-every row of its group in one call (labware.py, queue.spread_over_rows, labware_view).
+every row of its group in one call (labware.py, queue.spread_over_rows).
 
 The first half uses a small driver with no robot library behind it, because none of the edge's
 side depends on one. The second half reads plr-ivoryos's PyLabRobot liquid handler on its
-simulator and is skipped where that package (0.2) is not installed.
+simulator and is skipped where that package (0.2) is not installed. Its Labware view plugin is
+tested in the plr-ivoryos repository.
 """
 
 import asyncio
@@ -280,40 +281,3 @@ def test_a_plr_step_with_wells_off_the_plate_is_refused_by_the_guard(handler):
     finally:
         app.state.instruments.pop("lh")
         app.state.instrument_schemas.pop("lh")
-
-
-def test_the_labware_view_serves_the_worktable_follows_it_and_changes_it(handler, monkeypatch):
-    from fastapi.testclient import TestClient
-    from ivoryos_edge import labware_view
-
-    class Reader:  # shares the handler's worktable; must not be drawn as a second one
-        def __ivoryos_labware__(self):
-            return {"labware": handler.__ivoryos_labware__()["labware"]}
-
-    published = []
-    monkeypatch.setattr(labware_view.plugin, "instruments", {"lh": handler, "reader": Reader(), "other": object()})
-    monkeypatch.setattr(labware_view.plugin, "publish", published.append)
-    assert list(labware_view.layout()["worktables"]) == ["lh"]
-    assert labware_view.state()["worktables"]["lh"]["labware"]["reservoir"]["A2"]["liquids"] == {"dye": 5000.0}
-
-    labware_view._start(labware_view.plugin.instruments)
-    handler.load_liquid("assay_plate[A1:B1]", "sample", 50)
-    assert published[-1]["worktable"] == "lh" and published[-1]["event"]["action"] == "load"
-    assert published[-1]["state"]["labware"]["assay_plate"]["B1"]["volume_ul"] == 50.0 and not published[-1]["relayout"]
-    handler.move_plate("assay_plate", "9")
-    assert published[-1]["relayout"] is True
-
-    from fastapi import FastAPI
-    page = FastAPI()
-    page.include_router(labware_view.plugin.router)
-    with TestClient(page) as client:
-        catalog = client.get("/api/catalog").json()["worktables"]["lh"]
-        assert catalog["deck"] == "OTDeck" and "STARLetDeck" in [d["kind"] for d in catalog["decks"]]
-        assert any(e["definition"] == "cor_96_wellplate_360uL_Fb" for e in catalog["labware"])
-        refused = client.post("/api/edit", json={"worktable": "lh", "action": "place", "site": "2",
-                                                 "definition": "cor_96_wellplate_360uL_Fb", "name": "p2"})
-        assert refused.status_code == 400 and "already holds reservoir" in refused.json()["error"]
-        switched = client.post("/api/edit", json={"worktable": "lh", "action": "deck", "deck": "STARLetDeck"}).json()
-        assert switched["restart_needed"] and switched["layout"]["worktables"]["lh"]["deck"]["kind"] == "STARLetDeck"
-        assert switched["catalog"]["lh"]["deck"] == "STARLetDeck"
-        assert published[-1]["relayout"] is True

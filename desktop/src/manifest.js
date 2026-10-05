@@ -185,10 +185,15 @@ function mergeIntoDeck(deck, manifest) {
 
 /** Human-readable summary lines for a confirmation dialog. */
 function describeInstall(manifest, { added, replaced, pluginsAdded = [] }) {
+    // Each instrument with the class it will load: a name alone says nothing about what runs.
+    const loads = (name) => {
+        const inst = (manifest.instruments || []).find((i) => i.name === name);
+        return inst ? `${name} (${inst.import}.${inst.class})` : name;
+    };
     const lines = [];
     if ((manifest.packages || []).length) lines.push(`Install: ${manifest.packages.join(', ')}`);
-    if (added.length) lines.push(`Add to the deck: ${added.join(', ')}`);
-    if (replaced.length) lines.push(`Replace on the deck: ${replaced.join(', ')}`);
+    if (added.length) lines.push(`Add to the deck: ${added.map(loads).join(', ')}`);
+    if (replaced.length) lines.push(`Replace on the deck: ${replaced.map(loads).join(', ')}`);
     if (pluginsAdded.length) lines.push(`Add plugins: ${pluginsAdded.join(', ')}`);
     if (!lines.length) lines.push('Nothing to install or add.');
     return lines;

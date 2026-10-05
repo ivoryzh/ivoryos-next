@@ -5,7 +5,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Table2, Download, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import {
-  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf, issuesLabel, useDocumentTheme, confirmDialog, notify } from '@ivoryos/shared-ui';
+  ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf, issuesLabel, failedThenSkipped, useDocumentTheme, confirmDialog, notify } from '@ivoryos/shared-ui';
 
 // Every step's outputs get wrapped as {"result": <value>} regardless of what the method actually
 // returned, so unwrap that one key before handing the value to ResultView — otherwise every result
@@ -73,12 +73,16 @@ const secondsBetween = (a?: string, b?: string) => {
 
 // 'not_run' (and a step 'skipped' with no error of its own): the run ended before it, after a
 // graceful stop. A hollow grey ring, so it reads as "never happened" rather than as pending or done.
+// 'failed' (and a step 'skipped' that carries an error): it failed and a person skipped it. Amber,
+// like a run that completed with issues: the run went on, but this is not a result.
 const StatusDot = ({ status, error }: { status?: string; error?: string }) => {
   const notRun = status === 'not_run' || (status === 'skipped' && !error);
+  const failed = status === 'failed' || (status === 'skipped' && !!error);
   return (
     <span
-      title={notRun ? 'not run: the run stopped before it' : status}
+      title={notRun ? 'not run: the run stopped before it' : failed ? 'failed, and skipped' : status}
       className={`w-2 h-2 rounded-full shrink-0 ${notRun ? 'border border-gray-400 dark:border-gray-500'
+        : failed ? 'bg-amber-500'
         : status === 'completed' ? 'bg-green-500'
         : status === 'error' ? 'bg-red-500'
           : status === 'running' || status === 'waiting_input' ? 'bg-accent animate-pulse'
@@ -214,7 +218,7 @@ const StepList = ({ steps, start = 0 }: { steps: any[]; start?: number }) => {
         const hasMore = !!step.error || (!flow && (args.length > 0 || hasValue));
         const label = flowSummary ? flowSummary.label : `${step.instrument}.${step.method}`;
         return (
-          <div key={i} className={`min-w-0 ${step.status === 'skipped' ? 'opacity-50' : ''}`}>
+          <div key={i} className={`min-w-0 ${step.status === 'skipped' && !step.error ? 'opacity-50' : ''}`}>
             <div
               onClick={() => hasMore && setOpen(isOpen ? null : i)}
               className={`flex items-center gap-2 px-3 py-1 text-xs font-mono min-w-0 ${hasMore ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03]' : ''}`}
@@ -349,7 +353,14 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
 
   const timed = steps.filter(s => s.start_time);
 
-  const startOf = (s: TimelineStep) => parseServerTime(s.start_time!);
+  // A step that failed and was retried starts afresh on the edge, so its own start is the last
+  // attempt's. Its earlier attempts are on its record (`attempts`): drawn from the first of them,
+  // the failures and the waits for a person are part of the step, not a gap before it.
+  const startOf = (s: TimelineStep) => {
+    const own = parseServerTime(s.start_time!);
+    const first = parseServerTime((s as any).result?.attempts?.[0]?.start_time ?? '');
+    return Number.isFinite(first) && first < own ? first : own;
+  };
   const endOf = (s: TimelineStep) => parseServerTime(s.end_time || s.start_time!);
 
   const unit = iterationLabel || 'Iteration';
@@ -377,6 +388,8 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
       start: Math.min(...own.map(startOf)),
       end: Math.max(...own.map(endOf)),
       errors: own.filter(s => s.status === 'error').length,
+      // Failed and skipped: the row went on without them.
+      skippedFailures: own.filter(failedThenSkipped).length,
     };
   });
 
@@ -452,6 +465,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
                 {' · +'}{((activeBand.start - runStart) / 1000).toFixed(1)}s
               </span>
               {activeBand.errors > 0 && <span className="text-red-500">{' · '}{activeBand.errors} failed</span>}
+              {activeBand.skippedFailures > 0 && <span className="text-amber-600 dark:text-amber-400">{' · '}{activeBand.skippedFailures} failed and skipped</span>}
             </span>
           ) : active ? (
             <span className="text-gray-700 dark:text-gray-200">
@@ -503,6 +517,8 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
                       ? 'bg-accent border-accent text-on-accent z-20'
                       : band.errors > 0
                         ? 'bg-red-100 border-red-300 text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:border-red-500/40 dark:text-red-300'
+                      : band.skippedFailures > 0
+                        ? 'bg-amber-100 border-amber-300 text-amber-800 hover:bg-amber-200 dark:bg-amber-500/20 dark:border-amber-500/40 dark:text-amber-300'
                         : isPhase(band.n)
                           ? 'bg-gray-50 border-dashed border-gray-300 text-gray-500 hover:bg-gray-100 dark:bg-white/[0.03] dark:border-white/20 dark:text-gray-400 dark:hover:bg-white/[0.06]'
                           : 'bg-accent-soft border-accent-tint/60 text-accent-fg hover:bg-accent-tint/30'
@@ -565,7 +581,7 @@ const ExecutionTimeline = ({ steps, iterationLabel }: { steps: TimelineStep[]; i
             return (
               <div
                 key={idx}
-                className={`absolute top-0 h-full pointer-events-none ${STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
+                className={`absolute top-0 h-full pointer-events-none ${failedThenSkipped(step) ? 'bg-amber-500' : STATUS_BAR_COLOR[step.status || ''] || 'bg-gray-400'} transition-opacity border-r border-white/60 dark:border-black/40 ${hovered === idx ? 'opacity-100 ring-2 ring-inset ring-black/50 dark:ring-white/70 z-20' : 'opacity-90'
                   }`}
                 style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
               />
@@ -1091,6 +1107,8 @@ export default function DataPage() {
                   {/* What kind of run, and no more: the instruments it touched are on the run
                       itself, and search still finds runs by them. */}
                   <div className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
+                    {/* The stage's name too: it sits at the end of the run's name, where the card cuts it off. */}
+                    {run.group && <span title={`Stage ${run.group.index} of ${run.group.total} of ${run.group.name}`}>{run.group.index}/{run.group.total} {run.group.stage} • </span>}
                     {run.row_count != null ? `${run.variable_count} variables • ${run.row_count} rows` : run.type === 'Optimization' ? 'optimization' : 'single run'}
                   </div>
                 </div>
@@ -1158,6 +1176,35 @@ export default function DataPage() {
                   </button>
                 </div>
               </header>
+              {/* One stage of a design run in stages: each stage is its own run with its own table,
+                  and this strip is what shows them as the one experiment they were. */}
+              {(() => {
+                const group = summaries.find(s => s.id === selectedId)?.group;
+                if (!group) return null;
+                const siblings = summaries.filter(s => s.group?.id === group.id).sort((a, b) => a.group.index - b.group.index);
+                return (
+                  <div className="shrink-0 flex flex-wrap items-center gap-1.5 border-b border-gray-200 bg-white/60 px-6 py-2 text-xs dark:border-white/10 dark:bg-white/[0.02]">
+                    <span className="mr-1 font-semibold text-gray-600 dark:text-gray-300" title="This run is one stage of a design run in stages">{group.name}</span>
+                    {siblings.map(s => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => setSelectedId(s.id)}
+                        title={s.issues ? `${s.status} · ${issuesLabel(s.issues)}` : s.status}
+                        className={`flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-medium ${s.id === selectedId ? 'border-accent-tint bg-accent-soft text-accent-fg' : 'border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'}`}
+                      >
+                        <span className={`h-1.5 w-1.5 rounded-full ${s.status === 'completed' ? (s.issues ? 'bg-amber-500' : 'bg-green-500') : s.status === 'error' ? 'bg-red-500' : s.status === 'cancelled' ? 'bg-gray-400' : 'bg-amber-500'}`} />
+                        {s.group.index}. {s.group.stage}
+                      </button>
+                    ))}
+                    {siblings.length < group.total && (
+                      <button type="button" onClick={() => setSearchQuery(group.id)} className="text-gray-500 underline-offset-2 hover:underline dark:text-gray-400">
+                        show all {group.total} stages
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
               <div className="p-8 flex-1 overflow-y-auto overflow-x-hidden pb-24 min-w-0 w-full relative">
                 <div className="max-w-5xl mx-auto space-y-3 w-full min-w-0">
                   {selectedRun.type === 'Optimization' && selectedRun.config && (

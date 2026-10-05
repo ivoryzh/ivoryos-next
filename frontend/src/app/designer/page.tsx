@@ -1,5 +1,5 @@
 "use client";
-import { API_BASE } from '@/config';
+import { API_BASE, withBase } from '@/config';
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -23,7 +23,7 @@ import {
   chooseDialog,
   confirmDialog,
   notify,
-  promptDialog, useDocumentTheme, FLOW_CONTROL_PALETTE, workflowOutputs, getReturnLeaves, runtimeVarNames } from '@ivoryos/shared-ui';
+  promptDialog, useDocumentTheme, FLOW_CONTROL_PALETTE, workflowOutputs, getReturnLeaves, runtimeVarNames, mainOnlyLink } from '@ivoryos/shared-ui';
 
 export default function DesignerPage() {
   const [statusData, setStatusData] = useState<any>(null);
@@ -508,7 +508,8 @@ export default function DesignerPage() {
     const res = await fetch(`${API_BASE}/api/workflows/expand`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prep: body.prep, sequence: body.script, cleanup: body.cleanup })
+      // As Run sends them: a linked workflow is its main steps only (shared-ui mainOnlyLink).
+      body: JSON.stringify({ prep: (body.prep || []).map(mainOnlyLink), sequence: (body.script || []).map(mainOnlyLink), cleanup: (body.cleanup || []).map(mainOnlyLink) })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not expand this sequence.');
@@ -641,7 +642,8 @@ export default function DesignerPage() {
     setExecutionState({ isRunning: false, currentIndex: -1, results: {} });
 
     try {
-      const blockToPayload = (s: SequenceBlock) => ({
+      // A linked workflow used as a step runs its main steps only (shared-ui mainOnlyLink).
+      const blockToPayload = (s: SequenceBlock) => mainOnlyLink({
         instrument: s.instrument,
         method: s.method,
         params: s.params,
@@ -858,7 +860,7 @@ export default function DesignerPage() {
                             // Configure is not a dispatch — it hands off to the page where values
                             // get filled in, and the preview belongs in front of the real run
                             // that happens there, not in front of the handoff.
-                            if (hasDynamicParams) { window.location.href = '/execution'; return; }
+                            if (hasDynamicParams) { window.location.href = withBase('/execution'); return; }
                             // The preview is the last thing seen before hardware moves. It is no
                             // longer a button of its own, so this is where it earns its place:
                             // linked workflows expanded, exactly what will be queued.
@@ -878,7 +880,7 @@ export default function DesignerPage() {
                         </button>
                         {hasDynamicParams && sequence.some(s => s.returnVar) && (
                           <a
-                            href="/optimize"
+                            href={withBase('/optimize')}
                             title="Optimize this workflow's #variables"
                             className="flex items-center space-x-2 px-4 py-1.5 rounded text-sm font-medium transition-all bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
                           >

@@ -1,6 +1,6 @@
 "use client";
 
-import { Play, Rows3, Zap } from 'lucide-react';
+import { ListOrdered, Play, Rows3, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect } from 'react';
 
@@ -22,6 +22,8 @@ export const RUN_TABS = [
   { key: 'once', href: '/once', label: 'Once', icon: Play },
   { key: 'configure', href: '/execution', label: 'Iterate', icon: Rows3 },
   { key: 'optimize', href: '/optimize', label: 'Optimize', icon: Zap },
+  // A design made of saved workflows, each given its own Once / Iterate / Optimize (src/stages.ts).
+  { key: 'stages', href: '/stages', label: 'Stages', icon: ListOrdered },
 ] as const;
 
 export type RunTabKey = typeof RUN_TABS[number]['key'];

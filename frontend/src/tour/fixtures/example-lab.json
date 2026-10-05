@@ -1,0 +1,1444 @@
+{
+ "_about": "The tour's example lab (src/tour/README.md): example/deck.json, these instruments' schemas as the edge introspects them (ivoryos_schema.json after starting example/demo.py), and two of the edge's sample workflows. Regenerate rather than edit.",
+ "deck": {
+  "format": "ivoryos-deck/1",
+  "name": "Suzuki coupling demo",
+  "packages": [],
+  "instruments": [
+   {
+    "name": "pump_1",
+    "import": "lab_drivers",
+    "class": "SyringePump",
+    "args": {
+     "reagent": "4-bromoanisole, 0.50 M in dioxane",
+     "role": "substrate",
+     "concentration_m": 0.5
+    }
+   },
+   {
+    "name": "pump_2",
+    "import": "lab_drivers",
+    "class": "SyringePump",
+    "args": {
+     "reagent": "phenylboronic acid, 0.50 M in dioxane",
+     "role": "boronic_acid",
+     "concentration_m": 0.5
+    }
+   },
+   {
+    "name": "pump_3",
+    "import": "lab_drivers",
+    "class": "SyringePump",
+    "args": {
+     "reagent": "Pd(dppf)Cl2, 10 mM in dioxane",
+     "role": "catalyst",
+     "concentration_m": 0.01
+    }
+   },
+   {
+    "name": "reactor",
+    "import": "lab_drivers",
+    "class": "HeaterStirrer",
+    "args": {
+     "max_temperature_c": 150.0
+    }
+   },
+   {
+    "name": "balance",
+    "import": "lab_drivers",
+    "class": "AnalyticalBalance"
+   },
+   {
+    "name": "uv_vis",
+    "import": "lab_drivers",
+    "class": "UVVisSpectrometer",
+    "args": {
+     "path_length_cm": 1.0
+    }
+   },
+   {
+    "name": "hplc",
+    "import": "lab_drivers",
+    "class": "HPLC"
+   }
+  ]
+ },
+ "instruments": {
+  "pump_1": {
+   "dispense": {
+    "description": "Deliver a volume of this pump's stock solution into the reaction vial.",
+    "parameters": {
+     "volume_ml": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     },
+     "flow_rate_ml_min": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "dispense_moles": {
+    "description": "Deliver a target amount of reagent, converting to volume via the stock concentration.",
+    "parameters": {
+     "micromoles": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     },
+     "flow_rate_ml_min": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "prime": {
+    "description": "Flush air out of the line before the first dispense of a campaign.",
+    "parameters": {
+     "cycles": {
+      "type": "int",
+      "required": false,
+      "numeric": true,
+      "default": 3
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "read_volume_remaining": {
+    "description": "Stock left in the syringe, in mL.",
+    "parameters": {},
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "refill": {
+    "description": "Draw the syringe back up to full from the reservoir.",
+    "parameters": {},
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  },
+  "pump_2": {
+   "dispense": {
+    "description": "Deliver a volume of this pump's stock solution into the reaction vial.",
+    "parameters": {
+     "volume_ml": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     },
+     "flow_rate_ml_min": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "dispense_moles": {
+    "description": "Deliver a target amount of reagent, converting to volume via the stock concentration.",
+    "parameters": {
+     "micromoles": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     },
+     "flow_rate_ml_min": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "prime": {
+    "description": "Flush air out of the line before the first dispense of a campaign.",
+    "parameters": {
+     "cycles": {
+      "type": "int",
+      "required": false,
+      "numeric": true,
+      "default": 3
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "read_volume_remaining": {
+    "description": "Stock left in the syringe, in mL.",
+    "parameters": {},
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "refill": {
+    "description": "Draw the syringe back up to full from the reservoir.",
+    "parameters": {},
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  },
+  "pump_3": {
+   "dispense": {
+    "description": "Deliver a volume of this pump's stock solution into the reaction vial.",
+    "parameters": {
+     "volume_ml": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     },
+     "flow_rate_ml_min": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "dispense_moles": {
+    "description": "Deliver a target amount of reagent, converting to volume via the stock concentration.",
+    "parameters": {
+     "micromoles": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     },
+     "flow_rate_ml_min": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "prime": {
+    "description": "Flush air out of the line before the first dispense of a campaign.",
+    "parameters": {
+     "cycles": {
+      "type": "int",
+      "required": false,
+      "numeric": true,
+      "default": 3
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "read_volume_remaining": {
+    "description": "Stock left in the syringe, in mL.",
+    "parameters": {},
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "refill": {
+    "description": "Draw the syringe back up to full from the reservoir.",
+    "parameters": {},
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  },
+  "reactor": {
+   "stir_rate": {
+    "description": "Current stir rate in rpm.",
+    "parameters": {},
+    "return_type": "int",
+    "return_info": {
+     "type": "int",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "int",
+      "numeric": true
+     }
+    ],
+    "is_coroutine": false,
+    "is_property": true,
+    "property_access": "get",
+    "property_name": "stir_rate",
+    "has_setter": true
+   },
+   "stir_rate_(setter)": {
+    "description": "Set stir_rate. Current stir rate in rpm.",
+    "parameters": {
+     "value": {
+      "type": "int",
+      "required": true,
+      "numeric": true
+     }
+    },
+    "return_type": "None",
+    "return_info": {
+     "type": "NoneType",
+     "required": true
+    },
+    "return_paths": [],
+    "is_coroutine": false,
+    "is_property": true,
+    "property_access": "set",
+    "property_name": "stir_rate",
+    "has_setter": true
+   },
+   "temperature": {
+    "description": "Internal vial temperature in C. Read-only: use set_temperature so the vial ramps\nat a believable rate instead of jumping.",
+    "parameters": {},
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "is_coroutine": false,
+    "is_property": true,
+    "property_access": "get",
+    "property_name": "temperature",
+    "has_setter": false
+   },
+   "cool_down": {
+    "description": "Quench the heat and let the vial cool before sampling.",
+    "parameters": {
+     "target_c": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 25.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "hold": {
+    "description": "Hold at the current setpoint for the reaction time. This is what advances the chemistry.",
+    "parameters": {
+     "minutes": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "load_vial": {
+    "description": "Seat a fresh, empty vial in the block.\n\nThis starts a new experiment: whatever was charged and converted before is gone,\nso call it first in every run or a second run will build on the first one's\ncontents.",
+    "parameters": {
+     "vial_id": {
+      "type": "str",
+      "required": false,
+      "default": "A1"
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "read_temperature": {
+    "description": "Internal vial temperature in C, as read by the probe.",
+    "parameters": {},
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "set_stir_rate": {
+    "description": "Set the stir rate. Biphasic couplings need vigorous mixing to reach full conversion.",
+    "parameters": {
+     "rpm": {
+      "type": "int",
+      "required": false,
+      "numeric": true,
+      "default": 400
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "set_temperature": {
+    "description": "Set the block setpoint. The vial ramps toward it at roughly 5 C/min.",
+    "parameters": {
+     "setpoint_c": {
+      "type": "float",
+      "required": true,
+      "numeric": true
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  },
+  "balance": {
+   "tare": {
+    "description": "Zero the balance with the current load on the pan.",
+    "parameters": {},
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "weigh": {
+    "description": "Read the stable mass in grams once the reading settles.",
+    "parameters": {
+     "settle_seconds": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 3.0
+     }
+    },
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  },
+  "uv_vis": {
+   "blank": {
+    "description": "Record a solvent blank. Absorbance readings are referenced to this.",
+    "parameters": {},
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "collect_spectrum": {
+    "description": "Sweep a wavelength range and return the full absorbance trace.",
+    "parameters": {
+     "start_nm": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 260.0
+     },
+     "end_nm": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 450.0
+     },
+     "step_nm": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 2.0
+     },
+     "dilution_factor": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 1000.0
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "measure_absorbance": {
+    "description": "Absorbance of a diluted aliquot at one wavelength.\n\nThe biaryl product absorbs near 312 nm. Neat reaction mixture is far off-scale, so\nthe aliquot is diluted (1:1000 by default) to land inside the linear range.",
+    "parameters": {
+     "wavelength_nm": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 312.0
+     },
+     "dilution_factor": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 1000.0
+     }
+    },
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  },
+  "hplc": {
+   "analyze": {
+    "description": "Full peak table: product yield, unreacted substrate and the impurity balance.",
+    "parameters": {},
+    "return_type": "HPLCReport",
+    "return_info": {
+     "type": "HPLCReport",
+     "required": true,
+     "is_object": true,
+     "fields": {
+      "composition": {
+       "type": "PeakComposition",
+       "required": true,
+       "is_object": true,
+       "fields": {
+        "yield_percent": {
+         "type": "float",
+         "required": true,
+         "numeric": true
+        },
+        "substrate_remaining_percent": {
+         "type": "float",
+         "required": true,
+         "numeric": true
+        },
+        "impurities_percent": {
+         "type": "float",
+         "required": true,
+         "numeric": true
+        },
+        "purity_percent": {
+         "type": "float",
+         "required": true,
+         "numeric": true
+        }
+       }
+      },
+      "catalyst_mol_percent": {
+       "type": "float",
+       "required": true,
+       "numeric": true
+      },
+      "boronic_acid_equivalents": {
+       "type": "float",
+       "required": true,
+       "numeric": true
+      },
+      "reaction_time_min": {
+       "type": "float",
+       "required": true,
+       "numeric": true
+      },
+      "method": {
+       "type": "str",
+       "required": true
+      }
+     }
+    },
+    "return_paths": [
+     {
+      "path": "composition.yield_percent",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "composition.substrate_remaining_percent",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "composition.impurities_percent",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "composition.purity_percent",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "catalyst_mol_percent",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "boronic_acid_equivalents",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "reaction_time_min",
+      "type": "float",
+      "numeric": true
+     },
+     {
+      "path": "method",
+      "type": "str",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "inject": {
+    "description": "Draw an aliquot from the vial and run a separation.",
+    "parameters": {
+     "sample_volume_ul": {
+      "type": "float",
+      "required": false,
+      "numeric": true,
+      "default": 5.0
+     },
+     "method": {
+      "type": "Literal",
+      "required": false,
+      "options": [
+       "fast_gradient",
+       "standard_gradient",
+       "isocratic"
+      ],
+      "default": "fast_gradient"
+     }
+    },
+    "return_type": "dict",
+    "return_info": {
+     "type": "dict",
+     "required": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "dict",
+      "numeric": false
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   },
+   "measure_yield": {
+    "description": "Assay yield of the coupled product as a percentage of the limiting substrate.\n\nThis is the objective an optimizer should maximise.",
+    "parameters": {},
+    "return_type": "float",
+    "return_info": {
+     "type": "float",
+     "required": true,
+     "numeric": true
+    },
+    "return_paths": [
+     {
+      "path": "",
+      "type": "float",
+      "numeric": true
+     }
+    ],
+    "accepts_kwargs": false,
+    "is_coroutine": false
+   }
+  }
+ },
+ "instrument_meta": {
+  "pump_1": {
+   "module": "lab_drivers",
+   "class": "SyringePump"
+  },
+  "pump_2": {
+   "module": "lab_drivers",
+   "class": "SyringePump"
+  },
+  "pump_3": {
+   "module": "lab_drivers",
+   "class": "SyringePump"
+  },
+  "reactor": {
+   "module": "lab_drivers",
+   "class": "HeaterStirrer"
+  },
+  "balance": {
+   "module": "lab_drivers",
+   "class": "AnalyticalBalance"
+  },
+  "uv_vis": {
+   "module": "lab_drivers",
+   "class": "UVVisSpectrometer"
+  },
+  "hplc": {
+   "module": "lab_drivers",
+   "class": "HPLC"
+  }
+ },
+ "workflows": [
+  {
+   "name": "Suzuki coupling screen",
+   "description": "",
+   "prep": [
+    {
+     "id": 1,
+     "uuid": 898056666,
+     "instrument": "pump_1",
+     "action": "prime",
+     "args": {
+      "cycles": 3
+     },
+     "arg_types": {
+      "cycles": "int"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 2,
+     "uuid": 959346212,
+     "instrument": "pump_2",
+     "action": "prime",
+     "args": {
+      "cycles": 3
+     },
+     "arg_types": {
+      "cycles": "int"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 3,
+     "uuid": 897541250,
+     "instrument": "pump_3",
+     "action": "prime",
+     "args": {
+      "cycles": 3
+     },
+     "arg_types": {
+      "cycles": "int"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 4,
+     "uuid": 126740254,
+     "instrument": "uv_vis",
+     "action": "blank",
+     "args": {},
+     "arg_types": {},
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    }
+   ],
+   "script": [
+    {
+     "id": 1,
+     "uuid": 513741818,
+     "instrument": "reactor",
+     "action": "load_vial",
+     "args": {
+      "vial_id": "#vial_id"
+     },
+     "arg_types": {
+      "vial_id": "str"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 2,
+     "uuid": 76554851,
+     "instrument": "pump_1",
+     "action": "dispense",
+     "args": {
+      "volume_ml": 0.2,
+      "flow_rate_ml_min": 2
+     },
+     "arg_types": {
+      "volume_ml": "float",
+      "flow_rate_ml_min": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 3,
+     "uuid": 794034852,
+     "instrument": "pump_2",
+     "action": "dispense",
+     "args": {
+      "volume_ml": "#boronic_acid_ml",
+      "flow_rate_ml_min": 2
+     },
+     "arg_types": {
+      "volume_ml": "float",
+      "flow_rate_ml_min": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 4,
+     "uuid": 170628326,
+     "instrument": "pump_3",
+     "action": "dispense",
+     "args": {
+      "volume_ml": "#catalyst_ml",
+      "flow_rate_ml_min": 1
+     },
+     "arg_types": {
+      "volume_ml": "float",
+      "flow_rate_ml_min": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 5,
+     "uuid": 482114763,
+     "instrument": "reactor",
+     "action": "set_stir_rate",
+     "args": {
+      "rpm": 500
+     },
+     "arg_types": {
+      "rpm": "int"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 6,
+     "uuid": 139601245,
+     "instrument": "reactor",
+     "action": "set_temperature",
+     "args": {
+      "setpoint_c": "#temperature_c"
+     },
+     "arg_types": {
+      "setpoint_c": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 7,
+     "uuid": 427195192,
+     "instrument": "reactor",
+     "action": "hold",
+     "args": {
+      "minutes": "#reaction_time_min"
+     },
+     "arg_types": {
+      "minutes": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 8,
+     "uuid": 162710929,
+     "instrument": "reactor",
+     "action": "cool_down",
+     "args": {
+      "target_c": 25
+     },
+     "arg_types": {
+      "target_c": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 9,
+     "uuid": 742311664,
+     "instrument": "uv_vis",
+     "action": "measure_absorbance",
+     "args": {
+      "wavelength_nm": 312,
+      "dilution_factor": 1000
+     },
+     "arg_types": {
+      "wavelength_nm": "float",
+      "dilution_factor": "float"
+     },
+     "return": "absorbance_312",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 10,
+     "uuid": 281251021,
+     "instrument": "hplc",
+     "action": "inject",
+     "args": {
+      "sample_volume_ul": 5,
+      "method": "fast_gradient"
+     },
+     "arg_types": {
+      "sample_volume_ul": "float",
+      "method": "Literal"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 11,
+     "uuid": 473719098,
+     "instrument": "hplc",
+     "action": "measure_yield",
+     "args": {},
+     "arg_types": {},
+     "return": "yield_percent",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    }
+   ],
+   "cleanup": [
+    {
+     "id": 1,
+     "uuid": 633164172,
+     "instrument": "reactor",
+     "action": "set_stir_rate",
+     "args": {
+      "rpm": 0
+     },
+     "arg_types": {
+      "rpm": "int"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    }
+   ]
+  },
+  {
+   "name": "UV-Vis linearity check",
+   "description": "Blank, equilibrate at 40 C, read absorbance and mass, flag a reading above the linear range.",
+   "prep": [
+    {
+     "id": 1,
+     "uuid": 706483676,
+     "instrument": "balance",
+     "action": "tare",
+     "args": {},
+     "arg_types": {},
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 2,
+     "uuid": 672738650,
+     "instrument": "uv_vis",
+     "action": "blank",
+     "args": {},
+     "arg_types": {},
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    }
+   ],
+   "script": [
+    {
+     "id": 1,
+     "uuid": 600568668,
+     "instrument": "reactor",
+     "action": "load_vial",
+     "args": {
+      "vial_id": "#sample_id"
+     },
+     "arg_types": {
+      "vial_id": "str"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 2,
+     "uuid": 282786913,
+     "instrument": "reactor",
+     "action": "stir_rate_(setter)",
+     "args": {
+      "value": 400
+     },
+     "arg_types": {
+      "value": "int"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 3,
+     "uuid": 858669381,
+     "instrument": "reactor",
+     "action": "set_temperature",
+     "args": {
+      "setpoint_c": 40
+     },
+     "arg_types": {
+      "setpoint_c": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 4,
+     "uuid": 14677287,
+     "instrument": "reactor",
+     "action": "hold",
+     "args": {
+      "minutes": 10
+     },
+     "arg_types": {
+      "minutes": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 5,
+     "uuid": 312908253,
+     "instrument": "reactor",
+     "action": "temperature",
+     "args": {},
+     "arg_types": {},
+     "return": "temp_c",
+     "return_bindings": [
+      {
+       "path": "",
+       "var": "temp_c"
+      }
+     ],
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 6,
+     "uuid": 285031363,
+     "instrument": "uv_vis",
+     "action": "measure_absorbance",
+     "args": {
+      "wavelength_nm": 312,
+      "dilution_factor": "#dilution"
+     },
+     "arg_types": {
+      "wavelength_nm": "float",
+      "dilution_factor": "float"
+     },
+     "return": "absorbance",
+     "return_bindings": [
+      {
+       "path": "",
+       "var": "absorbance"
+      }
+     ],
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 7,
+     "uuid": 152953682,
+     "instrument": "balance",
+     "action": "weigh",
+     "args": {
+      "settle_seconds": 3
+     },
+     "arg_types": {
+      "settle_seconds": "float"
+     },
+     "return": "mass_g",
+     "return_bindings": [
+      {
+       "path": "",
+       "var": "mass_g"
+      }
+     ],
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 8,
+     "uuid": 980643453,
+     "instrument": "Flow_Control",
+     "action": "If",
+     "args": {
+      "condition": "absorbance > 1.5"
+     },
+     "arg_types": {
+      "condition": "str"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 9,
+     "uuid": 333208434,
+     "instrument": "Flow_Control",
+     "action": "Comment",
+     "args": {
+      "message": "Absorbance #absorbance is above the linear range \u2014 dilute further."
+     },
+     "arg_types": {
+      "message": "str"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    },
+    {
+     "id": 10,
+     "uuid": 121666889,
+     "instrument": "Flow_Control",
+     "action": "End_If",
+     "args": {},
+     "arg_types": {},
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    }
+   ],
+   "cleanup": [
+    {
+     "id": 1,
+     "uuid": 841074762,
+     "instrument": "reactor",
+     "action": "cool_down",
+     "args": {
+      "target_c": 25
+     },
+     "arg_types": {
+      "target_c": "float"
+     },
+     "return": "",
+     "batch_action": false,
+     "consolidate_batch_args": false
+    }
+   ],
+   "version": 3,
+   "body_hash": "d13624fc85a7c03ed1cddbce66e7f20b37fb3074ec44032fcba2765c1b7de110",
+   "updated_at": 1790234195.3758335,
+   "deck_version": 1
+  }
+ ]
+}

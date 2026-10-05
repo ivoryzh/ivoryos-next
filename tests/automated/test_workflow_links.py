@@ -135,6 +135,26 @@ def test_nested_link_expands(workflows_dir):
     assert out[0]["params"]["_parent_path"] == ["outer", "inner"]
 
 
+def test_a_workflow_called_from_inside_another_runs_its_main_steps_only(workflows_dir):
+    """Prep and cleanup mean "once per run". A workflow linked from inside another's body is a
+    step, not a run: left whole it repeated its setup and teardown every time the outer body ran,
+    once per row in a spreadsheet. A link at the top says for itself what it stands for."""
+    write(workflows_dir, "inner", body(
+        prep=[step(action="inner_prep")], script=[step(action="inner_main")], cleanup=[step(action="inner_cleanup")]))
+    write(workflows_dir, "outer", body(
+        prep=[step(action="outer_prep")], script=[link("inner"), step(action="outer_main")], cleanup=[step(action="outer_cleanup")]))
+    methods = lambda blocks: [s["method"] for s in wf.expand_workflow_blocks(blocks, workflows_dir, "main")]
+
+    # The outer workflow as the run (Cloud's "run this workflow", a stage): whole, and the
+    # workflow it calls contributes its main steps only.
+    assert methods([link("outer")]) == ["outer_prep", "inner_main", "outer_main", "outer_cleanup"]
+    # A top-level link that says nothing is still the whole workflow.
+    assert methods([link("inner")]) == ["inner_prep", "inner_main", "inner_cleanup"]
+    # The bench marks a link in a design run as one: main steps only (shared-ui mainOnlyLink).
+    assert methods([{**link("inner"), "phases": ["script"]}]) == ["inner_main"]
+    assert methods([{**link("outer"), "phases": ["script"]}]) == ["inner_main", "outer_main"]
+
+
 def test_depth_cap_enforced(workflows_dir):
     write(workflows_dir, "w0", body(script=[step()]))
     for i in range(1, 6):

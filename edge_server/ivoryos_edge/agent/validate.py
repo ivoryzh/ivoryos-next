@@ -183,12 +183,17 @@ def _check_returns(where, entry, block, issues, instrument, method):
             ))
 
 
-def validate_body(body, schema, known_workflows=(), resolve_workflow=None):
+def validate_body(body, schema, known_workflows=(), resolve_workflow=None, check_fields=None):
     """Return a list of issues, most severe first. An empty list means the body is runnable.
 
     `schema` is the live instrument schema (`app.state.instrument_schemas`). `known_workflows`
     names the saved workflows a `Library Workflows` step may call, and `resolve_workflow` reads
     one's body by name — supply it and a link's arguments are checked too, not just its target.
+    `check_fields(instrument, method, params)` returns the safety limits a step's literal values
+    break (safety.Guard.check_params). The agent passes it, so a model that writes 200 C is told
+    the limit instead of handing a person a workflow the edge will refuse. The Library's
+    compatibility check does not: its verdict is cached on the deck's shape, and a limit is not
+    part of that.
     """
     issues = []
     body = body or {}
@@ -336,6 +341,12 @@ def validate_body(body, schema, known_workflows=(), resolve_workflow=None):
 
             _check_params(where, entry, params, issues, known_vars, instrument, method)
             _check_returns(where, entry, block, issues, instrument, method)
+            if check_fields is not None:
+                for message in check_fields(instrument, method, params):
+                    issues.append(_issue(
+                        "error", where, message,
+                        hint="This deck's safety guard refuses it. Use a value inside the limit.",
+                    ))
             known_vars.update(_flatten_return_names(block))
 
     for kind, where in flow_stack:

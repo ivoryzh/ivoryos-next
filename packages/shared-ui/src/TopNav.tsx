@@ -17,8 +17,10 @@ import { ChevronsUpDown } from 'lucide-react';
 /**
  * The IvoryOS mark (desktop/build/logo.png, trimmed). Each app serves it from its own `public/`.
  * It is wider than tall, so size it by height (`h-6 w-auto`): a square box squashes the elephant.
+ * Under the app's base path when it has one (the frontend's tour build), since an <img> src does
+ * not get one added the way a <Link> does.
  */
-export const BRAND_MARK = '/ivoryos-mark.png';
+export const BRAND_MARK = `${process.env.NEXT_PUBLIC_BASE_PATH || ''}/ivoryos-mark.png`;
 
 const pill = 'flex items-center gap-2 h-8 px-2.5 rounded-lg text-[13px] font-medium whitespace-nowrap transition-colors shrink-0';
 const idle = 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/[0.06] dark:hover:text-gray-100';

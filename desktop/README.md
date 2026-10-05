@@ -95,15 +95,20 @@ ways, all through the same install path:
 - **Add from Hub** on a deck's Instruments tab, or **Automation Hub** in the sidebar: search the
   Hub's drivers, fill in the settings form the Hub provides for that driver (connection, port,
   init arguments), and add. With no deck yet, the first add asks for a deck name and creates
-  the deck it lands on. The Hub turns the choice into a deck entry (`/api/catalog/deck-entry`
-  in the Hub repo).
-- **Open in IvoryOS** on the Hub's build page: the whole cart, as an
-  `ivoryos://install?deck=<base64url JSON>` link. The launcher asks which deck to install into.
-  `ivoryos://install?manifest=https://…` (a manifest by URL) works too.
+  the deck it lands on. `src/hubCatalog.js` turns the choice into a deck entry, mirroring the
+  Hub repo's `utils/deck-manifest.ts`.
+- **Open in IvoryOS** on the Hub's build page: the cart as Hub ids,
+  `ivoryos://install?modules=4,7,7&plugins=3&templates=9&optimizers=ax-platform` (or
+  `?platform=12`). The app reads each from the Hub and opens the platform install screen on them,
+  the same one as **Add platform**, with names, settings, deck choice and who contributed each
+  driver; nothing installs until **Install** there (`src/installLink.js`). A link carrying a whole
+  deck (`?deck=`, the old form) is refused: any web page could build one naming any package or
+  importable class, and it would have looked like it came from the Hub.
+  `ivoryos://install?manifest=https://…` (a manifest by URL) still goes through the dialog below.
 - **Install from deck file…**: a deck JSON on disk.
 
-Installing asks for confirmation (listing the packages and instruments, and warning about any
-package not pinned to one version), then stops the edge, runs `uv pip install`, writes the deck,
+Installing a manifest or deck file asks for confirmation (listing the packages, and each
+instrument with the class it loads, and warning about any package not pinned to one version), then stops the edge, runs `uv pip install`, writes the deck,
 and starts the edge again. If the install fails, the deck is left unchanged and the old edge
 comes back. Instruments that fail to load (a missing driver, an unplugged device) are marked in
 the launcher and under **Not loaded** on the edge's Instruments page, with the reason.

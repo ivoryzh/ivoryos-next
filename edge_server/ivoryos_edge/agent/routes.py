@@ -32,6 +32,7 @@ from ivoryos_edge.agent.chat import translate
 from ivoryos_edge.agent.deck import describe_deck, describe_method
 from ivoryos_edge.agent.providers import ProviderError, build_provider, provider_catalogue
 from ivoryos_edge.agent.validate import summarise, unbound_variables, validate_body
+from ivoryos_edge import safety
 from ivoryos_edge.models import AgentProposal, async_session
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -99,6 +100,10 @@ def agent_method(instrument: str, method: str, request: Request):
         return JSONResponse(status_code=404, content={
             "error": f"No method '{method}' on '{instrument}'.",
         })
+    # What this deck's safety guard allows for each field, so a value is chosen inside it.
+    limits = (safety.guard.view()["fields"].get(instrument) or {}).get(method)
+    if limits:
+        described["limits"] = limits
     return described
 
 
@@ -139,7 +144,7 @@ async def agent_validate(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
     body = data.get("body", data)
-    issues = validate_body(body, _schema(request), _known_workflows(request), _resolver(request))
+    issues = validate_body(body, _schema(request), _known_workflows(request), _resolver(request), safety.guard.check_params)
     return {
         "ok": not any(i["severity"] == "error" for i in issues),
         "summary": summarise(issues),
@@ -170,7 +175,7 @@ async def agent_propose(request: Request):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-    issues = validate_body(body, _schema(request), _known_workflows(request), _resolver(request))
+    issues = validate_body(body, _schema(request), _known_workflows(request), _resolver(request), safety.guard.check_params)
     errors = [i for i in issues if i["severity"] == "error"]
 
     # Refuse rather than file something broken. The agent has everything it needs to fix it —
@@ -341,7 +346,7 @@ async def agent_accept(proposal_id: int, request: Request):
             # workflow and a person reading it — an instrument goes offline, a driver is
             # updated — and the issues stored on the proposal are a record of what the agent
             # was told, not a current verdict.
-            issues = validate_body(row.payload, _schema(request), _known_workflows(request), _resolver(request))
+            issues = validate_body(row.payload, _schema(request), _known_workflows(request), _resolver(request), safety.guard.check_params)
             blocking = [i for i in issues if i["severity"] == "error"]
             if blocking and not data.get("force"):
                 return JSONResponse(status_code=400, content={
@@ -555,6 +560,7 @@ async def _run_translation(request, data, on_progress=None):
         existing_body=existing_body,
         on_progress=on_progress,
         resolve_workflow=_resolver(request),
+        check_fields=safety.guard.check_params,
     )
 
     body = result["body"]
@@ -587,6 +593,34 @@ async def _run_translation(request, data, on_progress=None):
         "model": model_id,
         "raw": None if result["ok"] else (transcript[-1]["raw"][:4000] if transcript else None),
     }
+
+
+@router.post("/safety")
+async def agent_safety(request: Request):
+    """Plain words to a draft of the safety configuration (agent/safety_draft.py).
+
+    Returns the draft for the Safety page to show unsaved. It saves nothing: like a proposed
+    workflow, what a model writes takes effect only when a person accepts it, here by pressing
+    Save on a page that shows exactly what was added.
+    """
+    from ivoryos_edge.agent.safety_draft import draft_safety
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    message = _clip(data.get("message"), 4000).strip()
+    if not message:
+        return JSONResponse(status_code=400, content={"error": "Say what should be prevented."})
+    try:
+        provider = build_provider(_read_settings(request))
+        result, _ = await draft_safety(provider, safety.guard.deck(), data.get("config") or safety.guard.config, message)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except ProviderError as e:
+        return JSONResponse(status_code=503, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"The model call failed: {e}"})
+    return {**result, "model": getattr(provider, "model", None)}
 
 
 @router.post("/chat")

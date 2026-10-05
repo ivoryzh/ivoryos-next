@@ -2,8 +2,8 @@
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Download, Upload, AlertTriangle, Layers, ListTree } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Play, Download, Upload, AlertTriangle, Layers, ListTree, Grid3x3 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
 import LiveRun from '@/components/LiveRun';
@@ -19,10 +19,13 @@ import {
   expandSpreadsheet,
   resolveFixedBlock,
   toSubmittedStep,
-  toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks } from '@ivoryos/shared-ui';
+  toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks,
+  TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, SuggestInput,
+  type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 import Link from 'next/link';
 import { useQueueBusy } from '@/queueBusy';
 import { editRunIdFromUrl, hydrateBlocks, leaveEdit, loadQueuedRun, saveQueuedRun, sourceBlock, type QueuedEdit } from '@/queuedEdit';
+import { currentStages, loadStage, stageKeeper, type EmbeddedStage } from '@/stages';
 
 /**
  * Resolve any `Library Workflows` blocks into the steps they stand for, via the server's own
@@ -98,13 +101,25 @@ async function expandLinkedBlocks(seqs: { prep: any[]; sequence: any[]; cleanup:
  * run the workflow a single time from here rather than only from the Designer's Run button
  * (Cloud's Once / Iterate / Optimize, on the bench).
  */
-export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) {
+export default function RunWorkflowPage({ mode, stage }: {
+  mode: 'once' | 'iterate';
+  /**
+   * Set when this is drawn inside the Stages page to set up one stage of a design (src/stages.ts):
+   * it then shows that stage alone, without the page around it, and keeps what is typed for the
+   * Stages page as it changes. There is no Run or Save here: that page starts every stage together.
+   */
+  stage?: EmbeddedStage;
+}) {
   const once = mode === 'once';
   const [experimentName, setExperimentName] = useState('');
   // Editing a run that waits in the queue (?edit=<id>, queuedEdit.ts): the page shows that run, and
   // saves nothing over the person's own spreadsheet or fixed values while it does.
   const [editing, setEditing] = useState<QueuedEdit | null>(null);
   const editingRef = useRef(false);
+  // How many stages the Designer's workflow would make, for the hint that offers them.
+  const [stageCount, setStageCount] = useState(0);
+  // Keeps a stage's settings as they change (stages.ts stageKeeper); set once the stage is loaded.
+  const keepStage = useRef<ReturnType<typeof stageKeeper> | null>(null);
   const [sequence, setSequence] = useState<any[]>([]);
   const [prepSequence, setPrepSequence] = useState<any[]>([]);
   const [cleanupSequence, setCleanupSequence] = useState<any[]>([]);
@@ -130,6 +145,20 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
 
   const [varOptions, setVarOptions] = useState<Record<string, any[]>>({});
+  // Which fields each '#variable' feeds, so the safety guard's limits on those fields can be shown
+  // on the variable (shared-ui safety.ts). The edge enforces them; this marks a value as it is typed.
+  const [varFields, setVarFields] = useState<Record<string, FieldRef[]>>({});
+  const safety = edgeStatus?.safety;
+  const varGuards = useMemo(() => {
+    const out: Record<string, FieldGuard[]> = {};
+    for (const [name, refs] of Object.entries(varFields)) {
+      const guards = guardsFor(safety, refs);
+      if (guards.length) out[name] = guards;
+    }
+    return out;
+  }, [varFields, safety]);
+  // The Once form's tray picker: which variable it is open for.
+  const [pickingTray, setPickingTray] = useState<string | null>(null);
   // Where a '#' with no name sits ("pump_1.dispense → volume_ml"), if anywhere.
   const [hasEmptyHashVar, setHasEmptyHashVar] = useState<string | null>(null);
   const [liveInputVars, setLiveInputVars] = useState<Set<string>>(new Set());
@@ -161,9 +190,14 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
       .catch(err => console.error(err));
 
     // Load sequence and extract variables
-    const editId = editRunIdFromUrl();
+    const editId = stage ? null : editRunIdFromUrl();
+    const stageIndex = stage ? stage.index : null;
     const savedSequence = localStorage.getItem('ivoryos_sequence');
-    if (savedSequence || editId) {
+    {
+      const design = currentStages();
+      setStageCount(!design.problem && design.stages.some(p => p.kind === 'workflow') ? design.stages.length : 0);
+    }
+    if (savedSequence || editId || stageIndex !== null) {
       (async () => {
       try {
         // What the page starts from: a queued run being edited, or the Designer's workflow.
@@ -171,6 +205,7 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
         let parsedSeq: any[] = [];
         let pSeq: any[] = [];
         let cSeq: any[] = [];
+        let stageLoaded: Awaited<ReturnType<typeof loadStage>> | null = null;
         if (editId) {
           try {
             const { run, source, instruments } = await loadQueuedRun(editId);
@@ -184,6 +219,29 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
           } catch (e: any) {
             await notify(e.message, { title: 'Cannot edit this run', tone: 'error' });
             leaveEdit();
+            return;
+          }
+        } else if (stageIndex !== null) {
+          try {
+            const loaded = await loadStage(stageIndex, mode);
+            editingRef.current = true;
+            // The stage's own steps, with its linked workflow opened out the way a run of that
+            // workflow is: its setup and teardown once, its body per row.
+            parsedSeq = loaded.stage.blocks.sequence;
+            pSeq = loaded.stage.blocks.prep;
+            cSeq = loaded.stage.blocks.cleanup;
+            const expanded = await expandLinkedBlocks(splitRepeatedLinks({ prep: pSeq, sequence: parsedSeq, cleanup: cSeq }));
+            if (expanded) {
+              parsedSeq = expanded.sequence;
+              pSeq = expanded.prep;
+              cSeq = expanded.cleanup;
+            }
+            // What was last typed for this stage in this mode, if anything.
+            const kept = loaded.settings?.state || {};
+            restored = { rows: kept.rows || [], batchSize: kept.batchSize || '', globalValues: kept.globalValues || {} };
+            stageLoaded = loaded;
+          } catch (e: any) {
+            await notify(e.message, { title: 'Cannot set up this stage', tone: 'error' });
             return;
           }
         } else {
@@ -203,10 +261,10 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
         // per-sample or batch unit. Expanding through the server's own expander makes the two
         // identical, and keeps this page agreeing with the Designer's preview.
         //
-        // A link in Main is split first (splitRepeatedLinks): its prep and cleanup run once for the
-        // whole run, and only its main block per row. Expanded whole, each row ran the workflow's
-        // setup and teardown again.
-        const expanded = await expandLinkedBlocks(splitRepeatedLinks({ prep: pSeq, sequence: parsedSeq, cleanup: cSeq }));
+        // A linked workflow used as a step is its main steps only (shared-ui mainOnlyLinks): its
+        // own prep and cleanup belong to it as a run, which here it is not. A stage, above, is
+        // that run, and keeps them.
+        const expanded = await expandLinkedBlocks(mainOnlyLinks({ prep: pSeq, sequence: parsedSeq, cleanup: cSeq }));
         if (expanded) {
           parsedSeq = expanded.sequence;
           pSeq = expanded.prep;
@@ -230,10 +288,12 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
         const batchVars = new Set<string>();
         const vTypes: Record<string, string> = {};
         const vOptions: Record<string, any[]> = {};
+        const vFields: Record<string, FieldRef[]> = {};
         let sawEmptyHash: string | null = null;
         let scanning = '';
+        let scanningBlock: any = null;
 
-        const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>) => {
+        const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>, prefix = '') => {
             if (!obj) return;
             Object.entries(obj).forEach(([k, v]) => {
                 let pData = null;
@@ -251,24 +311,32 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
 
                     if (pData?.type) vTypes[varName] = pData.type;
                     if (pData?.options) vOptions[varName] = pData.options;
+                    const ref = { instrument: scanningBlock.instrument, method: scanningBlock.method, param: `${prefix}${k}` };
+                    const known = (vFields[varName] ||= []);
+                    if (!known.some(f => f.instrument === ref.instrument && f.method === ref.method && f.param === ref.param)) known.push(ref);
                 } else if (typeof v === 'object' && v !== null) {
-                    extractVars(v, pData, targetSet);
+                    extractVars(v, pData, targetSet, `${prefix}${k}.`);
                 }
             });
         };
+        const scan = (block: any, targetSet: Set<string>) => {
+            scanning = `${block.instrument}.${block.method}`;
+            scanningBlock = block;
+            extractVars(block.params, block.schema, targetSet);
+        };
 
         parsedSeq.forEach((block: any) => {
-            scanning = `${block.instrument}.${block.method}`;
             // A batch step's #vars still come from the spreadsheet — they just only need to be
             // filled in on one row per batch group instead of every row (see batchVars below).
-            extractVars(block.params, block.schema, vars);
-            if (block.isBatchAction) extractVars(block.params, block.schema, batchVars);
+            scan(block, vars);
+            if (block.isBatchAction) scan(block, batchVars);
         });
 
-        pSeq.forEach((block: any) => { scanning = `${block.instrument}.${block.method}`; extractVars(block.params, block.schema, gVars); });
-        cSeq.forEach((block: any) => { scanning = `${block.instrument}.${block.method}`; extractVars(block.params, block.schema, gVars); });
+        pSeq.forEach((block: any) => scan(block, gVars));
+        cSeq.forEach((block: any) => scan(block, gVars));
 
         setHasEmptyHashVar(sawEmptyHash);
+        setVarFields(vFields);
 
         const varList = Array.from(vars);
         const gVarList = Array.from(gVars);
@@ -279,13 +347,13 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
         setVarOptions(vOptions);
         
         const savedGlobalValues = restored ? JSON.stringify(restored.globalValues) : localStorage.getItem('ivoryos_global_values');
+        let initialGlobals: Record<string, string> = {};
         if (savedGlobalValues) {
-            setGlobalValues(JSON.parse(savedGlobalValues));
+            initialGlobals = JSON.parse(savedGlobalValues);
         } else {
-            const initGVals: Record<string, string> = {};
-            gVarList.forEach(v => initGVals[v] = '');
-            setGlobalValues(initGVals);
+            gVarList.forEach(v => initialGlobals[v] = '');
         }
+        setGlobalValues(initialGlobals);
         
         // Init rows from memory or empty
         const savedRows = restored ? (restored.rows.length ? JSON.stringify(restored.rows) : null) : localStorage.getItem('ivoryos_spreadsheet');
@@ -303,6 +371,12 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
 
         const savedBatchSize = restored ? restored.batchSize : localStorage.getItem('ivoryos_batch_size');
         if (savedBatchSize) setBatchSize(savedBatchSize);
+        // From here on, what is typed for a stage is kept as it changes. Told what was just
+        // loaded, so that opening a stage to look at it writes nothing.
+        if (stage && stageLoaded) {
+          keepStage.current = stageKeeper(stageLoaded.stage, mode,
+            { rows: initialRows, batchSize: savedBatchSize || '', globalValues: initialGlobals }, stage.onChange);
+        }
       } catch (e) {
         console.error("Failed to load sequence", e);
       }
@@ -348,6 +422,21 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
     const newRows = [...rows];
     newRows[idx][variable] = value;
     setRows(newRows);
+  };
+
+  // Positions picked on a tray become the column, one row each, in visiting order. Rows are added
+  // as needed; a row past the last position loses this column's value, and is dropped when that
+  // leaves it empty at the end of the table.
+  const fillColumn = (variable: string, values: string[]) => {
+    const next = rows.map(r => ({ ...r }));
+    values.forEach((value, i) => {
+      if (!next[i]) next[i] = Object.fromEntries(variables.map(v => [v, '']));
+      next[i][variable] = value;
+    });
+    const isEmpty = (r: Record<string, any>) => variables.every(v => r[v] === undefined || r[v] === null || r[v] === '');
+    for (let i = values.length; i < next.length; i++) next[i][variable] = '';
+    while (next.length > Math.max(1, values.length) && isEmpty(next[next.length - 1])) next.pop();
+    setRows(next);
   };
 
   const downloadCSV = () => {
@@ -436,26 +525,62 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
   const runRows = once ? rows.slice(0, 1) : rows;
   const runBatchSize = once ? '' : batchSize;
 
+  /**
+   * The run this page makes, without its name. Throws RunConfigError saying what is missing.
+   *
+   * The per-sample/batch walk, the `#var` resolution and the numeric checks all live in
+   * @ivoryos/shared-ui — the Cloud orchestrator dispatches spreadsheet runs through the very same
+   * functions, so a distributed run and a bench run expand identically. The table above draws its
+   * group boundaries from the same `groupSizeFor`, which is what keeps the "not used for this row"
+   * hint from ever becoming a lie.
+   */
+  const buildBody = () => {
+    const fullSequence = expandSpreadsheet({ sequence, rows: runRows, variables, batchSize: runBatchSize, liveInputVars });
+    const skip = (v: string) => liveInputVars.has(v);
+    const resolvedPrep = prepSequence.map(b => resolveFixedBlock(b, globalValues, { skip }));
+    const resolvedCleanup = cleanupSequence.map(b => resolveFixedBlock(b, globalValues, { skip }));
+    return {
+      parameters: {
+        ...buildSpreadsheetParameters({ variables, rows: runRows, sequence, batchSize: runBatchSize }),
+        // Lets the edge time runs of a saved workflow (runtime.py).
+        ...(!editing && !stage && unmodifiedSavedWorkflowName() ? { workflow_name: unmodifiedSavedWorkflowName() } : {}),
+        // What this page needs to show the run again while it waits (queuedEdit.ts).
+        _source: {
+          page: mode,
+          prep: prepSequence.map(sourceBlock),
+          sequence: sequence.map(sourceBlock),
+          cleanup: cleanupSequence.map(sourceBlock),
+          globalValues,
+        },
+      },
+      prep: resolvedPrep,
+      // `toSubmittedStep` stamps each step with the row it came from. Data History used to
+      // recover that by slicing the flat list into equal chunks, which assumes a row-major
+      // flattening this walk does not produce — see toSubmittedStep for the full story.
+      sequence: fullSequence.map(toSubmittedStep),
+      cleanup: resolvedCleanup,
+    };
+  };
+
+  // A stage keeps what is typed as it is typed: no Save. A moment after the last keystroke, the
+  // values and the run they make (or what is still missing) go to the Stages page's draft.
+  useEffect(() => {
+    if (!keepStage.current) return;
+    const timer = setTimeout(() => {
+      keepStage.current?.({ rows, batchSize, globalValues }, () => ({ name: '', ...buildBody() }));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [rows, batchSize, globalValues, sequence]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const executeSpreadsheet = async () => {
     if (sequence.length === 0 && prepSequence.length === 0 && cleanupSequence.length === 0) return;
     
     setExecutionState({ isRunning: true, currentRow: -1, results: [] });
 
     try {
-      // The per-sample/batch walk, the `#var` resolution and the numeric checks all live in
-      // @ivoryos/shared-ui now — the Cloud orchestrator dispatches spreadsheet runs through the
-      // very same functions, so a distributed run and a bench run expand identically. The table
-      // above draws its group boundaries from the same `groupSizeFor`, which is what keeps the
-      // "not used for this row" hint from ever becoming a lie.
-      let fullSequence: any[] = [];
+      let body: ReturnType<typeof buildBody>;
       try {
-        fullSequence = expandSpreadsheet({
-          sequence,
-          rows: runRows,
-          variables,
-          batchSize: runBatchSize,
-          liveInputVars,
-        });
+        body = buildBody();
       } catch (err: any) {
         setExecutionState({ isRunning: false, currentRow: -1, results: [] });
         await notify(err.message, {
@@ -465,41 +590,11 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
         return;
       }
 
-      let resolvedPrep: any[] = [];
-      let resolvedCleanup: any[] = [];
-      try {
-          const skip = (v: string) => liveInputVars.has(v);
-          resolvedPrep = prepSequence.map(b => resolveFixedBlock(b, globalValues, { skip }));
-          resolvedCleanup = cleanupSequence.map(b => resolveFixedBlock(b, globalValues, { skip }));
-      } catch (err: any) {
-          await notify(err.message, { title: 'Missing a value', tone: 'error' });
-          setExecutionState({ isRunning: false, currentRow: -1, results: [] });
-          return;
-      }
-
       // Submit
       const payload = {
         // Editing keeps the queued run's name unless a new one is typed.
         name: editing ? experimentName.trim() : await buildRunName(`${localStorage.getItem('ivoryos_editing_workflow') || 'Spreadsheet'} Run`, experimentName, API_BASE),
-        parameters: {
-          ...buildSpreadsheetParameters({ variables, rows: runRows, sequence, batchSize: runBatchSize }),
-          // Lets the edge time runs of a saved workflow (runtime.py).
-          ...(!editing && unmodifiedSavedWorkflowName() ? { workflow_name: unmodifiedSavedWorkflowName() } : {}),
-          // What this page needs to show the run again while it waits (queuedEdit.ts).
-          _source: {
-            page: mode,
-            prep: prepSequence.map(sourceBlock),
-            sequence: sequence.map(sourceBlock),
-            cleanup: cleanupSequence.map(sourceBlock),
-            globalValues,
-          },
-        },
-        prep: resolvedPrep,
-        // `toSubmittedStep` stamps each step with the row it came from. Data History used to
-        // recover that by slicing the flat list into equal chunks, which assumes a row-major
-        // flattening this walk does not produce — see toSubmittedStep for the full story.
-        sequence: fullSequence.map(toSubmittedStep),
-        cleanup: resolvedCleanup
+        ...body,
       };
 
       if (editing) {
@@ -552,29 +647,40 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
   const hasBatchSize = parseInt(batchSize) > 1;
   const activeRowCount = rows.filter(r => Object.values(r || {}).some(v => v !== undefined && v !== null && v !== '')).length;
 
+  // Embedded in the Stages page, only the configuration itself is drawn: that page has the
+  // sidebar, the tabs and the run bar.
   return (
-    <div className={`flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
+    <div className={stage ? 'text-gray-900 dark:text-white' : `flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-900 dark:text-white font-sans overflow-hidden ${theme}`}>
       {/* Sidebar */}
-      <Sidebar />
+      {!stage && <Sidebar />}
 
       {/* Main Area */}
-      <div className="flex-1 flex flex-col relative z-0">
-        <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
+      <div className={stage ? '' : 'flex-1 flex flex-col relative z-0'}>
+        {!stage && <header className="h-16 shrink-0 border-b border-gray-200 dark:border-white/10 flex items-center gap-3 px-6 bg-white/80 dark:bg-black/20 backdrop-blur-md shadow-sm dark:shadow-none z-10">
           <RunTabs active={once ? 'once' : 'configure'} />
           {!once && variables.length > 0 && (
             <span className="text-xs font-semibold text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-white/5 px-2 py-0.5 rounded-full">
               {rows.length} {rows.length === 1 ? 'entry' : 'entries'}
             </span>
           )}
-        </header>
+        </header>}
 
-        <div className="p-8 flex-1 overflow-y-auto pb-12">
+        <div className={stage ? '' : 'p-8 flex-1 overflow-y-auto pb-12'}>
           {editing && (
             <div className="mb-4 flex items-center gap-3 rounded-lg border border-gray-300 bg-gray-100 px-4 py-2.5 text-sm text-gray-800 dark:border-white/15 dark:bg-white/10 dark:text-gray-100">
               <span className="flex-1 min-w-0">
                 Editing the queued run <b className="font-semibold">{editing.name}</b>. Save changes to replace it; it keeps its place in the queue.
               </span>
               <button type="button" onClick={leaveEdit} className="shrink-0 rounded-md px-2.5 py-1 text-xs font-semibold text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-white/10">Cancel</button>
+            </div>
+          )}
+          {!stage && !editing && stageCount > 0 && (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+              <span className="flex-1 min-w-0">
+                This design uses saved workflows. Here only their main steps run, sharing one {once ? 'form' : 'table'}; their own prep and cleanup do not.
+                To run each one whole, with its own settings, set it up in stages.
+              </span>
+              <Link href="/stages" className="shrink-0 font-semibold text-accent-fg hover:underline">Set up in {stageCount} stages</Link>
             </div>
           )}
           {/* The Designer marks the step itself; this only says why the run below would fail. */}
@@ -599,9 +705,12 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                        setGlobalValues(updated);
                        if (!editingRef.current) localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
                      }}
-                     title={isInvalidNumericCell(v, globalValues[v]) ? `Expects a number (${varTypes[v]})` : undefined}
+                     title={guardProblem(varGuards[v], globalValues[v], safety)
+                       ? `${globalValues[v]} ${guardProblem(varGuards[v], globalValues[v], safety)}`
+                       : isInvalidNumericCell(v, globalValues[v]) ? `Expects a number (${varTypes[v]})`
+                       : (varGuards[v] || []).map(g => guardHint(g, safety)).filter(Boolean).join(' · ') || undefined}
                      className={`w-36 bg-white dark:bg-black/50 border rounded-md px-2 py-1 text-sm outline-none ${
-                       isInvalidNumericCell(v, globalValues[v])
+                       isInvalidNumericCell(v, globalValues[v]) || guardProblem(varGuards[v], globalValues[v], safety)
                          ? 'border-red-400 dark:border-red-500/60'
                          : 'border-amber-300 dark:border-amber-700/50 focus:border-amber-500'
                      }`}
@@ -648,19 +757,38 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                 {variables.map(v => {
                   const value = String(rows[0]?.[v] ?? '');
                   const field = 'flex-1 min-w-0 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-800 focus:outline-none focus:border-accent dark:bg-black/40 dark:border-white/10 dark:text-gray-100';
+                  // What the safety guard allows for this value, said under the field as it is typed.
+                  const guards = varGuards[v] || [];
+                  const refused = guardProblem(guards, value, safety);
+                  const hint = guards.map(g => guardHint(g, safety)).filter(Boolean).join(' · ');
+                  const tray = trayForGuards(guards, safety);
                   return (
-                    <div key={v} className="flex items-center gap-3">
-                      <label htmlFor={`once-${v}`} className="w-40 shrink-0 truncate font-mono text-sm text-gray-800 dark:text-gray-200" title={v}>{v}</label>
+                    <div key={v}>
+                    <div className="flex items-center gap-3">
+                      <label htmlFor={`once-${stage ? `${stage.index}-` : ''}${v}`} className="w-40 shrink-0 truncate font-mono text-sm text-gray-800 dark:text-gray-200" title={v}>{v}</label>
                       {varOptions[v] ? (
-                        <select id={`once-${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)} className={field}>
+                        <select id={`once-${stage ? `${stage.index}-` : ''}${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)} className={`${field} ${refused ? '!border-red-400' : ''}`}>
                           <option value="" disabled>Select {v}</option>
                           {varOptions[v].map((opt: any) => <option key={String(opt)} value={String(opt)}>{String(opt)}</option>)}
                         </select>
                       ) : (
-                        <input id={`once-${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)} autoComplete="off"
-                          className={`${field} ${isInvalidNumericCell(v, value) ? '!border-red-400' : ''}`} />
+                        <SuggestInput id={`once-${stage ? `${stage.index}-` : ''}${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)}
+                          suggestions={guards.flatMap(g => guardSuggestions(g, safety))}
+                          className={`${field} ${isInvalidNumericCell(v, value) || refused ? '!border-red-400' : ''}`} />
+                      )}
+                      {tray && (
+                        <button type="button" onClick={() => setPickingTray(v)} title={`Pick a position on ${tray.tray.label}`}
+                          className="shrink-0 rounded-lg border border-gray-200 p-2 text-gray-500 hover:bg-gray-50 hover:text-gray-800 dark:border-white/10 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100">
+                          <Grid3x3 className="h-4 w-4" />
+                        </button>
                       )}
                       {varTypes[v] && <span className="w-14 shrink-0 text-xs text-gray-400">{varTypes[v]}</span>}
+                    </div>
+                    {(refused || hint) && (
+                      <p className={`mt-1 pl-[10.75rem] text-xs ${refused ? 'text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                        {refused ? `${value} ${refused}` : hint}
+                      </p>
+                    )}
                     </div>
                   );
                 })}
@@ -689,7 +817,10 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
               batchVariables={batchVariables}
               batchSize={batchSize}
               showBatchGrouping={hasBatchStep || hasBatchSize}
-              idPrefix="configure"
+              idPrefix={stage ? `stage-${stage.index}` : 'configure'}
+              varGuards={varGuards}
+              safety={safety}
+              onFillColumn={fillColumn}
             />
           )}
 
@@ -711,14 +842,14 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                     />
                   </div>
                 )}
-                <input
+                {!stage && <input
                   type="text"
                   value={experimentName}
                   onChange={e => setExperimentName(e.target.value)}
                   placeholder="Experiment name (optional)"
                   title="Shown in Data History instead of the default run label"
                   className="w-56 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-green-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-500"
-                />
+                />}
                 {/* "24 rows x batch 4" is otherwise impossible to turn into a real call count
                     without simulating the whole per-sample/batch walk in your head. */}
                 <button
@@ -730,7 +861,7 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                   <span>Preview</span>
                 </button>
               </div>
-              <button
+              {!stage && <button
                   onClick={async () => {
                       if (hasPendingRuns && !editing) {
                           const ok = await confirmDialog("A task is already running. Add this sequence to the execution queue?", {
@@ -745,14 +876,24 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                 >
                   <Play className="w-5 h-5" />
                   <span>{editing ? 'Save changes' : hasPendingRuns ? 'Add to Queue' : 'Run'}</span>
-                </button>
+                </button>}
             </div>
           )}
         </div>
         {/* Below the scrolling page, where the idle chip is: pressing Run widens the chip into the
             run bar, so it is watched where it started and never a scroll away. */}
-        <LiveRun />
+        {!stage && <LiveRun />}
       </div>
+
+      {pickingTray && trayForGuards(varGuards[pickingTray], safety) && (
+        <TrayPicker
+          tray={trayForGuards(varGuards[pickingTray], safety)!.tray}
+          title={pickingTray}
+          initial={[String(rows[0]?.[pickingTray] ?? '')]}
+          onPick={([position]) => updateRow(0, pickingTray, position)}
+          onClose={() => setPickingTray(null)}
+        />
+      )}
 
       <WorkflowMap
         isOpen={isMapOpen}

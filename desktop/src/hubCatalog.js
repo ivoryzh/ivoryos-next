@@ -390,7 +390,7 @@ class HubCatalog {
             this._rows('plugins', PLUGIN_FIELDS_WITH_API(this), [`platform_ids=cs.{${Number(platform.id)}}`]),
             this._rows('templates', TEMPLATE_FIELDS, [`platform_id=eq.${Number(platform.id)}`], { unlisted: true }),
         ]);
-        const found = new Map(modules.map((m) => [Number(m.id), m]));
+        const found = new Map((await this._withContributors(modules)).map((m) => [Number(m.id), m]));
         return {
             platform: {
                 ...platform,
@@ -401,6 +401,51 @@ class HubCatalog {
                 templates: templates.map(templateSummary),
             },
         };
+    }
+
+    /**
+     * What an `ivoryos://install` link names (installLink.js), in the shape `platform()` returns so
+     * the launcher's platform install screen can show it. Drivers keep the link's order and repeats;
+     * an id the caller may not see (not on the Hub, or someone's private row) is reported, not dropped.
+     */
+    async selection({ modules = [], plugins = [], templates = [] } = {}) {
+        const moduleIds = ids(modules);
+        const unique = (list) => [...new Set(ids(list))];
+        const [moduleRows, pluginRows, templateRows] = await Promise.all([
+            moduleIds.length ? this._rows('modules', MODULE_FIELDS, [`id=in.(${unique(moduleIds).join(',')})`], { unlisted: true }) : [],
+            ids(plugins).length ? this._rows('plugins', PLUGIN_FIELDS_WITH_API(this), [`id=in.(${unique(plugins).join(',')})`]) : [],
+            ids(templates).length ? this._rows('templates', TEMPLATE_FIELDS, [`id=in.(${unique(templates).join(',')})`], { unlisted: true }) : [],
+        ]);
+        const found = new Map((await this._withContributors(moduleRows)).map((m) => [Number(m.id), m]));
+        const seen = (rows) => new Set(rows.map((r) => Number(r.id)));
+        const pluginsSeen = seen(pluginRows);
+        const templatesSeen = seen(templateRows);
+        return {
+            selection: {
+                modules: moduleIds.filter((m) => found.has(m)).map((m) => found.get(m)),
+                hiddenModules: unique(moduleIds).filter((m) => !found.has(m)),
+                plugins: pluginRows.map((p) => ({ ...p, entry: pluginToDeckEntry(p) })),
+                hiddenPlugins: unique(plugins).filter((p) => !pluginsSeen.has(p)),
+                templates: templateRows.map(templateSummary),
+                hiddenTemplates: unique(templates).filter((t) => !templatesSeen.has(t)),
+            },
+        };
+    }
+
+    /**
+     * Rows with `contributor_name`: who put each driver on the Hub, shown beside it before installing.
+     * Best effort: a Hub that will not say (no profiles to read) leaves the rows as they were.
+     */
+    async _withContributors(rows) {
+        const people = [...new Set(rows.map((r) => r.contributor_id).filter((id) => /^[0-9a-f-]{36}$/i.test(String(id || ''))))];
+        if (!people.length) return rows;
+        try {
+            const profiles = await this._get('profiles', `select=id,full_name&id=in.(${people.join(',')})`);
+            const names = new Map(profiles.map((p) => [p.id, p.full_name || null]));
+            return rows.map((r) => ({ ...r, contributor_name: names.get(r.contributor_id) || null }));
+        } catch {
+            return rows;
+        }
     }
 
     async plugins() {

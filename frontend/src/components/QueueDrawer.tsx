@@ -1,5 +1,5 @@
 "use client";
-import { API_BASE, WS_BASE } from '@/config';
+import { API_BASE, WS_BASE, withBase } from '@/config';
 import CloudRepeats from '@/components/CloudRepeats';
 import { useCallback, useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
@@ -182,13 +182,17 @@ export default function QueueDrawer() {
                       ) : <span className="min-w-0 flex-1 text-sm font-semibold truncate" title={run.name}>{run.name}</span>}
                     </div>
                     <div className="mt-1 pl-8 flex items-center justify-between gap-2">
-                      <span className="text-xs text-gray-500 dark:text-gray-400">{runSizeLabel(run)}</span>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {/* One stage of a design queued as several runs (src/stages.ts). */}
+                        {run.parameters?.group && <span title={run.parameters.group.name}>stage {run.parameters.group.index}/{run.parameters.group.total} · </span>}
+                        {runSizeLabel(run)}
+                      </span>
                       <div className="flex items-center shrink-0 opacity-50 group-hover:opacity-100 transition-opacity">
                         <button onClick={() => { setRenamingId(run.id); setRenameValue(run.name); }} title="Rename" className={iconBtn}><Edit3 className="w-3.5 h-3.5" /></button>
                         {/* Its spreadsheet or optimization settings, on the page that made it. A full
                             load, not a client-side route: the page reads ?edit=<id> when it mounts. */}
                         {editHref(run) && (
-                          <button onClick={() => { window.location.href = editHref(run)!; }} title="Change its values or settings before it runs" className={iconBtn}><SlidersHorizontal className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => { window.location.href = withBase(editHref(run)!); }} title="Change its values or settings before it runs" className={iconBtn}><SlidersHorizontal className="w-3.5 h-3.5" /></button>
                         )}
                         <button onClick={() => move(run.id, 'up')} disabled={idx === 0} title="Run this sooner" className={iconBtn}><ArrowUp className="w-3.5 h-3.5" /></button>
                         <button onClick={() => move(run.id, 'down')} disabled={idx === pending.length - 1} title="Run this later" className={iconBtn}><ArrowDown className="w-3.5 h-3.5" /></button>

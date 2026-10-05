@@ -239,9 +239,10 @@ So the launcher replaces the terminal, not the browser.
 
 ```mermaid
 flowchart LR
-    H1["Hub website:<br/>build a cart →<br/>Open in IvoryOS"] -- "ivoryos://install?deck=…" --> L
-    H2["Launcher:<br/>Add from Hub"] -- "search / pick / fill in settings" --> API["Hub catalog API"] --> L
-    L["Launcher asks:<br/>which deck? install these packages?"] --> S["stop that deck → uv installs the<br/>packages → write deck.json → start"]
+    H1["Hub website:<br/>build a cart →<br/>Open in IvoryOS"] -- "ivoryos://install?modules=…" --> R
+    H2["Launcher:<br/>Add from Hub"] -- "search / pick" --> R
+    R["Read from the Hub<br/>by id"] --> L
+    L["Launcher's install screen:<br/>names, settings, which deck,<br/>then install these packages?"] --> S["stop that deck → uv installs the<br/>packages → write deck.json → start"]
 ```
 
 Both routes end in the same place, and neither installs anything without asking. The deck file is

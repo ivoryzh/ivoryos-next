@@ -105,3 +105,4 @@ desktop/dist/
 # Per-edge state for the flow-lab example (example/flow_lab/): each edge's database, workflows
 # and .env -- which holds its Cloud pairing token -- live here at runtime (IVORYOS_EDGE_HOME).
 example/flow_lab/.edges/
+example/liquid_handler/.edge/

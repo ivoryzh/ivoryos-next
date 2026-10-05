@@ -1,0 +1,112 @@
+{
+  "name": "Dye dilution plate",
+  "description": "One row per sample: a well (assay_plate[A1]), a buffer volume and a dye volume. Each transfer and the plate read are batch steps: with a batch size of 8 the handler fills a column of eight wells per call and the reader reads it, and every sample still gets its own absorbance.",
+  "prep": [],
+  "script": [
+    {
+      "id": 1,
+      "uuid": 700007919,
+      "instrument": "liquid_handler",
+      "action": "transfer",
+      "args": {
+        "source": "reservoir[A1]",
+        "targets": "#well",
+        "target_vols": "#buffer_ul",
+        "tip_rack": "tips",
+        "new_tip": "once"
+      },
+      "arg_types": {
+        "source": "wells",
+        "targets": "wells",
+        "target_vols": "float",
+        "tip_rack": "str",
+        "new_tip": "Literal"
+      },
+      "return": "",
+      "batch_action": true,
+      "consolidate_batch_args": false
+    },
+    {
+      "id": 2,
+      "uuid": 700015838,
+      "instrument": "liquid_handler",
+      "action": "transfer",
+      "args": {
+        "source": "reservoir[A2]",
+        "targets": "#well",
+        "target_vols": "#dye_ul",
+        "tip_rack": "tips",
+        "new_tip": "always"
+      },
+      "arg_types": {
+        "source": "wells",
+        "targets": "wells",
+        "target_vols": "float",
+        "tip_rack": "str",
+        "new_tip": "Literal"
+      },
+      "return": "",
+      "batch_action": true,
+      "consolidate_batch_args": false
+    },
+    {
+      "id": 3,
+      "uuid": 700023757,
+      "instrument": "plate_reader",
+      "action": "read_absorbance",
+      "args": {
+        "resources": "#well",
+        "wavelength_nm": 520
+      },
+      "arg_types": {
+        "resources": "wells",
+        "wavelength_nm": "int"
+      },
+      "return": "absorbance",
+      "batch_action": true,
+      "consolidate_batch_args": false
+    },
+    {
+      "id": 4,
+      "uuid": 700031676,
+      "instrument": "Flow_Control",
+      "action": "If",
+      "args": {
+        "condition": "absorbance > 1.0"
+      },
+      "arg_types": {
+        "condition": "str"
+      },
+      "return": "",
+      "batch_action": false,
+      "consolidate_batch_args": false
+    },
+    {
+      "id": 5,
+      "uuid": 700039595,
+      "instrument": "Flow_Control",
+      "action": "Comment",
+      "args": {
+        "message": "Absorbance #absorbance is above the linear range: use less dye in this well."
+      },
+      "arg_types": {
+        "message": "str"
+      },
+      "return": "",
+      "batch_action": false,
+      "consolidate_batch_args": false
+    },
+    {
+      "id": 6,
+      "uuid": 700047514,
+      "instrument": "Flow_Control",
+      "action": "End_If",
+      "args": {},
+      "arg_types": {},
+      "return": "",
+      "batch_action": false,
+      "consolidate_batch_args": false
+    }
+  ],
+  "cleanup": []
+}

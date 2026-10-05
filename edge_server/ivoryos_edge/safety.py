@@ -86,6 +86,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import paths
+from .labware import declared_trays, expand_references, layout_of
 from .introspection import has_member, resolve_callable, resolve_output_path, serialize_result, _MISSING
 
 SAFETY_FORMAT = "ivoryos-safety/1"
@@ -213,6 +214,8 @@ def row_label(index: int) -> str:
 
 def tray_grid(tray: dict) -> List[List[str]]:
     """Every position's name, as rows of columns, the way the tray looks from above."""
+    if tray.get("grid"):
+        return tray["grid"]  # a labware a driver declared (labware.py) names its own positions
     rows, columns = tray["rows"], tray["columns"]
     naming = tray.get("naming", "A1")
     if naming in ("A1", "A01"):
@@ -1027,6 +1030,34 @@ class Guard:
             # object (an Enum member), and it is its value that is being checked.
             for shown, reason in check_value(constraint, serialize_result(value), self.config["trays"]):
                 out.append(f"{instrument}.{method}: {param} = {shown} {reason}.")
+        out += self._check_wells(instrument, method, params, method_schema, deck)
+        return out
+
+    @staticmethod
+    def _check_wells(instrument: str, method: str, params: dict, method_schema: dict, deck: Deck) -> List[str]:
+        """Wells that are not on the worktable: an unknown labware, the wrong kind, or a position it
+        does not have (labware.py). Declared by the driver, like an Enum's choices, so nothing has
+        to be configured for it to hold."""
+        out = []
+        layout = None
+        for param, info in (method_schema.get("parameters") or {}).items():
+            if not isinstance(info, dict) or not isinstance(info.get("wells"), dict):
+                continue
+            value = _argument(params, method_schema, param)
+            listed = value if isinstance(value, (list, tuple)) else [value]
+            if value is _MISSING or value is None or value == "" or any(_is_reference(v) for v in listed):
+                continue
+            if layout is None:
+                layout = layout_of(deck.instruments.get(instrument)) or {}
+            labware = layout.get("labware") or {}
+            if not labware:
+                continue  # an instrument that reports no worktable cannot be checked here
+            try:
+                expand_references(value, {name: entry.get("grid") or [] for name, entry in labware.items()},
+                                  {name: entry.get("category") for name, entry in labware.items()},
+                                  info["wells"].get("labware") or ())
+            except ValueError as e:
+                out.append(f"{instrument}.{method}: {param}: {e}.")
         return out
 
     def check_run(self, parameters: dict, prep: list, sequence: list, cleanup: list) -> List[str]:
@@ -1254,7 +1285,10 @@ def _view(config: dict, deck: Deck, load_error: Optional[str]) -> dict:
         "enabled": bool(config.get("enabled", True)),
         "error": load_error,
         "fields": resolve_fields(config, deck),
-        "trays": {name: {**tray, "grid": tray_grid(tray)} for name, tray in config["trays"].items()},
+        # The lab's own trays, and every labware an instrument reports on its worktable
+        # ("<instrument>:<labware>", labware.py), so a form picks wells on either the same way.
+        "trays": {**declared_trays(deck.instruments),
+                  **{name: {**tray, "grid": tray_grid(tray)} for name, tray in config["trays"].items()}},
         "rules": sum(1 for rule in config["rules"] if rule["enabled"]),
     }
 

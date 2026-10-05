@@ -13,6 +13,8 @@
  * So: one walker, three policies, expressed as options rather than as three functions.
  */
 
+import { takesRowList } from './labware';
+
 /** Thrown for a value that is missing or of the wrong shape. Message is user-facing verbatim. */
 export class RunConfigError extends Error {
   constructor(message: string) {
@@ -44,6 +46,13 @@ export interface ResolveOptions {
   numeric?: 'strict' | 'lenient';
   /** Names resolved elsewhere (e.g. live `User_Input` vars) — left as `#name` and never looked up. */
   skip?: (varName: string) => boolean;
+  /**
+   * A batch step's rows: the `#name`'s value on each row of its group, with how to describe each
+   * in an error. Given, a parameter that takes one value per row (`takesRowList`: wells, a volume
+   * per well) receives all of them as a list instead of the single value `lookup` returns. That is
+   * what lets one row per sample and one call per column of eight be the same workflow.
+   */
+  rowValues?: (varName: string) => { value: any; where: string }[];
 }
 
 const isNumericType = (type: unknown) => {
@@ -74,6 +83,23 @@ export function resolveBlockParams(block: any, opts: ResolveOptions): Record<str
           );
         }
         if (opts.skip?.(varName)) return;
+
+        if (opts.rowValues && takesRowList(declared)) {
+          obj[key] = opts.rowValues(varName).map(({ value, where }) => {
+            if (value === undefined || value === null || value === '') {
+              throw new RunConfigError(`Missing value for ${where}`);
+            }
+            if (!isNumericType(declared?.type)) return value;
+            if (isNaN(Number(value))) {
+              if (opts.numeric === 'strict') {
+                throw new RunConfigError(`${where} expects a number (${declared?.type}), got '${value}'`);
+              }
+              return value;
+            }
+            return Number(value);
+          });
+          return;
+        }
 
         let subVal = opts.lookup(varName);
         if (subVal === undefined || subVal === null || subVal === '') {
@@ -149,6 +175,20 @@ export function dynamicArgumentsOf(block: any, skip?: (name: string) => boolean)
   for (const [key, value] of Object.entries(block?.params || {})) {
     const m = typeof value === 'string' ? /^#(\w+)$/.exec(value.trim()) : null;
     if (m && !key.startsWith('_') && !skip?.(m[1])) out[key] = m[1];
+  }
+  return out;
+}
+
+/**
+ * Which of a block's arguments are handed one value per row when the block is a batch step, as
+ * `{argument: name}`: a `#name` on a parameter that takes a list per row (`takesRowList`).
+ * The one rule both the walk and the table read, so a column is never drawn "first row only"
+ * while the run takes every row of it.
+ */
+export function rowListArgumentsOf(block: any, skip?: (name: string) => boolean): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, name] of Object.entries(dynamicArgumentsOf(block, skip))) {
+    if (takesRowList(block?.schema?.parameters?.[key])) out[key] = name;
   }
   return out;
 }

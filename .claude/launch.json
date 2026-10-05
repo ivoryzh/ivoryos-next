@@ -15,6 +15,21 @@
       "autoPort": false
     },
     {
+      "name": "liquid-handler-demo",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--project",
+        "edge_server",
+        "--with-editable",
+        "../IvoryOS-PyLabRobot-Integration",
+        "python",
+        "example/liquid_handler/demo.py"
+      ],
+      "port": 8083,
+      "autoPort": false
+    },
+    {
       "name": "flow-pump-edge",
       "runtimeExecutable": "uv",
       "runtimeArgs": [

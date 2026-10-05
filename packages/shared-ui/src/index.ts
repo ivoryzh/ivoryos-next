@@ -48,7 +48,7 @@ export {
   mainOnlyLinks,
 } from './workflowBody';
 export type { ReuseMode, SavedBlock, SavedWorkflowBody, DiffRow, DiffStep, StepChange } from './workflowBody';
-export { RunConfigError, resolveBlockParams, resolveFixedBlock, toWireBlock } from './runConfig';
+export { RunConfigError, resolveBlockParams, resolveFixedBlock, toWireBlock, rowListArgumentsOf } from './runConfig';
 export type { ResolveOptions, ResolvedStep } from './runConfig';
 export {
   isRowActive,
@@ -58,6 +58,7 @@ export {
   buildSpreadsheetParameters,
   toSubmittedStep,
   sequenceSegments,
+  rowListVariables,
 } from './spreadsheetRun';
 export type { SpreadsheetRow, RowGroup, ExpandedSpreadsheetStep, ExpandOptions } from './spreadsheetRun';
 export { SpreadsheetTable } from './SpreadsheetTable';
@@ -92,5 +93,7 @@ export { ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeade
 export { TopNavBar, TopNavItem, TopNavButton, TopNavIconLink, TopNavDivider, TopNavBrand, TopNavMenu, TopNavMenuItem, topNavPill, BRAND_MARK } from './TopNav';
 export { fieldGuard, trayOf, guardsFor, guardHint, guardProblem, guardSuggestions, trayForGuards, orderPositions } from './safety';
 export type { SafetyView, FieldGuard, TrayView, FieldRef } from './safety';
+export { takesRowList, wellChoices, expandWells, compactWells, parseReferences, expandReferences, formatReference, referencesProblem, referenceCount, referenceStart } from './labware';
+export type { TrayChoice } from './labware';
 export { TrayPicker } from './TrayPicker';
 export type { TrayPickerProps } from './TrayPicker';

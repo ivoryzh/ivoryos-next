@@ -281,11 +281,67 @@ def with_aliases(values: Dict[str, Any], aliases) -> Dict[str, Any]:
     return out
 
 
-def bind_values(context: Dict[str, Any], row_contexts: Dict[int, Dict[str, Any]], step, values: Dict[str, Any]) -> None:
+def _result_key(result: dict, given: Any) -> Any:
+    """The key a row's own value has in a result: the argument as given (`assay_plate[A1]`), or
+    the well alone (`A1`), which is how most readers key a plate."""
+    if given in result:
+        return given
+    text = str(given)
+    if text in result:
+        return text
+    match = re.fullmatch(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*\[\s*([^\],:;]+?)\s*\]\s*", text)
+    return match.group(1) if match else text
+
+
+def spread_over_rows(parameters: Optional[dict], values: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    """Each row's own share of what a batch step returned for a whole group of rows.
+
+    A batch step that was handed one value per row (`_rows`, and `_per_row` naming the arguments
+    that carry them; spreadsheetRun.ts) acts on every sample of the group in one call, and what it
+    returns covers all of them: a plate read gives `{"A1": 0.31, "B1": 0.52, ...}`. Left as one
+    value, every row of the group would show the whole plate and a per-sample `If absorbance > 1`
+    could not be written. So a result is handed back out to the rows it covers: a dict keyed by
+    the values of one of those arguments (the wells, `assay_plate[A1]` or just `A1`) goes to each
+    row by its own key, and a list
+    as long as the group goes by position. Anything else stays one value for the group.
+    """
+    parameters = parameters or {}
+    rows = parameters.get("_rows")
+    if not isinstance(rows, list) or not rows:
+        return {}
+    shares: Dict[int, Dict[str, Any]] = {}
+    for name, value in values.items():
+        per_row = None
+        if isinstance(value, dict):
+            for argument in parameters.get("_per_row") or []:
+                given = parameters.get(argument)
+                if not isinstance(given, list) or len(given) != len(rows):
+                    continue
+                keys = [_result_key(value, g) for g in given]
+                if all(k in value for k in keys):
+                    per_row = [value[k] for k in keys]
+                    break
+        elif isinstance(value, (list, tuple)) and len(value) == len(rows):
+            per_row = list(value)
+        if per_row is None:
+            continue
+        for row, item in zip(rows, per_row):
+            if isinstance(row, int):
+                shares.setdefault(row, {})[name] = item
+    return shares
+
+
+def bind_values(context: Dict[str, Any], row_contexts: Dict[int, Dict[str, Any]], step, values: Dict[str, Any],
+                shares: Optional[Dict[int, Dict[str, Any]]] = None) -> None:
+    """`shares` is `spread_over_rows`: those names go to each row as its own value, and run-wide
+    as the whole result for a later batch step to read."""
     context.update(values)
+    spread = {name for own in (shares or {}).values() for name in own}
     row = step_row(step)
     if row is not None:
-        row_contexts.setdefault(row, {}).update(values)
+        row_contexts.setdefault(row, {}).update({k: v for k, v in values.items() if k not in spread})
+    for covered, own in (shares or {}).items():
+        row_contexts.setdefault(covered, {}).update(own)
 
 
 def condition_record(condition: str, result: Any, context: Dict[str, Any], previous: Any = None) -> Dict[str, Any]:
@@ -1324,12 +1380,19 @@ class WorkflowQueueManager:
                             step.outputs = with_attempts({"result": serialized_res}, step.outputs)
                             
                             if step.parameters and (step.parameters.get("_return_bindings") or step.parameters.get("_return_var")):
-                                bind_values(workflow_context, row_contexts, step, with_aliases(extract_return_values(
+                                values = with_aliases(extract_return_values(
                                     step.parameters.get("_return_bindings"),
                                     step.parameters.get("_return_var"),
                                     serialized_res,
                                     result,
-                                ), step.parameters.get("_return_aliases")))
+                                ), step.parameters.get("_return_aliases"))
+                                shares = spread_over_rows(step.parameters, values)
+                                bind_values(workflow_context, row_contexts, step, values, shares)
+                                if shares:
+                                    # Recorded, so Data History shows each sample its own value
+                                    # rather than re-deriving which share went where.
+                                    step.outputs = {**step.outputs, "by_row": {
+                                        str(row): serialize_result(own) for row, own in shares.items()}}
                                 
                             step.end_time = datetime.utcnow()
                             await session.commit()

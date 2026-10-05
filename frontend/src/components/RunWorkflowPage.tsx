@@ -21,6 +21,7 @@ import {
   toSubmittedStep,
   toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks,
   TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, SuggestInput,
+  formatReference, referenceStart, rowListVariables,
   type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 import Link from 'next/link';
 import { useQueueBusy } from '@/queueBusy';
@@ -131,7 +132,13 @@ export default function RunWorkflowPage({ mode, stage }: {
   // Vars used by a "batch" step — still spreadsheet columns, but only need one row per batch
   // group filled in (see batchSize below), not every row.
   const [batchVariables, setBatchVariables] = useState<string[]>([]);
+  // Columns a batch step takes from every row of its group, in one call (spreadsheetRun.ts).
+  const [listVariables, setListVariables] = useState<string[]>([]);
   const [batchSize, setBatchSize] = useState<string>('');
+  // Set once the page has read what it starts from. The batch size is saved only after that: saved
+  // on mount, the empty starting value removed the one kept from the last visit before the load
+  // (which awaits) could read it, so every visit began at batch size 1.
+  const [hasLoaded, setHasLoaded] = useState(false);
   
   const [executionState, setExecutionState] = useState<{
     isRunning: boolean;
@@ -311,7 +318,10 @@ export default function RunWorkflowPage({ mode, stage }: {
 
                     if (pData?.type) vTypes[varName] = pData.type;
                     if (pData?.options) vOptions[varName] = pData.options;
-                    const ref = { instrument: scanningBlock.instrument, method: scanningBlock.method, param: `${prefix}${k}` };
+                    const ref: FieldRef = { instrument: scanningBlock.instrument, method: scanningBlock.method, param: `${prefix}${k}` };
+                    // A wells column holds `plate[A1]` per row (shared-ui labware.ts): it gets a
+                    // picker for the instrument's plates, and is checked against them as it is typed.
+                    if (pData?.wells) ref.wells = { labware: pData.wells.labware || [] };
                     const known = (vFields[varName] ||= []);
                     if (!known.some(f => f.instrument === ref.instrument && f.method === ref.method && f.param === ref.param)) known.push(ref);
                 } else if (typeof v === 'object' && v !== null) {
@@ -343,6 +353,7 @@ export default function RunWorkflowPage({ mode, stage }: {
         setVariables(varList);
         setGlobalVariables(gVarList);
         setBatchVariables(Array.from(batchVars));
+        setListVariables(rowListVariables(parsedSeq, (v) => liveVars.has(v)));
         setVarTypes(vTypes);
         setVarOptions(vOptions);
         
@@ -379,16 +390,20 @@ export default function RunWorkflowPage({ mode, stage }: {
         }
       } catch (e) {
         console.error("Failed to load sequence", e);
+      } finally {
+        setHasLoaded(true);
       }
       })();
+    } else {
+      setHasLoaded(true);
     }
   }, []);
 
   useEffect(() => {
-    if (editingRef.current) return;
+    if (!hasLoaded || editingRef.current) return;
     if (batchSize) localStorage.setItem('ivoryos_batch_size', batchSize);
     else localStorage.removeItem('ivoryos_batch_size');
-  }, [batchSize]);
+  }, [batchSize, hasLoaded]);
 
   useEffect(() => {
     if (editingRef.current) return;
@@ -777,7 +792,7 @@ export default function RunWorkflowPage({ mode, stage }: {
                           className={`${field} ${isInvalidNumericCell(v, value) || refused ? '!border-red-400' : ''}`} />
                       )}
                       {tray && (
-                        <button type="button" onClick={() => setPickingTray(v)} title={`Pick a position on ${tray.tray.label}`}
+                        <button type="button" onClick={() => setPickingTray(v)} title={tray.choices ? 'Pick a plate and its wells' : `Pick a position on ${tray.tray.label}`}
                           className="shrink-0 rounded-lg border border-gray-200 p-2 text-gray-500 hover:bg-gray-50 hover:text-gray-800 dark:border-white/10 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100">
                           <Grid3x3 className="h-4 w-4" />
                         </button>
@@ -815,6 +830,7 @@ export default function RunWorkflowPage({ mode, stage }: {
               varTypes={varTypes}
               varOptions={varOptions}
               batchVariables={batchVariables}
+              rowListVariables={listVariables}
               batchSize={batchSize}
               showBatchGrouping={hasBatchStep || hasBatchSize}
               idPrefix={stage ? `stage-${stage.index}` : 'configure'}
@@ -885,15 +901,25 @@ export default function RunWorkflowPage({ mode, stage }: {
         {!stage && <LiveRun />}
       </div>
 
-      {pickingTray && trayForGuards(varGuards[pickingTray], safety) && (
-        <TrayPicker
-          tray={trayForGuards(varGuards[pickingTray], safety)!.tray}
-          title={pickingTray}
-          initial={[String(rows[0]?.[pickingTray] ?? '')]}
-          onPick={([position]) => updateRow(0, pickingTray, position)}
-          onClose={() => setPickingTray(null)}
-        />
-      )}
+      {pickingTray && trayForGuards(varGuards[pickingTray], safety) && (() => {
+        const found = trayForGuards(varGuards[pickingTray], safety)!;
+        const value = String(rows[0]?.[pickingTray] ?? '');
+        // A wells value names its plate too (`plate[A1:H1]`): choose both, and any number of wells.
+        const start = found.choices ? referenceStart(value, found.choices) : null;
+        return (
+          <TrayPicker
+            tray={start?.choice?.tray ?? found.tray}
+            choices={found.choices}
+            title={pickingTray}
+            multiple={!!found.choices}
+            initial={start ? start.positions : [value]}
+            onPick={(positions, choice) => updateRow(0, pickingTray, choice && found.choices
+              ? formatReference(choice, positions)
+              : positions[0])}
+            onClose={() => setPickingTray(null)}
+          />
+        );
+      })()}
 
       <WorkflowMap
         isOpen={isMapOpen}

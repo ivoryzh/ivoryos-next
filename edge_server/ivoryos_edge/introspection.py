@@ -310,6 +310,32 @@ def _resolve_hints(func):
         return {}
 
 
+def _resolve_markers(func):
+    """What a driver says about a parameter beyond its type: `Annotated[str, Labware("plate")]`.
+
+    Any annotation metadata with an `ivoryos_schema()` method contributes its keys to that
+    parameter's schema entry (labware.py is the first user: which argument names a labware, which
+    one picks wells on it). Read separately from `_resolve_hints`, which strips `Annotated` and is
+    what every type check and cast is written against; nothing about casting changes.
+    """
+    try:
+        hints = typing.get_type_hints(func, include_extras=True)
+    except Exception:
+        return {}
+    out = {}
+    for name, hint in hints.items():
+        # Python before 3.11 wraps `Annotated[Optional[str], ...] = None` in another Optional, so
+        # the Annotated can sit one Union down.
+        candidates = [hint] + (list(get_args(hint)) if get_origin(hint) is typing.Union else [])
+        for candidate in candidates:
+            if get_origin(candidate) is typing.Annotated:
+                found = [m for m in get_args(candidate)[1:] if callable(getattr(m, "ivoryos_schema", None))]
+                if found:
+                    out[name] = found
+                    break
+    return out
+
+
 # Modelling frameworks put properties on their own base class -- pydantic's `model_extra` and
 # `model_fields_set`, for instance. They describe the library, not the instrument, and nobody is
 # going to drive one from a workflow, so they don't belong in the schema.
@@ -696,6 +722,7 @@ def inspect_device_module(device_instance):
 
             # Real type objects where PEP 563 left strings — see _resolve_hints.
             hints = _resolve_hints(described)
+            markers = _resolve_markers(described)
 
             params = {}
             # A **kwargs method takes arguments this schema cannot enumerate, so anything not
@@ -734,6 +761,8 @@ def inspect_device_module(device_instance):
                     continue
                 annotation = hints.get(param_name, param.annotation)
                 params[param_name] = extract_type_info(annotation, param.default)
+                for marker in markers.get(param_name, ()):
+                    params[param_name].update(marker.ivoryos_schema())
                 if param.kind is inspect.Parameter.POSITIONAL_ONLY:
                     # Unlike a variadic, this one *is* an argument the caller supplies — it just
                     # cannot be supplied by name: `def read(self, channel, /)` called as
@@ -775,7 +804,11 @@ def inspect_device_module(device_instance):
             }
         except Exception as e:
             print(f"Failed to inspect method {name}: {e}")
-            
+
+    # An instrument with a worktable (labware.py): its labware arguments list what is on it.
+    from .labware import fill_options
+    fill_options(device_instance, schema)
+
     return schema
 
 def cast_value(annotation, val):

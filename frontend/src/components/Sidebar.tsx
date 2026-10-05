@@ -2,7 +2,7 @@
 import { API_BASE, WS_BASE } from '@/config';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PanelRight, Gauge, Menu, HandHelping, Minimize2 } from 'lucide-react';
+import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PanelRight, Gauge, Menu, HandHelping, Minimize2, ShieldCheck } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
@@ -229,6 +229,7 @@ export default function Sidebar() {
       <TopNavItem link={Link} href="/data" label="Data" icon={<Table2 className="w-4 h-4 shrink-0" />} active={isOn('/data')} labelFrom="sm" />
       <TopNavDivider />
       <TopNavItem link={Link} href="/instruments" label="Instruments" icon={<Gauge className="w-4 h-4 shrink-0" />} active={isOn('/instruments')} labelFrom="sm" />
+      <TopNavItem link={Link} href="/safety" label="Safety" icon={<ShieldCheck className="w-4 h-4 shrink-0" />} active={isOn('/safety')} labelFrom="sm" />
       {plugins.length > 0 && <TopNavDivider />}
       {/* A panel plugin opens beside the page and stays there as you move around (lit while it
           shows); a tab plugin is a page of its own. */}
@@ -338,6 +339,8 @@ export default function Sidebar() {
             the run panel and the status chip (openQueue in QueueDrawer.tsx). */}
         {navItem('/data', 'Data History', <Table2 className="w-5 h-5 shrink-0" />)}
         {navItem('/instruments', 'Instruments', <Gauge className="w-5 h-5 shrink-0" />)}
+        {/* What the bench allows its instruments to do: limits, trays and rules (safety.py). */}
+        {navItem('/safety', 'Safety', <ShieldCheck className="w-5 h-5 shrink-0" />)}
         {plugins.length > 0 && (
             <div className="pt-4 border-t border-gray-200 dark:border-white/10 mt-4">
                 {isExpanded && <div className="px-4 mb-2 text-[10px] font-bold tracking-wider uppercase text-gray-400">Plugins</div>}

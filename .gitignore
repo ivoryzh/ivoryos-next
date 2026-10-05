@@ -86,6 +86,9 @@ edge_server/ivoryos_edge/workflows/.meta.json
 # Agent provider settings — endpoint, model, and possibly an API key. Runtime state that lives
 # beside the workflow store (see agent/routes.py), never something to commit.
 edge_server/ivoryos_edge/agent_settings.json
+# One lab's limits and interlocks, written by the Safety page.
+edge_server/ivoryos_edge/safety.json
+edge_server/ivoryos_edge/safety_state.json
 
 # Desktop app (desktop/): its own node_modules, the resources prepare-resources.js assembles for
 # packaging (a uv binary, the edge wheel, a copy of frontend/out), and electron-builder output.

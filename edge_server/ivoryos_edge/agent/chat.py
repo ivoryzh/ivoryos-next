@@ -91,7 +91,7 @@ def _retry_prompt(issues):
 
 async def translate(provider, schema, user_message, history=None, workflows=(),
                     existing_name=None, existing_body=None, max_attempts=MAX_ATTEMPTS,
-                    on_progress=None, resolve_workflow=None):
+                    on_progress=None, resolve_workflow=None, check_fields=None):
     """Run the translate-validate-correct loop.
 
     Returns (result, transcript) where result is {summary, body, questions, issues, ok,
@@ -165,7 +165,7 @@ async def translate(provider, schema, user_message, history=None, workflows=(),
         await report(phase="validating", attempt=attempt, steps=step_count,
                      name=body.get("name"))
 
-        issues = validate_body(body, schema, workflows, resolve_workflow)
+        issues = validate_body(body, schema, workflows, resolve_workflow, check_fields)
         errors = [i for i in issues if i["severity"] == "error"]
         result = {
             "summary": str(parsed.get("summary") or "").strip(),

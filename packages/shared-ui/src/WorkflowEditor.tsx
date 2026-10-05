@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, Scissors, ListChecks, MoreHorizontal, Wrench, Workflow as WorkflowIcon } from 'lucide-react';
+import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, Scissors, ListChecks, MoreHorizontal, Wrench, ShieldCheck, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   LIBRARY_INSTRUMENT,
   collectReturnVars,
@@ -26,6 +26,7 @@ import { WorkflowDiff } from './WorkflowDiff';
 import { SuggestInput } from './SuggestInput';
 import { AutoFillToggle, LOGIC_TOOLS, ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, logicStepLook } from './Toolbox';
 import { FLOW_CONTROL_INSTRUMENTS } from './flowControl';
+import { fieldGuard, guardHint, guardProblem, guardSuggestions } from './safety';
 
 // One named variable bound to one addressable leaf of a step's return value. `path` is the
 // dotted pointer the backend's introspection published in `schema.return_paths`
@@ -1493,6 +1494,17 @@ export default function WorkflowEditor({
                           const isNumericType = typeStr.includes('int') || typeStr.includes('float');
                           if (isNumericType && !isDynamicRef && val !== undefined && val !== '' && isNaN(Number(val))) {
                               blockWarnings.push(`Parameter '${fullKey}' expects a number (or '#variable'), got '${val}'`);
+                              continue;
+                          }
+
+                          // A value the deck's safety guard will refuse (safety.ts): the edge would
+                          // reject the run, so it is said here, on the step that holds the value. An
+                          // unset field is judged at the default the driver would use.
+                          const guarded = val !== undefined && val !== '' ? val : pData?.default;
+                          const refused = isFlowBlock ? null : guardProblem(
+                              fieldGuard(statusData?.safety, block.instrument, block.method, fullKey), guarded, statusData?.safety);
+                          if (refused) {
+                              blockWarnings.push(`'${fullKey}' = ${guarded} ${refused} (safety guard)`);
                           }
                       }
                   };
@@ -1974,6 +1986,11 @@ export default function WorkflowEditor({
                                                 const val = paramKey.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, paramsObj);
                                                 const actualVal = val !== undefined ? val : (pData.default !== undefined ? String(pData.default) : '');
                                                 const hashInvalid = emptyHashFields.has(hashFieldKey(lId, bId, paramKey));
+                                                // The safety guard's limit on this field, if any: its
+                                                // values are offered, and the shield says what it allows.
+                                                const guard = fieldGuard(statusData?.safety, block.instrument, block.method, paramKey);
+                                                const guardText = guardHint(guard, statusData?.safety);
+                                                const guardRefuses = !!guardProblem(guard, actualVal, statusData?.safety);
 
                                                 return (
                                                     // name = value, as the call would be written (the folded card reads the same).
@@ -1987,7 +2004,9 @@ export default function WorkflowEditor({
                                                         id={paramFieldId(lId, bId, paramKey)}
                                                         type="text"
                                                         suggestions={[
-                                                          ...(pData.options || []).map((o: any) => String(o)),
+                                                          ...(guard?.tray || guard?.allowed
+                                                            ? guardSuggestions(guard, statusData?.safety)
+                                                            : (pData.options || []).map((o: any) => String(o))),
                                                           ...availableVars.map((v: string) => ({ value: `#${v}`, label: 'earlier step' })),
                                                         ]}
                                                         value={actualVal}
@@ -2002,8 +2021,13 @@ export default function WorkflowEditor({
                                                           }
                                                           handleHashBlur(lId, bId, paramKey, e.target.value);
                                                         }}
-                                                        className={`w-28 h-6 rounded-md border bg-white px-1.5 font-mono text-[12px] focus:outline-none focus:border-accent dark:bg-white/5 placeholder:text-gray-300 dark:placeholder:text-gray-600 ${typeof actualVal === 'string' && actualVal.startsWith('#') ? 'font-semibold text-gray-900 bg-gray-50 dark:text-white dark:bg-white/10' : 'text-gray-900 dark:text-gray-100'} ${hashInvalid ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}
+                                                        className={`w-28 h-6 rounded-md border bg-white px-1.5 font-mono text-[12px] focus:outline-none focus:border-accent dark:bg-white/5 placeholder:text-gray-300 dark:placeholder:text-gray-600 ${typeof actualVal === 'string' && actualVal.startsWith('#') ? 'font-semibold text-gray-900 bg-gray-50 dark:text-white dark:bg-white/10' : 'text-gray-900 dark:text-gray-100'} ${hashInvalid || guardRefuses ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}
                                                       />
+                                                      {guardText && (
+                                                        <span title={`Safety guard: ${guardText}`} className="cursor-help shrink-0">
+                                                          <ShieldCheck className={`w-3 h-3 ${guardRefuses ? 'text-red-500' : 'text-gray-400 dark:text-gray-500'}`} />
+                                                        </span>
+                                                      )}
                                                       {hashInvalid && (
                                                         <span title="Add a variable name after '#'" className="cursor-help shrink-0">
                                                           <AlertTriangle className="w-3 h-3 text-red-500" />

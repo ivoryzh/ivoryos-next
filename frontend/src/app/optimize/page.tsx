@@ -1,8 +1,8 @@
 "use client";
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
-import { useState, useEffect, useRef } from 'react';
-import { Settings2, Info, Zap, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { Settings2, Info, Zap, ChevronDown, ChevronRight, Plus, X, ShieldCheck } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
 import LiveRun from '@/components/LiveRun';
@@ -17,7 +17,8 @@ import {
   getVarMode as sharedGetVarMode,
   getVarModeType as sharedGetVarModeType,
   isPerIteration as sharedIsPerIteration,
-  getIterationValue as sharedGetIterationValue, useDocumentTheme, LIBRARY_INSTRUMENT, linkOutputBindings, runtimeVarNames, splitRepeatedLinks , confirmDialog , notify } from '@ivoryos/shared-ui';
+  getIterationValue as sharedGetIterationValue, useDocumentTheme, LIBRARY_INSTRUMENT, linkOutputBindings, runtimeVarNames, splitRepeatedLinks , confirmDialog , notify,
+  guardHint, guardProblem, guardsFor, type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
   baybe: 'BayBE',
@@ -58,6 +59,17 @@ export default function OptimizePage() {
   const [prepSequence, setPrepSequence] = useState<any[]>([]);
   const [cleanupSequence, setCleanupSequence] = useState<any[]>([]);
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
+  // Which fields each '#variable' feeds, so the safety guard's limits on them are shown beside the
+  // search space. The edge refuses a search range that reaches past a limit (safety.py check_run).
+  const [varFields, setVarFields] = useState<Record<string, FieldRef[]>>({});
+  const varGuards = useMemo(() => {
+    const out: Record<string, FieldGuard[]> = {};
+    for (const [name, refs] of Object.entries(varFields)) {
+      const guards = guardsFor(edgeStatus?.safety, refs);
+      if (guards.length) out[name] = guards;
+    }
+    return out;
+  }, [varFields, edgeStatus]);
   const [optimizerSchemas, setOptimizerSchemas] = useState<Record<string, any>>({});
   const [optimizersLoaded, setOptimizersLoaded] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -214,7 +226,8 @@ export default function OptimizePage() {
         // A '#name' the run fills in itself (a User input's answer, or what an earlier step in
         // the trial saved) is read when its step runs, so it is not something to optimize or fix.
         const runtimeVars = runtimeVarNames(pSeq, parsedSeq, cSeq);
-        const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>) => {
+        const vFields: Record<string, FieldRef[]> = {};
+        const extractVars = (block: any, obj: any, schemaObj: any, targetSet: Set<string>, prefix = '') => {
              if (!obj) return;
              Object.entries(obj).forEach(([k, v]) => {
                 let pData: any = null;
@@ -226,19 +239,21 @@ export default function OptimizePage() {
                     if (runtimeVars.has(varName.trim())) return;
                     targetSet.add(varName);
                     if (pData?.type) vTypes[varName] = pData.type;
+                    (vFields[varName] ||= []).push({ instrument: block.instrument, method: block.method, param: `${prefix}${k}` });
                 } else if (typeof v === 'object' && v !== null) {
-                    extractVars(v, pData, targetSet);
+                    extractVars(block, v, pData, targetSet, `${prefix}${k}.`);
                 }
              });
         };
 
         const vars = new Set<string>();
-        parsedSeq.forEach((block: any) => extractVars(block.params, block.schema, vars));
+        parsedSeq.forEach((block: any) => extractVars(block, block.params, block.schema, vars));
         setVariables(Array.from(vars));
 
         const gVars = new Set<string>();
-        pSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
-        cSeq.forEach((block: any) => extractVars(block.params, block.schema, gVars));
+        pSeq.forEach((block: any) => extractVars(block, block.params, block.schema, gVars));
+        cSeq.forEach((block: any) => extractVars(block, block.params, block.schema, gVars));
+        setVarFields(vFields);
         const gVarList = Array.from(gVars);
         setGlobalVariables(gVarList);
         setVarTypes(vTypes);
@@ -715,6 +730,14 @@ export default function OptimizePage() {
                     const perIter = isPerIteration(v);
                     const bound = optConfig.bounds[v] || {};
                     const setBound = (patch: Record<string, any>) => setOptConfig({...optConfig, bounds: {...optConfig.bounds, [v]: {...optConfig.bounds[v], ...patch}}});
+                    // The safety guard's limit on the field this variable feeds: a range, choice
+                    // or fixed value reaching past it is refused when the run is started.
+                    const guards = varGuards[v] || [];
+                    const guardText = guards.map(g => guardHint(g, edgeStatus?.safety)).filter(Boolean).join(' · ');
+                    const entered = perIter ? [] : mode === 'fixed' ? [bound.fixedValue]
+                      : bound.type === 'choice' ? String(bound.min || '').split(',').map(x => x.trim()) : [bound.min, bound.max];
+                    const refusedValue = entered.find(x => guardProblem(guards, x, edgeStatus?.safety));
+                    const refused = refusedValue !== undefined ? `${refusedValue} ${guardProblem(guards, refusedValue, edgeStatus?.safety)}` : '';
                     return (
                     <div key={v} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 min-w-0">
                       <span className="w-40 shrink-0 font-mono text-[13px] font-semibold text-gray-800 dark:text-gray-100 truncate" title={v}>{v}</span>
@@ -745,6 +768,13 @@ export default function OptimizePage() {
                             <input type="text" placeholder="value" title="Used every iteration" value={bound.fixedValue || ''} onChange={e => setBound({ fixedValue: e.target.value })} className={`${compactInput} w-28 focus:border-amber-500`} />
                           )}
                         </>
+                      )}
+                      {guardText && (
+                        <span title={refused ? `Safety guard: ${refused}` : 'What the safety guard allows for this value'}
+                          className={`inline-flex items-center gap-1 text-[11px] ${refused ? 'font-semibold text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                          <ShieldCheck className="w-3 h-3 shrink-0" />
+                          {refused || guardText}
+                        </span>
                       )}
                       <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none shrink-0" title="A different value each iteration, entered in a table below, instead of a range or one fixed value">
                         <input type="checkbox" checked={perIter} onChange={e => setPerIteration(v, e.target.checked)} className="w-3.5 h-3.5 accent-teal-600" />

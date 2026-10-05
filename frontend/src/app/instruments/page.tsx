@@ -2,11 +2,12 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect, useRef } from 'react';
-import { Info, Search, RotateCw, AlertTriangle } from 'lucide-react';
+import { Info, Search, RotateCw, AlertTriangle, Grid3x3, ShieldCheck } from 'lucide-react';
+import Link from 'next/link';
 import { restartEdge } from '@/restartEdge';
 import Sidebar from '@/components/Sidebar';
 import DeckHistory from '@/components/DeckHistory';
-import { ExtraArguments, ResultView, SuggestInput, confirmDialog, useDocumentTheme } from '@ivoryos/shared-ui';
+import { ExtraArguments, ResultView, SuggestInput, TrayPicker, confirmDialog, fieldGuard, guardHint, guardProblem, guardSuggestions, trayOf, useDocumentTheme, type TrayView } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
 type LogEntry = {
@@ -35,6 +36,8 @@ export default function InstrumentsPage() {
   const [missingArgs, setMissingArgs] = useState<Record<string, string[]>>({});
   const [methodSearch, setMethodSearch] = useState('');
   const [restarting, setRestarting] = useState(false);
+  // A field that is a position on a tray (safety guard) can be picked on the tray itself.
+  const [pickingTray, setPickingTray] = useState<{ instrument: string; method: string; param: string; tray: TrayView } | null>(null);
   // Manual instrument actions bypass the queue and drive hardware directly. If a workflow is
   // mid-run, firing one can collide with whatever the run is doing — legacy IvoryOS made you
   // confirm the override first, so this page watches the queue for the same reason.
@@ -306,6 +309,14 @@ export default function InstrumentsPage() {
               <RotateCw className={`w-3.5 h-3.5 ${restarting ? 'animate-spin' : ''}`} />
               {restarting ? 'Restarting…' : 'Restart'}
             </button>
+            <Link
+              href="/safety"
+              title="Limits, trays and rules the edge enforces before anything is sent to an instrument"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Safety
+            </Link>
             <DeckHistory />
             {(busyState.running || busyState.paused) && (
               <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-500/30">
@@ -474,6 +485,13 @@ export default function InstrumentsPage() {
                                 ? 'border-red-400 dark:border-red-500/60 focus:border-red-500'
                                 : 'border-gray-300 dark:border-white/10 focus:border-accent';
                               const currentValue = paramPath.split('.').reduce((acc: any, part: string) => acc && acc[part] !== undefined ? acc[part] : undefined, formValues[key]);
+                              // The safety guard's limit on this field. The edge refuses a call
+                              // outside it; saying so here saves the round trip.
+                              const safety = statusData.safety;
+                              const guard = fieldGuard(safety, instName, methodName, paramPath);
+                              const guardText = guardHint(guard, safety);
+                              const refused = guardProblem(guard, currentValue !== undefined && currentValue !== '' ? currentValue : pData.default, safety);
+                              const tray = trayOf(safety, guard);
 
                               return (
                                 <div key={paramPath} className="space-y-1">
@@ -492,15 +510,16 @@ export default function InstrumentsPage() {
                                       <option value="false">False</option>
                                     </select>
                                   ) : (
-                                    <>
+                                    <div className="flex items-center gap-1.5">
                                       <SuggestInput
                                         type={displayType.includes('int') || displayType.includes('float') ? 'number' : 'text'}
                                         step={displayType.includes('float') ? 'any' : '1'}
                                         // Enum / Literal parameters know their accepted values, so offer them as
-                                        // suggestions instead of leaving the operator to guess the spelling.
-                                        suggestions={(pData.options || []).map((o: any) => String(o))}
+                                        // suggestions instead of leaving the operator to guess the spelling. A
+                                        // field the guard narrows (a tray, an allowed list) offers only those.
+                                        suggestions={guard?.tray || guard?.allowed ? guardSuggestions(guard, safety) : (pData.options || []).map((o: any) => String(o))}
                                         value={currentValue !== undefined ? currentValue : (pData.default !== undefined ? pData.default : '')}
-                                        className={`w-full bg-gray-50 dark:bg-black/40 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none transition-colors text-gray-900 dark:text-white ${fieldBorder}`}
+                                        className={`w-full bg-gray-50 dark:bg-black/40 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none transition-colors text-gray-900 dark:text-white ${refused ? 'border-red-400 dark:border-red-500/60 focus:border-red-500' : fieldBorder}`}
                                         placeholder={displayType}
                                         onChange={(e) => {
                                           let val: any = e.target.value;
@@ -510,10 +529,26 @@ export default function InstrumentsPage() {
                                           handleInputChange(instName, methodName, paramPath, val);
                                         }}
                                       />
-                                    </>
+                                      {tray && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setPickingTray({ instrument: instName, method: methodName, param: paramPath, tray })}
+                                          title={`Pick a position on ${tray.label}`}
+                                          className="shrink-0 rounded-lg border border-gray-300 p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:border-white/10 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+                                        >
+                                          <Grid3x3 className="h-3.5 w-3.5" />
+                                        </button>
+                                      )}
+                                    </div>
                                   )}
                                   {isMissing && (
                                     <p className="text-[10px] font-medium text-red-600 dark:text-red-400">Required</p>
+                                  )}
+                                  {guardText && (
+                                    <p className={`flex items-center gap-1 text-[10px] ${refused ? 'font-medium text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                                      <ShieldCheck className="h-3 w-3 shrink-0" />
+                                      {refused ? `Not allowed: ${refused}` : guardText}
+                                    </p>
                                   )}
                                 </div>
                               );
@@ -576,6 +611,15 @@ export default function InstrumentsPage() {
             </>
           )}
         </div>
+
+        {pickingTray && (
+          <TrayPicker
+            tray={pickingTray.tray}
+            title={`${pickingTray.instrument}.${pickingTray.method}: ${pickingTray.param}`}
+            onPick={([position]) => handleInputChange(pickingTray.instrument, pickingTray.method, pickingTray.param, position)}
+            onClose={() => setPickingTray(null)}
+          />
+        )}
 
         {/* Action log. A flex sibling rather than an absolutely-positioned overlay, so resizing it
             gives the content above the space back instead of hiding underneath it. */}

@@ -1,9 +1,11 @@
 "use client";
 
-import React from 'react';
-import { Plus, Trash2, GripVertical, Layers } from 'lucide-react';
+import React, { useState } from 'react';
+import { Plus, Trash2, GripVertical, Layers, Grid3x3 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { groupSizeFor, SpreadsheetRow } from './spreadsheetRun';
+import { guardHint, guardProblem, trayForGuards, type FieldGuard, type SafetyView } from './safety';
+import { TrayPicker } from './TrayPicker';
 
 /**
  * The iteration table: one column per `#variable`, one row per sample.
@@ -42,6 +44,17 @@ export interface SpreadsheetTableProps {
   compact?: boolean;
   /** Drag-and-drop ids must be unique per page; Cloud renders several tables at once. */
   idPrefix?: string;
+  /**
+   * What the edge's safety guard allows for each variable (safety.ts): a cell outside it is marked
+   * as it is typed. The edge still refuses the run; this only says so earlier.
+   */
+  varGuards?: Record<string, FieldGuard[]>;
+  safety?: SafetyView | null;
+  /**
+   * A variable that is a position on a tray gets a picker in its heading; the positions picked
+   * there, in visiting order, replace the column. Omit to leave the column typed by hand.
+   */
+  onFillColumn?: (varName: string, values: string[]) => void;
 }
 
 const isInvalidNumericCell = (type: string | undefined, val: any) => {
@@ -65,7 +78,20 @@ export function SpreadsheetTable({
   showBatchGrouping = false,
   compact = false,
   idPrefix = 'spreadsheet',
+  varGuards = {},
+  safety,
+  onFillColumn,
 }: SpreadsheetTableProps) {
+  // Which tray column's picker is open.
+  const [picking, setPicking] = useState<string | null>(null);
+  const trays = Object.fromEntries(variables.map((v) => [v, trayForGuards(varGuards[v], safety)]));
+  // The same position on two rows is usually a slip (the same vial filled twice), sometimes meant.
+  // Said, not refused.
+  const repeats = (v: string, idx: number): number[] => {
+    const value = String(rows[idx]?.[v] ?? '').trim();
+    if (!trays[v] || !value) return [];
+    return rows.flatMap((r, i) => (i !== idx && String(r?.[v] ?? '').trim() === value ? [i + 1] : []));
+  };
   const groupSize = groupSizeFor(batchSize);
   const showGroups = showBatchGrouping && groupSize > 1 && rows.length > groupSize;
   const cellPad = compact ? 'p-1.5' : 'p-2';
@@ -76,13 +102,21 @@ export function SpreadsheetTable({
     // Rule 1 made visible: for a batch column only the group's first row is ever read.
     const isDesignatedRow = !isBatchVar || idx % groupSize === 0;
     const invalid = isInvalidNumericCell(varTypes[v], row[v]);
+    // Only a value that will be read is judged: a batch column's other rows are ignored anyway.
+    const refused = isDesignatedRow ? guardProblem(varGuards[v], row[v], safety) : null;
+    const repeated = isDesignatedRow && !refused ? repeats(v, idx) : [];
 
     if (varOptions[v]) {
       return (
         <select
           value={row[v] || ''}
           onChange={(e) => onRowChange(idx, v, e.target.value)}
-          className="w-full cursor-pointer border-b border-transparent bg-transparent px-2 py-1 text-sm outline-none transition-colors hover:border-gray-300 focus:border-accent dark:hover:border-white/20"
+          title={refused ? `${row[v]} ${refused}` : undefined}
+          className={`w-full cursor-pointer border-b bg-transparent px-2 py-1 text-sm outline-none transition-colors ${
+            refused
+              ? 'border-red-400 bg-red-50 dark:border-red-500/60 dark:bg-red-900/20'
+              : 'border-transparent hover:border-gray-300 focus:border-accent dark:hover:border-white/20'
+          }`}
         >
           <option value="" disabled>Select {v}</option>
           {varOptions[v].map((opt) => (
@@ -99,14 +133,20 @@ export function SpreadsheetTable({
         onChange={(e) => onRowChange(idx, v, e.target.value)}
         placeholder={isDesignatedRow ? `Enter ${v}...` : 'not used for this row'}
         title={
-          invalid
+          refused
+            ? `${row[v]} ${refused}`
+            : invalid
             ? `Expects a number (${varTypes[v]})`
+            : repeated.length
+              ? `Also on row ${repeated.join(', ')}`
             : isDesignatedRow
               ? undefined
               : "Only needed once per batch group — this row's value (if any) is ignored."
         }
         className={`w-full border-b px-2 py-1 text-sm outline-none transition-colors ${
-          invalid
+          refused
+            ? 'border-red-400 bg-red-50 dark:border-red-500/60 dark:bg-red-900/20'
+            : invalid || repeated.length
             ? 'border-amber-400 bg-amber-50 dark:border-amber-500/50 dark:bg-amber-900/20'
             : isDesignatedRow
               ? 'border-transparent bg-transparent hover:border-gray-300 focus:border-accent dark:hover:border-white/20'
@@ -137,6 +177,21 @@ export function SpreadsheetTable({
               {varTypes[v] && (
                 <span className="text-[10px] font-normal normal-case text-gray-400 dark:text-gray-500">
                   {varTypes[v]}
+                </span>
+              )}
+              {(varGuards[v] || []).length > 0 && (
+                <span className="flex items-center gap-1.5 text-[10px] font-normal normal-case text-gray-500 dark:text-gray-400">
+                  <span title="What the safety guard allows here">{(varGuards[v] || []).map((g) => guardHint(g, safety)).filter(Boolean).join(' · ')}</span>
+                  {trays[v] && onFillColumn && (
+                    <button
+                      type="button"
+                      onClick={() => setPicking(v)}
+                      title={`Pick positions on ${trays[v]!.tray.label}: one row per position`}
+                      className="inline-flex items-center gap-1 rounded border border-accent-tint bg-accent-soft px-1.5 py-0.5 font-semibold text-accent-fg hover:bg-accent hover:text-on-accent"
+                    >
+                      <Grid3x3 className="h-3 w-3" /> Pick
+                    </button>
+                  )}
                 </span>
               )}
             </div>
@@ -253,6 +308,16 @@ export function SpreadsheetTable({
         {header}
         {onReorder ? draggableBody : staticBody}
       </table>
+      {picking && trays[picking] && onFillColumn && (
+        <TrayPicker
+          tray={trays[picking]!.tray}
+          title={`${picking}: one row per position`}
+          multiple
+          initial={rows.map((r) => String(r?.[picking] ?? '').trim()).filter(Boolean)}
+          onPick={(positions) => onFillColumn(picking, positions)}
+          onClose={() => setPicking(null)}
+        />
+      )}
       {onAddRow && (
         <div className={compact
           ? 'border-t border-gray-100 px-2 py-1.5 dark:border-white/5'

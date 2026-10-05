@@ -2,8 +2,8 @@
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Download, Upload, AlertTriangle, Layers, ListTree } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Play, Download, Upload, AlertTriangle, Layers, ListTree, Grid3x3 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
 import LiveRun from '@/components/LiveRun';
@@ -19,7 +19,9 @@ import {
   expandSpreadsheet,
   resolveFixedBlock,
   toSubmittedStep,
-  toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks } from '@ivoryos/shared-ui';
+  toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks,
+  TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, SuggestInput,
+  type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 import Link from 'next/link';
 import { useQueueBusy } from '@/queueBusy';
 import { editRunIdFromUrl, hydrateBlocks, leaveEdit, loadQueuedRun, saveQueuedRun, sourceBlock, type QueuedEdit } from '@/queuedEdit';
@@ -130,6 +132,20 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
 
   const [varOptions, setVarOptions] = useState<Record<string, any[]>>({});
+  // Which fields each '#variable' feeds, so the safety guard's limits on those fields can be shown
+  // on the variable (shared-ui safety.ts). The edge enforces them; this marks a value as it is typed.
+  const [varFields, setVarFields] = useState<Record<string, FieldRef[]>>({});
+  const safety = edgeStatus?.safety;
+  const varGuards = useMemo(() => {
+    const out: Record<string, FieldGuard[]> = {};
+    for (const [name, refs] of Object.entries(varFields)) {
+      const guards = guardsFor(safety, refs);
+      if (guards.length) out[name] = guards;
+    }
+    return out;
+  }, [varFields, safety]);
+  // The Once form's tray picker: which variable it is open for.
+  const [pickingTray, setPickingTray] = useState<string | null>(null);
   // Where a '#' with no name sits ("pump_1.dispense → volume_ml"), if anywhere.
   const [hasEmptyHashVar, setHasEmptyHashVar] = useState<string | null>(null);
   const [liveInputVars, setLiveInputVars] = useState<Set<string>>(new Set());
@@ -230,10 +246,12 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
         const batchVars = new Set<string>();
         const vTypes: Record<string, string> = {};
         const vOptions: Record<string, any[]> = {};
+        const vFields: Record<string, FieldRef[]> = {};
         let sawEmptyHash: string | null = null;
         let scanning = '';
+        let scanningBlock: any = null;
 
-        const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>) => {
+        const extractVars = (obj: any, schemaObj: any, targetSet: Set<string>, prefix = '') => {
             if (!obj) return;
             Object.entries(obj).forEach(([k, v]) => {
                 let pData = null;
@@ -251,24 +269,32 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
 
                     if (pData?.type) vTypes[varName] = pData.type;
                     if (pData?.options) vOptions[varName] = pData.options;
+                    const ref = { instrument: scanningBlock.instrument, method: scanningBlock.method, param: `${prefix}${k}` };
+                    const known = (vFields[varName] ||= []);
+                    if (!known.some(f => f.instrument === ref.instrument && f.method === ref.method && f.param === ref.param)) known.push(ref);
                 } else if (typeof v === 'object' && v !== null) {
-                    extractVars(v, pData, targetSet);
+                    extractVars(v, pData, targetSet, `${prefix}${k}.`);
                 }
             });
         };
+        const scan = (block: any, targetSet: Set<string>) => {
+            scanning = `${block.instrument}.${block.method}`;
+            scanningBlock = block;
+            extractVars(block.params, block.schema, targetSet);
+        };
 
         parsedSeq.forEach((block: any) => {
-            scanning = `${block.instrument}.${block.method}`;
             // A batch step's #vars still come from the spreadsheet — they just only need to be
             // filled in on one row per batch group instead of every row (see batchVars below).
-            extractVars(block.params, block.schema, vars);
-            if (block.isBatchAction) extractVars(block.params, block.schema, batchVars);
+            scan(block, vars);
+            if (block.isBatchAction) scan(block, batchVars);
         });
 
-        pSeq.forEach((block: any) => { scanning = `${block.instrument}.${block.method}`; extractVars(block.params, block.schema, gVars); });
-        cSeq.forEach((block: any) => { scanning = `${block.instrument}.${block.method}`; extractVars(block.params, block.schema, gVars); });
+        pSeq.forEach((block: any) => scan(block, gVars));
+        cSeq.forEach((block: any) => scan(block, gVars));
 
         setHasEmptyHashVar(sawEmptyHash);
+        setVarFields(vFields);
 
         const varList = Array.from(vars);
         const gVarList = Array.from(gVars);
@@ -348,6 +374,21 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
     const newRows = [...rows];
     newRows[idx][variable] = value;
     setRows(newRows);
+  };
+
+  // Positions picked on a tray become the column, one row each, in visiting order. Rows are added
+  // as needed; a row past the last position loses this column's value, and is dropped when that
+  // leaves it empty at the end of the table.
+  const fillColumn = (variable: string, values: string[]) => {
+    const next = rows.map(r => ({ ...r }));
+    values.forEach((value, i) => {
+      if (!next[i]) next[i] = Object.fromEntries(variables.map(v => [v, '']));
+      next[i][variable] = value;
+    });
+    const isEmpty = (r: Record<string, any>) => variables.every(v => r[v] === undefined || r[v] === null || r[v] === '');
+    for (let i = values.length; i < next.length; i++) next[i][variable] = '';
+    while (next.length > Math.max(1, values.length) && isEmpty(next[next.length - 1])) next.pop();
+    setRows(next);
   };
 
   const downloadCSV = () => {
@@ -599,9 +640,12 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                        setGlobalValues(updated);
                        if (!editingRef.current) localStorage.setItem('ivoryos_global_values', JSON.stringify(updated));
                      }}
-                     title={isInvalidNumericCell(v, globalValues[v]) ? `Expects a number (${varTypes[v]})` : undefined}
+                     title={guardProblem(varGuards[v], globalValues[v], safety)
+                       ? `${globalValues[v]} ${guardProblem(varGuards[v], globalValues[v], safety)}`
+                       : isInvalidNumericCell(v, globalValues[v]) ? `Expects a number (${varTypes[v]})`
+                       : (varGuards[v] || []).map(g => guardHint(g, safety)).filter(Boolean).join(' · ') || undefined}
                      className={`w-36 bg-white dark:bg-black/50 border rounded-md px-2 py-1 text-sm outline-none ${
-                       isInvalidNumericCell(v, globalValues[v])
+                       isInvalidNumericCell(v, globalValues[v]) || guardProblem(varGuards[v], globalValues[v], safety)
                          ? 'border-red-400 dark:border-red-500/60'
                          : 'border-amber-300 dark:border-amber-700/50 focus:border-amber-500'
                      }`}
@@ -648,19 +692,38 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
                 {variables.map(v => {
                   const value = String(rows[0]?.[v] ?? '');
                   const field = 'flex-1 min-w-0 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-800 focus:outline-none focus:border-accent dark:bg-black/40 dark:border-white/10 dark:text-gray-100';
+                  // What the safety guard allows for this value, said under the field as it is typed.
+                  const guards = varGuards[v] || [];
+                  const refused = guardProblem(guards, value, safety);
+                  const hint = guards.map(g => guardHint(g, safety)).filter(Boolean).join(' · ');
+                  const tray = trayForGuards(guards, safety);
                   return (
-                    <div key={v} className="flex items-center gap-3">
+                    <div key={v}>
+                    <div className="flex items-center gap-3">
                       <label htmlFor={`once-${v}`} className="w-40 shrink-0 truncate font-mono text-sm text-gray-800 dark:text-gray-200" title={v}>{v}</label>
                       {varOptions[v] ? (
-                        <select id={`once-${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)} className={field}>
+                        <select id={`once-${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)} className={`${field} ${refused ? '!border-red-400' : ''}`}>
                           <option value="" disabled>Select {v}</option>
                           {varOptions[v].map((opt: any) => <option key={String(opt)} value={String(opt)}>{String(opt)}</option>)}
                         </select>
                       ) : (
-                        <input id={`once-${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)} autoComplete="off"
-                          className={`${field} ${isInvalidNumericCell(v, value) ? '!border-red-400' : ''}`} />
+                        <SuggestInput id={`once-${v}`} value={value} onChange={e => updateRow(0, v, e.target.value)}
+                          suggestions={guards.flatMap(g => guardSuggestions(g, safety))}
+                          className={`${field} ${isInvalidNumericCell(v, value) || refused ? '!border-red-400' : ''}`} />
+                      )}
+                      {tray && (
+                        <button type="button" onClick={() => setPickingTray(v)} title={`Pick a position on ${tray.tray.label}`}
+                          className="shrink-0 rounded-lg border border-gray-200 p-2 text-gray-500 hover:bg-gray-50 hover:text-gray-800 dark:border-white/10 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100">
+                          <Grid3x3 className="h-4 w-4" />
+                        </button>
                       )}
                       {varTypes[v] && <span className="w-14 shrink-0 text-xs text-gray-400">{varTypes[v]}</span>}
+                    </div>
+                    {(refused || hint) && (
+                      <p className={`mt-1 pl-[10.75rem] text-xs ${refused ? 'text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                        {refused ? `${value} ${refused}` : hint}
+                      </p>
+                    )}
                     </div>
                   );
                 })}
@@ -690,6 +753,9 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
               batchSize={batchSize}
               showBatchGrouping={hasBatchStep || hasBatchSize}
               idPrefix="configure"
+              varGuards={varGuards}
+              safety={safety}
+              onFillColumn={fillColumn}
             />
           )}
 
@@ -753,6 +819,16 @@ export default function RunWorkflowPage({ mode }: { mode: 'once' | 'iterate' }) 
             run bar, so it is watched where it started and never a scroll away. */}
         <LiveRun />
       </div>
+
+      {pickingTray && trayForGuards(varGuards[pickingTray], safety) && (
+        <TrayPicker
+          tray={trayForGuards(varGuards[pickingTray], safety)!.tray}
+          title={pickingTray}
+          initial={[String(rows[0]?.[pickingTray] ?? '')]}
+          onPick={([position]) => updateRow(0, pickingTray, position)}
+          onClose={() => setPickingTray(null)}
+        />
+      )}
 
       <WorkflowMap
         isOpen={isMapOpen}

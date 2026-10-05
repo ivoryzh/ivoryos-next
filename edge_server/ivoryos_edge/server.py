@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from .queue import WorkflowQueueManager, unproduced_references
 from . import deck
 from . import runtime
+from . import safety
 from . import workflows as wf
 from .workflows import WorkflowError, expand_workflow_blocks
 
@@ -32,6 +33,8 @@ load_dotenv(ENV_PATH)
 
 app = FastAPI(title="IvoryOS Edge Server")
 queue_manager = WorkflowQueueManager(app)
+# The guard reads the live deck from this app when it checks a call (safety.py).
+safety.guard.app = app
 
 # Other websites may neither read from nor drive this edge (origin_guard.py). CORS only lets the
 # desktop launcher and pages on this computer read cross-origin; the guard, added last so it runs
@@ -1181,6 +1184,10 @@ def get_status():
         # Instruments the deck file lists that did not load (deck_config.py), so the Instruments
         # page can say "pump_2: could not open COM4" instead of the pump silently not existing.
         "instrument_errors": getattr(app.state, "instrument_errors", []),
+        # Each field's limit and each tray's layout, so every form can show them and offer a
+        # tray's positions (safety.py). Beside the schema, not in it: the schema is the deck's
+        # shape, fingerprinted and sent to Cloud, and a limit is not part of that.
+        "safety": safety.guard.view(),
     }
 
 
@@ -1304,6 +1311,16 @@ def _per_row_template(sequence):
     ]
 
 
+def _refuse_unsafe(parameters: dict, prep: list, sequence: list, cleanup: list) -> None:
+    """Refuse a run holding a value the safety guard would block, before any of it is sent.
+    Each step is checked again as it runs (queue.py), which is what covers the values a run only
+    learns on the way: a '#name', an optimizer's suggestion, and every rule that reads the deck."""
+    problems = safety.guard.check_run(parameters, prep, sequence, cleanup)
+    if problems:
+        safety.guard.note_blocked(problems, "start")
+        raise WorkflowError("Safety guard: " + " ".join(problems) + " Nothing was run.")
+
+
 def prepare_run(parameters: dict, prep: list, sequence: list, cleanup: list):
     """What a run will execute: links expanded, the deck version stamped, references checked.
     Returns (parameters, steps). Shared by start_run and by editing a queued run, so a run changed
@@ -1334,6 +1351,7 @@ def prepare_run(parameters: dict, prep: list, sequence: list, cleanup: list):
         if resolved_links:
             parameters["resolved_links"] = resolved_links
 
+        _refuse_unsafe(parameters, prep, [], cleanup)
         # No steps: the budget loop builds each trial from the sequence_template
         return parameters, []
 
@@ -1345,6 +1363,7 @@ def prepare_run(parameters: dict, prep: list, sequence: list, cleanup: list):
     unproduced = unproduced_references(prep + sequence + cleanup)
     if unproduced:
         raise WorkflowError(" ".join(unproduced) + " Nothing was run.")
+    _refuse_unsafe(parameters, prep, sequence, cleanup)
 
     if parameters.get("type") == "Spreadsheet":
         # Rebuilt from the expanded steps rather than trusted from the caller -- see
@@ -1621,17 +1640,24 @@ async def update_step(step_id: int, req: Request):
 
 # --- Single Action Endpoints (Legacy support for Designer / Manual tests) ---
 
-async def run_and_track_task(task_id: str, method, args):
-    """Wrapper to run a task and clean it up from active tracking when done."""
+async def run_and_track_task(task_id: str, method, args, sent=None):
+    """Wrapper to run a task and clean it up from active tracking when done. `sent` is what the
+    safety guard let through (safety.py enforce): told how the call ended, it updates the deck
+    states the call sets."""
     import traceback
     try:
-        if inspect.iscoroutinefunction(method):
-            result = await method(**args)
-        else:
-            # Run sync methods in executor to prevent event loop blocking
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: method(**args))
-            
+        try:
+            if inspect.iscoroutinefunction(method):
+                result = await method(**args)
+            else:
+                # Run sync methods in executor to prevent event loop blocking
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, lambda: method(**args))
+        except BaseException:
+            safety.guard.finish(sent, failed=True)
+            raise
+        safety.guard.finish(sent, result)
+
         print(f"Task {task_id} completed successfully.")
         # Serialized like a workflow step's output. A driver that returns a dataclass or an enum
         # would otherwise either fail to encode on the way out or reach the Instruments page as
@@ -1669,12 +1695,18 @@ async def execute_method(req: ExecuteRequest):
     # place as a step, but it isn't a callable attribute until it's wrapped.
     method = resolve_callable(instance, req.method)
 
+    # A call made by hand goes past the queue, not past the guard.
+    try:
+        sent = await safety.guard.enforce(req.module, req.method, req.args or {}, source="manual")
+    except safety.SafetyViolation as e:
+        return JSONResponse(status_code=409, content={"error": str(e), "blocked_by": "safety", "problems": e.problems})
+
     req.args = cast_arguments(method, req.args or {})
     
     # Generate task ID and run in background
     task_id = str(uuid.uuid4())
     task_results[task_id] = {"status": "running"}
-    task = asyncio.create_task(run_and_track_task(task_id, method, req.args))
+    task = asyncio.create_task(run_and_track_task(task_id, method, req.args, sent))
     active_tasks[task_id] = task
     
     return {"status": "started", "task_id": task_id}
@@ -1736,6 +1768,61 @@ def _workflow_summary(name):
 
 
 from . import compatibility
+
+
+# --- Safety guard (safety.py) ---------------------------------------------------------------
+
+@app.get("/api/safety")
+def get_safety():
+    """The guard's configuration, what it resolves to on this deck, and what it blocked lately."""
+    return safety.guard.describe()
+
+
+@app.put("/api/safety")
+async def save_safety(req: Request):
+    """Replace the configuration. Takes effect on the next call sent to an instrument, including
+    the next step of a run already under way."""
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    try:
+        safety.guard.replace(data.get("config", data))
+    except safety.SafetyConfigError as e:
+        return JSONResponse(status_code=400, content={"error": str(e), "problems": e.problems})
+    except OSError as e:
+        return JSONResponse(status_code=500, content={"error": f"Could not save the safety configuration: {e}"})
+    return safety.guard.describe()
+
+
+@app.get("/api/safety/state")
+async def get_safety_state():
+    """Each deck state as it stands now. A state bound to a reading is read from its instrument
+    here, so this is asked for when a person looks, not polled."""
+    return {"states": await safety.guard.current_states()}
+
+
+@app.post("/api/safety/state")
+async def set_safety_state(req: Request):
+    """A person says what a state is: the first time, or after a call that sets it did not finish."""
+    try:
+        data = await req.json()
+        safety.guard.set_state_by_hand(str(data.get("name") or ""), data.get("value"))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    return {"states": await safety.guard.current_states()}
+
+
+@app.post("/api/safety/check")
+async def check_safety_draft(req: Request):
+    """Validate a draft and lay out its trays without saving it, for the page being edited."""
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    return safety.preview(data.get("config", data), safety.guard.deck())
 
 
 @app.get("/api/deck")

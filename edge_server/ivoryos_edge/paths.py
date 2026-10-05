@@ -48,5 +48,12 @@ CERTS_DIR = _in_data_dir(".certs", os.path.join(_PACKAGE_DIR, ".certs"))
 # Files an optimizer backend needs on disk (NIMO works from a CSV).
 OPTIMIZER_DATA_DIR = _in_data_dir("optimizer_data", os.path.join(_PACKAGE_DIR, "optimizer_data"))
 
+# The safety guard's limits, trays and rules (safety.py). Beside the workflow store, like the
+# agent settings, so a deck's guard travels with its data folder and not with its drivers.
+SAFETY_PATH = _in_data_dir("safety.json", os.path.join(_PACKAGE_DIR, "safety.json"))
+# What the guard last knew of each deck state that no instrument can be asked for (a container on
+# the balance pan). Kept on disk because the container is still there after a restart.
+SAFETY_STATE_PATH = _in_data_dir("safety_state.json", os.path.join(_PACKAGE_DIR, "safety_state.json"))
+
 # The introspected schema, dumped at startup for anyone who wants to diff it.
 SCHEMA_DUMP_PATH = _in_data_dir("ivoryos_schema.json", "ivoryos_schema.json")

@@ -11,6 +11,7 @@ from sqlalchemy import update, select, or_, and_, func, String, cast
 from sqlalchemy.orm import selectinload
 from ivoryos_edge.introspection import serialize_result
 from ivoryos_edge.models import async_session, WorkflowRun, WorkflowStep
+from ivoryos_edge.safety import SafetyViolation, guard as safety_guard
 
 def extract_return_values(return_bindings, return_var, serialized_res, result):
     """Map a step's declared outputs onto the value the step actually returned.
@@ -881,7 +882,8 @@ class WorkflowQueueManager:
         the risky choice.
         """
         step.status = "error"
-        step.error = str(error) + "\n" + trace
+        # A refusal by the safety guard is its own explanation; a traceback into the queue adds nothing.
+        step.error = str(error) if isinstance(error, SafetyViolation) else str(error) + "\n" + trace
         step.end_time = datetime.utcnow()
         step.outputs = record_failed_attempt(step.outputs, str(error), step.start_time, step.end_time)
         run.status = "error"
@@ -1249,6 +1251,10 @@ class WorkflowQueueManager:
                             method = resolve_callable(instance, step.method)
                             args = substitute_workflow_vars(step.parameters or {}, scoped_context(workflow_context, row_contexts, step))
 
+                            # The last thing before the driver: limits, tray positions and the
+                            # deck's rules, on the values this step really carries (safety.py).
+                            # A refusal is a failed step, so it waits for a person like any other.
+                            sent = await safety_guard.enforce(step.instrument, step.method, args)
                             args = cast_arguments(method, args)
                             
                             if inspect.iscoroutinefunction(method):
@@ -1257,7 +1263,14 @@ class WorkflowQueueManager:
                                 loop = asyncio.get_running_loop()
                                 self.current_step_task = loop.run_in_executor(None, lambda: method(**args))
                                 
-                            result = await self.current_step_task
+                            try:
+                                result = await self.current_step_task
+                            except BaseException:
+                                # Sent, and it did not finish: the deck states it sets are no
+                                # longer known (safety.py finish).
+                                safety_guard.finish(sent, failed=True)
+                                raise
+                            safety_guard.finish(sent, result)
                             self.current_step_task = None
                                 
                             serialized_res = serialize_result(result)
@@ -1642,14 +1655,22 @@ class WorkflowQueueManager:
                         raise Exception(f"Instrument {db_step.instrument} not found")
                     from ivoryos_edge.introspection import cast_arguments, resolve_callable
                     method = resolve_callable(instruments[db_step.instrument], db_step.method)
-                    casted_args = cast_arguments(method, substitute_workflow_vars(db_step.parameters or {}, context))
+                    step_args = substitute_workflow_vars(db_step.parameters or {}, context)
+                    # As in a normal run: an optimizer's suggestion is checked like a typed value.
+                    sent = await safety_guard.enforce(db_step.instrument, db_step.method, step_args)
+                    casted_args = cast_arguments(method, step_args)
 
                     if inspect.iscoroutinefunction(method):
                         self.current_step_task = asyncio.create_task(method(**casted_args))
                     else:
                         loop = asyncio.get_running_loop()
                         self.current_step_task = loop.run_in_executor(None, lambda: method(**casted_args))
-                    result = await self.current_step_task
+                    try:
+                        result = await self.current_step_task
+                    except BaseException:
+                        safety_guard.finish(sent, failed=True)
+                        raise
+                    safety_guard.finish(sent, result)
                     self.current_step_task = None
 
                     serialized_res = serialize_result(result)

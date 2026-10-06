@@ -52,7 +52,7 @@ def run(name, cls):
     seen = []
     for _ in range(4):
         trials = opt.suggest(n=2)
-        # A model may return fewer than asked (Ax does at its switch from random to model).
+        # A model may return fewer than asked (Ax, when the model step cannot generate yet).
         assert isinstance(trials, list) and 1 <= len(trials) <= 2, trials
         # As the queue sends them: each trial's parameters with its objective.
         opt.observe([{**t, "y": f(t)} for t in trials])

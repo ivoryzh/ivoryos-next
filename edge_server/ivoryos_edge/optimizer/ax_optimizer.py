@@ -123,7 +123,19 @@ class AxOptimizer(OptimizerBase):
             return GenerationStrategy(steps=steps)
 
     def suggest(self, n=1):
+        # Ax caps a batch by the trial limit of the step it is leaving, so at a step transition
+        # (e.g. the last Sobol trial) it returns fewer than n, even just 1: ask again for the rest
         trials = self.client.get_next_trials(n)
+        while trials and len(trials) < n:
+            try:
+                new_trials = self.client.get_next_trials(n - len(trials))
+            except Exception:
+                # the next step can't generate yet, e.g. a model step before any results
+                # exist: run the partial batch, as Ax alone would
+                break
+            if not new_trials:
+                break
+            trials.update(new_trials)
         trial_index_list = []
         param_list = []
         for trial_index, params in trials.items():
@@ -145,42 +157,54 @@ class AxOptimizer(OptimizerBase):
                     raw_data=obj_only_result
                 )
 
+    def _get_plot_adapter(self):
+        """
+        Fit a surrogate model on all observed data, for plotting.
+        The generation strategy's own model can't be reused: it only exists once the model step
+        is reached (e.g. after the initial Sobol trials), and it was fitted when the last trial was
+        suggested, so it lacks the latest batch of results. The fit is fast (~0.2 s at 60 trials)
+        and leaves the generation strategy, and therefore future suggestions, untouched.
+        """
+        from ax.adapter.registry import Generators
+
+        experiment = self.client._experiment
+        return Generators.BOTORCH_MODULAR(experiment=experiment, data=experiment.lookup_data())
+
     def get_plots(self, plot_type):
         try:
+            from ax.core.base_trial import TrialStatus
             from ax.plot.contour import interact_contour_plotly
             from ax.plot.slice import interact_slice_plotly
-            from ax.plot.trace import optimization_trace_single_method_plotly
-            from ax.plot.render import plot_config_to_html
-            import numpy as np
-            
+            import plotly.graph_objects as go
+
+            completed = len(self.client._experiment.trials_by_status[TrialStatus.COMPLETED])
+            if completed < 2:
+                return {"error": f"Not enough data points yet: plots need at least 2 completed trials, "
+                                 f"this run has {completed}."}
+
             plots = {}
             errors = []
-            if hasattr(self, 'generators'):
+            try:
+                adapter = self._get_plot_adapter()
+            except Exception as e:
+                adapter = None
+                errors.append(f"Model Fit Error: {e}")
+
+            if adapter is not None:
                 try:
                     from ax.plot.feature_importances import plot_feature_importance_by_feature_plotly
-                    
-                    # We need the model adapter from the current generation step to extract feature importance
-                    gs = self.client._generation_strategy
-                    adapter = gs.adapter if hasattr(gs, 'adapter') else gs.model
-                    
-                    if adapter is not None:
-                        fig = plot_feature_importance_by_feature_plotly(model=adapter, relative=True)
-                        plots['Feature Importance'] = fig.to_html(full_html=False, include_plotlyjs=False)
+                    fig = plot_feature_importance_by_feature_plotly(model=adapter, relative=True)
+                    plots['Feature Importance'] = fig.to_html(full_html=False, include_plotlyjs=False)
                 except Exception as e:
                     errors.append(f"Feature Importance Error: {e}")
 
                 try:
-                    adapter = None
-                    if hasattr(self.client, "_generation_strategy"):
-                        gs = self.client._generation_strategy
-                        if hasattr(gs, "adapter"):
-                            adapter = gs.adapter
-                        elif hasattr(gs, "model"):
-                            adapter = gs.model
-
                     metric_name = self.objective_config[0]["name"] if self.objective_config else None
                     if metric_name:
                         fig = interact_contour_plotly(model=adapter, metric_name=metric_name)
+                        # The axes span exactly the parameter bounds, so trials at a bound (common
+                        # near an optimum) would be drawn half-hidden by the plot edge
+                        fig.update_traces(cliponaxis=False, selector=dict(type="scatter"))
                         plots['Contour'] = fig.to_html(full_html=False, include_plotlyjs=False)
                 except Exception as e:
                     errors.append(f"Contour Error: {e}")
@@ -212,21 +236,15 @@ class AxOptimizer(OptimizerBase):
                             absolute_metrics=metric_names,
                             num_points=30,
                         )
-                        fig = plot_pareto_frontier(frontier, CI_level=0.90)
-                        plots['Pareto Frontier'] = plot_config_to_html(fig)
+                        config = plot_pareto_frontier(frontier, CI_level=0.90)
+                        # plot_config_to_html emits RequireJS code, which the data panel doesn't load
+                        fig = go.Figure(config.data)
+                        plots['Pareto Frontier'] = fig.to_html(full_html=False, include_plotlyjs=False)
                 except Exception as e:
                     errors.append(f"Pareto Error: {e}")
 
             if not plots:
-                try:
-                    trial_count = len(self.client.experiment.trials)
-                except:
-                    trial_count = 0
-                    
-                if trial_count < 5:
-                    return {"error": "Not enough data points yet. Ax requires a few initial random trials to build the surrogate model."}
-                else:
-                    return {"error": f"Failed to generate plots. Errors encountered: {' | '.join(errors)}"}
+                return {"error": f"Failed to generate plots. Errors encountered: {' | '.join(errors)}"}
             return plots
             
         except Exception as e:

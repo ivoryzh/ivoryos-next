@@ -10,6 +10,10 @@ from ivoryos_edge.optimizer.base_optimizer import OptimizerBase
 
 
 class NIMOOptimizer(OptimizerBase):
+    # nimo's phase diagram is quadratic in the number of candidates (~1 min at 5,000) and can't
+    # be interrupted, so skip it for larger search spaces rather than hang the end of the run
+    MAX_PHASE_DIAGRAM_CANDIDATES = 2000
+
     def __init__(self, experiment_name:str, parameter_space: list, objective_config: list, optimizer_config: dict,
                  parameter_constraints:list=None, datapath:str=None, additional_params:dict=None):
         """
@@ -85,6 +89,7 @@ class NIMOOptimizer(OptimizerBase):
 
         # Save to CSV
         df.to_csv(self.candidates, index=False)
+        self.n_candidates = len(df)
 
 
     def suggest(self, n=1):
@@ -144,6 +149,9 @@ class NIMOOptimizer(OptimizerBase):
     def get_plots(self, plot_type):
         """requests phase diagram plot from nimo"""
         import nimo
+        if self.n_candidates > self.MAX_PHASE_DIAGRAM_CANDIDATES:
+            return {"error": f"Phase diagram skipped: the search space has {self.n_candidates} candidates, "
+                             f"more than the {self.MAX_PHASE_DIAGRAM_CANDIDATES} it can plot in reasonable time."}
         nimo.visualization.plot_phase_diagram.plot(input_file=self.candidates,
                                                    fig_folder=os.path.join(self.datapath, "nimo_data"))
         files = sorted(glob.glob(os.path.join(os.path.join(self.datapath, "nimo_data"), "phase_diagram_*.png")))

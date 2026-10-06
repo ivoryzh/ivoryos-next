@@ -31,12 +31,23 @@ class BaybeOptimizer(OptimizerBase):
     def observe(self, results, index=None):
         """
         Record a round's results: one dict per suggested trial, holding the parameter values it
-        ran with and its objective values (the queue sends both; BayBE needs both). A trial with
-        an objective missing failed and is left out, since BayBE records only measurements.
+        ran with and its objective values (the queue sends both; BayBE needs both).
+
+        A trial with an objective missing failed and is left out: BayBE has no failed status
+        (a missing target is refused as an incomplete measurement) and records only
+        measurements. That is what Ax's mark_trial_failed amounts to as well -- a failed trial
+        teaches neither model anything, and neither offers its point again in a discrete space
+        (BayBE does not re-recommend a point it already recommended). Only the bookkeeping
+        differs, and the run's own record holds the failed step, so this says so and moves on.
         """
         targets = [o["name"] for o in self.objective_config]
         params = [p["name"] for p in self.parameter_space]
         rows = [r for r in results if all(r.get(t) is not None for t in targets)]
+        for r in results:
+            if r not in rows:
+                point = {p: r.get(p) for p in params}
+                print(f"[optimizer] baybe: trial {point} gave no result; BayBE keeps no record of a failed "
+                      f"experiment, so it is left out of the model.")
         if not rows:
             return
         df = DataFrame(rows)
@@ -154,9 +165,14 @@ class BaybeOptimizer(OptimizerBase):
             step_2_recommender = NaiveHybridSpaceRecommender()
         elif step_2.get("model") == "BOTorch":
             step_2_recommender = BotorchRecommender()
+        # How long step 1 lasts. BayBE switches once this many measurements are on record
+        # (existing data counts, a failed trial does not) and takes only a real int of at
+        # least 1, which is also its default. The Optimize page sends 0 for an emptied field.
+        switch_after = max(1, int(step_1.get("num_samples") or 1))
         return TwoPhaseMetaRecommender(
             initial_recommender=step_1_recommender,
-            recommender=step_2_recommender
+            recommender=step_2_recommender,
+            switch_after=switch_after,
         )
 
     def get_plots(self, plot_type):

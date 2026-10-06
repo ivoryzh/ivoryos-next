@@ -26,6 +26,12 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
     fields = {}
     nullable = False
     _seen = set() if _seen is None else _seen
+    # `Annotated[float, Unit("mL")]`: the type is what sits underneath, and what the markers say
+    # is added at the end. A method's parameters have theirs read by _resolve_markers (the hints
+    # it works from are stripped of Annotated); this is for everywhere else an annotation can sit
+    # -- a dataclass field, a tuple element of a return -- so a unit on a result's field reaches
+    # its return path.
+    annotation, markers = _split_annotated(annotation)
 
     if annotation != inspect.Parameter.empty:
         # For a plain class (float, int, a dataclass, ...) str(annotation) is Python's repr,
@@ -95,6 +101,11 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
                             if f_default.__class__.__name__ == 'PydanticUndefinedType' or f_default == Ellipsis:
                                 f_default = inspect.Parameter.empty
                             fields[f_name] = extract_type_info(f_info.annotation, f_default, _depth + 1, child_seen)
+                            # Pydantic strips Annotated from `annotation` and keeps the metadata
+                            # beside it, so a field's markers are read from there.
+                            for marker in getattr(f_info, "metadata", None) or ():
+                                if callable(getattr(marker, "ivoryos_schema", None)):
+                                    fields[f_name].update(marker.ivoryos_schema())
                     elif recursion_ok and hasattr(annotation, '__fields__'):
                         for f_name, f_info in annotation.__fields__.items():
                             f_default = f_info.default if f_info.required == False else inspect.Parameter.empty
@@ -123,6 +134,13 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
                         param_type = inner["type"]
                     elif inner.get("numeric"):
                         is_numeric = True
+                    # `Optional[Annotated[float, Unit("mL")]]` keeps the Annotated inside the
+                    # Union: its markers still apply, and the type reads "Optional[float]"
+                    # rather than the Annotated repr.
+                    inner_markers = _split_annotated(args[0])[1]
+                    if inner_markers:
+                        markers = markers + inner_markers
+                        param_type = f"Optional[{inner['type']}]" if nullable else inner["type"]
             except Exception:
                 pass
 
@@ -147,6 +165,9 @@ def extract_type_info(annotation, default=inspect.Parameter.empty, _depth=0, _se
             param_data["default"] = default.value
         else:
             param_data["default"] = default
+
+    for marker in markers:
+        param_data.update(marker.ivoryos_schema())
 
     return param_data
 
@@ -195,7 +216,8 @@ def _declared_kwargs_fields(annotation):
         return None
 
     try:
-        hints = typing.get_type_hints(annotation)
+        # Annotated kept: extract_type_info reads its markers (a unit on a declared option).
+        hints = typing.get_type_hints(annotation, include_extras=True)
     except Exception:
         hints = dict(getattr(annotation, "__annotations__", {}))
 
@@ -212,7 +234,8 @@ def _resolve_field_type(owner, field_name, declared):
     if not isinstance(declared, str):
         return declared
     try:
-        return typing.get_type_hints(owner).get(field_name, declared)
+        # Annotated kept, so a field's markers (a unit) are read by extract_type_info.
+        return typing.get_type_hints(owner, include_extras=True).get(field_name, declared)
     except Exception:
         return declared
 
@@ -259,11 +282,16 @@ def _flatten_info(info, prefix):
         for name, child in fields.items():
             paths.extend(_flatten_info(child, f"{prefix}.{name}" if prefix else name))
         return paths
-    return [{
+    leaf = {
         "path": prefix,
         "type": info.get("type", "Any"),
         "numeric": bool(info.get("numeric")),
-    }]
+    }
+    if info.get("unit"):
+        # `-> Annotated[float, Unit("°C")]`, or a unit on a dataclass field: the Designer's
+        # Outputs panel and the Optimize page's objectives say what a saved value is in.
+        leaf["unit"] = info["unit"]
+    return [leaf]
 
 
 _MISSING = object()
@@ -298,14 +326,16 @@ def resolve_output_path(value, path):
 PROPERTY_SETTER_SUFFIX = "_(setter)"
 
 
-def _resolve_hints(func):
+def _resolve_hints(func, extras=False):
     """Annotations as real objects where possible.
 
     Under PEP 563 every annotation arrives as a string, which would make extract_type_info's
     Enum/bool/dataclass checks fall through and turn a dropdown into a free-text box.
     """
     try:
-        return typing.get_type_hints(func)
+        # `extras=True` keeps Annotated (inside a tuple or an Optional too), for what
+        # extract_type_info reads markers from; the default strips it for the type checks.
+        return typing.get_type_hints(func, include_extras=extras)
     except Exception:
         return {}
 
@@ -328,12 +358,21 @@ def _resolve_markers(func):
         # the Annotated can sit one Union down.
         candidates = [hint] + (list(get_args(hint)) if get_origin(hint) is typing.Union else [])
         for candidate in candidates:
-            if get_origin(candidate) is typing.Annotated:
-                found = [m for m in get_args(candidate)[1:] if callable(getattr(m, "ivoryos_schema", None))]
-                if found:
-                    out[name] = found
-                    break
+            found = _split_annotated(candidate)[1]
+            if found:
+                out[name] = found
+                break
     return out
+
+
+def _split_annotated(annotation):
+    """(the type underneath, its markers) for an `Annotated[...]`; (annotation, []) for anything
+    else. Only metadata with an `ivoryos_schema()` method is a marker: Annotated also carries
+    docstrings and other libraries' metadata, which are left alone."""
+    if get_origin(annotation) is typing.Annotated:
+        args = get_args(annotation)
+        return args[0], [m for m in args[1:] if callable(getattr(m, "ivoryos_schema", None))]
+    return annotation, []
 
 
 # Modelling frameworks put properties on their own base class -- pydantic's `model_extra` and
@@ -388,6 +427,23 @@ def _setter_value_annotation(prop):
     return inspect.Parameter.empty
 
 
+def _setter_value_markers(prop):
+    """The markers on a setter's value (`Annotated[int, Unit("rpm")]`), from the same two places
+    _setter_value_annotation reads the type: the setter's own parameter, else the getter's return."""
+    if prop.fset is not None:
+        try:
+            params = [n for n in inspect.signature(prop.fset).parameters if n != "self"]
+            if params:
+                found = _resolve_markers(prop.fset).get(params[0])
+                if found:
+                    return found
+        except (TypeError, ValueError):
+            pass
+    if prop.fget is not None:
+        return _resolve_markers(prop.fget).get("return", [])
+    return []
+
+
 def describe_property(name, prop):
     """Expand one `@property` into the schema entries a workflow can actually use: a
     zero-argument getter under the property's own name, and — when the property is writable —
@@ -412,11 +468,14 @@ def describe_property(name, prop):
         return_paths = []
         if annotation is not inspect.Signature.empty:
             return_type = annotation.__name__ if isinstance(annotation, type) else str(annotation).replace("typing.", "")
-            return_info = extract_type_info(annotation)
+            # From the hint with its Annotated kept (`-> Annotated[float, Unit("°C")]`), as for a
+            # method's return; the type's text above is from the stripped one.
+            rich = _resolve_hints(prop.fget, extras=True).get("return", annotation)
+            return_info = extract_type_info(rich)
             # A property getter is a step like any other, so a property typed as a dataclass
             # gets the same per-field pointers a method returning one would.
             if return_type not in ("None", "NoneType"):
-                return_paths = build_return_paths(annotation, return_info)
+                return_paths = build_return_paths(rich, return_info)
         entries[name] = {
             "description": docstring,
             "parameters": {},
@@ -432,6 +491,8 @@ def describe_property(name, prop):
 
     if prop.fset is not None:
         value_info = extract_type_info(_setter_value_annotation(prop))
+        for marker in _setter_value_markers(prop):
+            value_info.update(marker.ivoryos_schema())
         value_info["required"] = True
         setter_doc = inspect.getdoc(prop.fset)
         if not setter_doc:
@@ -607,10 +668,15 @@ def inspect_class(cls):
             if sig.return_annotation != inspect.Signature.empty:
                 ret = hints.get("return", sig.return_annotation)
                 return_type = ret.__name__ if isinstance(ret, type) else str(ret).replace("typing.", "")
-                return_info = extract_type_info(ret)
+                # Described from the hint with its Annotated kept -- `-> Annotated[float,
+                # Unit("g")]`, or a unit on one element of a tuple -- so the markers reach
+                # return_info and every return path. The type's text above is from the stripped
+                # hint, so it still reads "float".
+                rich_ret = _resolve_hints(described, extras=True).get("return", ret)
+                return_info = extract_type_info(rich_ret)
                 # Addressable leaves of a structured return — see build_return_paths.
                 if return_type not in ("None", "NoneType"):
-                    return_paths = build_return_paths(ret, return_info)
+                    return_paths = build_return_paths(rich_ret, return_info)
                 
             schema[name] = {
                 "description": docstring or "",

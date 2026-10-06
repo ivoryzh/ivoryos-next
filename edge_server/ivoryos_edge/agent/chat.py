@@ -42,7 +42,8 @@ Reply with a single JSON object and nothing else:
 A step is {"instrument": "<name>", "action": "<method>", "args": {"<arg>": <value>}}.
 
 Rules that matter:
-- Numbers are bare numbers. Write 65, never "65 C" or "65 degrees".
+- Numbers are bare numbers. Write 65, never "65 C" or "65 degrees". A parameter's `unit` says
+  what the number is in: a volume whose unit is mL takes 2.5 for 2.5 mL, never 2500.
 - `prep` runs once at the start, `script` is the part repeated per sample or per optimization
   trial, and `cleanup` runs once at the end. If the protocol does not distinguish them, put
   everything in `script`.

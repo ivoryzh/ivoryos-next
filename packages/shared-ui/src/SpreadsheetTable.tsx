@@ -34,6 +34,8 @@ export interface SpreadsheetTableProps {
   onReorder?: (fromIndex: number, toIndex: number) => void;
   /** Declared type per variable, shown under the header and used for numeric validation. */
   varTypes?: Record<string, string>;
+  /** Unit per variable, as the driver declared it on the field the variable feeds (`unit` in the schema). */
+  varUnits?: Record<string, string>;
   /** Enumerated choices per variable — renders a select instead of a free-text input. */
   varOptions?: Record<string, any[]>;
   /** Variables belonging to a batch step: only the group's first row is read. */
@@ -78,6 +80,7 @@ export function SpreadsheetTable({
   onRemoveRow,
   onReorder,
   varTypes = {},
+  varUnits = {},
   varOptions = {},
   batchVariables = [],
   rowListVariables = [],
@@ -189,9 +192,9 @@ export function SpreadsheetTable({
                   </span>
                 )}
               </div>
-              {varTypes[v] && (
+              {(varTypes[v] || varUnits[v]) && (
                 <span className="text-[10px] font-normal normal-case text-gray-400 dark:text-gray-500">
-                  {varTypes[v]}
+                  {[varTypes[v], varUnits[v]].filter(Boolean).join(' · ')}
                 </span>
               )}
               {(varGuards[v] || []).length > 0 && (

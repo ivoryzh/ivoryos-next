@@ -20,7 +20,7 @@ import {
   getVarModeType as sharedGetVarModeType,
   isPerIteration as sharedIsPerIteration,
   getIterationValue as sharedGetIterationValue, useDocumentTheme, LIBRARY_INSTRUMENT, linkOutputBindings, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks , confirmDialog , notify,
-  guardHint, guardProblem, guardsFor, type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
+  guardHint, guardProblem, guardsFor, unitOf, type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 
 const OPTIMIZER_LABELS: Record<string, string> = {
   baybe: 'BayBE',
@@ -57,6 +57,11 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
   const [variables, setVariables] = useState<string[]>([]);
   const [globalVariables, setGlobalVariables] = useState<string[]>([]);
   const [varTypes, setVarTypes] = useState<Record<string, string>>({});
+  // A unit a driver itself declared for the field a '#variable' feeds (the Safety page's choices
+  // arrive with the field's limit: varUnits, below), and for the return path an objective is
+  // saved from.
+  const [declaredUnits, setDeclaredUnits] = useState<Record<string, string>>({});
+  const [returnUnits, setReturnUnits] = useState<Record<string, string>>({});
   const [globalValues, setGlobalValues] = useState<Record<string, string>>({});
   const [returns, setReturns] = useState<string[]>([]);
   // Variables a step saves that aren't numbers (a sample id, a status string). Still usable as
@@ -78,6 +83,15 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
     }
     return out;
   }, [varFields, edgeStatus]);
+  // What each variable's numbers are in: the driver's declaration, else the Safety page's choice.
+  const varUnits = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const name of new Set([...Object.keys(declaredUnits), ...Object.keys(varGuards)])) {
+      const unit = unitOf(varGuards[name], declaredUnits[name]);
+      if (unit) out[name] = unit;
+    }
+    return out;
+  }, [declaredUnits, varGuards]);
   const [optimizerSchemas, setOptimizerSchemas] = useState<Record<string, any>>({});
   const [optimizersLoaded, setOptimizersLoaded] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -260,6 +274,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
         setCleanupSequence(cSeq);
 
         const vTypes: Record<string, string> = {};
+        const vUnits: Record<string, string> = {};
         // A '#name' the run fills in itself (a User input's answer, or what an earlier step in
         // the trial saved) is read when its step runs, so it is not something to optimize or fix.
         const runtimeVars = runtimeVarNames(pSeq, parsedSeq, cSeq);
@@ -276,6 +291,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                     if (runtimeVars.has(varName.trim())) return;
                     targetSet.add(varName);
                     if (pData?.type) vTypes[varName] = pData.type;
+                    if (pData?.unit) vUnits[varName] = String(pData.unit);
                     (vFields[varName] ||= []).push({ instrument: block.instrument, method: block.method, param: `${prefix}${k}` });
                 } else if (typeof v === 'object' && v !== null) {
                     extractVars(block, v, pData, targetSet, `${prefix}${k}.`);
@@ -294,6 +310,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
         const gVarList = Array.from(gVars);
         setGlobalVariables(gVarList);
         setVarTypes(vTypes);
+        setDeclaredUnits(vUnits);
 
         const savedGlobalValues = restoredGlobals ? JSON.stringify(restoredGlobals) : localStorage.getItem('ivoryos_global_values');
         if (savedGlobalValues) {
@@ -310,6 +327,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
         // longer have (an imported/legacy sequence) is assumed numeric, as before.
         const numericRet: string[] = [];
         const otherRet: string[] = [];
+        const rUnits: Record<string, string> = {};
         parsedSeq.forEach((block: any) => {
           const leaves = getReturnLeaves(block.schema);
           // A linked workflow's outputs are kept under their own names unless renamed, so an
@@ -324,9 +342,11 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
             if (!b.var) return;
             const leaf = leaves.find(l => l.path === b.path);
             (leaf ? leaf.numeric : true) ? numericRet.push(b.var) : otherRet.push(b.var);
+            if (leaf?.unit) rUnits[b.var] = leaf.unit;
           });
         });
         setReturns(Array.from(new Set(numericRet)));
+        setReturnUnits(rUnits);
         setNonNumericReturns(Array.from(new Set(otherRet)));
       } catch (e) {
         console.error("Failed to load sequence", e);
@@ -688,6 +708,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                          }}
                          className="w-28 bg-white dark:bg-black/50 border border-amber-300 dark:border-amber-700/50 rounded-md px-2 py-1 text-sm focus:border-amber-500 outline-none"
                       />
+                      {varUnits[v] && <span className="text-xs text-amber-700/80 dark:text-amber-300/80">{varUnits[v]}</span>}
                     </div>
                   ))}
                 </div>
@@ -812,6 +833,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                     return (
                     <div key={v} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 min-w-0">
                       <span className="w-40 shrink-0 font-mono text-[13px] font-semibold text-gray-800 dark:text-gray-100 truncate" title={v}>{v}</span>
+                      {varUnits[v] && <span className="shrink-0 text-xs text-gray-400 dark:text-gray-500" title={`Values are in ${varUnits[v]}`}>{varUnits[v]}</span>}
                       {perIter ? (
                         <span className="text-xs text-teal-600 dark:text-teal-400 italic">set per iteration, in the table below</span>
                       ) : (
@@ -936,6 +958,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                         return (
                         <div key={v} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 min-w-0">
                           <span className="w-40 shrink-0 font-mono text-[13px] font-semibold text-gray-800 dark:text-gray-100 truncate" title={v}>{v}</span>
+                          {returnUnits[v] && <span className="shrink-0 text-xs text-gray-400 dark:text-gray-500" title={`Measured in ${returnUnits[v]}`}>{returnUnits[v]}</span>}
                           <select
                              value={objective.goal || 'maximize'}
                              onChange={e => setObjective({ goal: e.target.value })}

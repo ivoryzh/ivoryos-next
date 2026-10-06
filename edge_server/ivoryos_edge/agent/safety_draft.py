@@ -80,6 +80,8 @@ def deck_brief(deck: safety.Deck) -> dict:
             params = {}
             for param, info in (entry.get("parameters") or {}).items():
                 text = str(info.get("type") or "any")
+                if info.get("unit"):
+                    text += f" in {info['unit']}"  # so a limit is drafted in the field's own unit
                 if info.get("options") is not None:
                     text += " one of " + ", ".join(str(o) for o in info["options"])
                 params[param] = text

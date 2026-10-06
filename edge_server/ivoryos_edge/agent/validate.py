@@ -139,10 +139,12 @@ def _check_params(where, entry, params, issues, known_vars, instrument, method):
             continue
         type_name = str(info.get("type", "")).lower()
         if ("int" in type_name or "float" in type_name) and not _numeric_ok(value):
+            unit = info.get("unit")
             issues.append(_issue(
                 "error", where,
-                f"'{name}' expects a number ({info.get('type')}) but got {value!r}.",
-                hint="Write the bare number, with no unit — 65, not '65 C'.",
+                f"'{name}' expects a number ({info.get('type')}{f', in {unit}' if unit else ''}) but got {value!r}.",
+                hint=(f"Write the bare number in {unit}, with no unit text — 65, not '65 {unit}'." if unit
+                      else "Write the bare number, with no unit — 65, not '65 C'."),
             ))
 
         options = info.get("options")

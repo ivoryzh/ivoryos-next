@@ -91,7 +91,7 @@ export type { NavPlacement } from './navPlacement';
 export { SuggestInput, type Suggestion } from './SuggestInput';
 export { ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, AutoFillToggle, LOGIC_TOOLS, TOOLBOX_SUBLABEL, logicStepLook } from './Toolbox';
 export { TopNavBar, TopNavItem, TopNavButton, TopNavIconLink, TopNavDivider, TopNavBrand, TopNavMenu, TopNavMenuItem, topNavPill, BRAND_MARK } from './TopNav';
-export { fieldGuard, trayOf, guardsFor, guardHint, guardProblem, guardSuggestions, trayForGuards, orderPositions } from './safety';
+export { fieldGuard, trayOf, guardsFor, guardHint, guardProblem, guardSuggestions, trayForGuards, orderPositions, unitOf } from './safety';
 export type { SafetyView, FieldGuard, TrayView, FieldRef } from './safety';
 export { takesRowList, wellChoices, expandWells, compactWells, parseReferences, expandReferences, formatReference, referencesProblem, referenceCount, referenceStart } from './labware';
 export type { TrayChoice } from './labware';

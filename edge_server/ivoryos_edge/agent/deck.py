@@ -63,6 +63,9 @@ def _first_line(text):
 def _param_brief(name, info):
     """One parameter as `name: type` plus only the detail that changes what a caller may write."""
     out = {"type": info.get("type", "Any")}
+    if info.get("unit"):
+        # What the number is in. The model writes the bare number in this unit (chat.py).
+        out["unit"] = info["unit"]
     if info.get("options") is not None:
         out["options"] = info["options"]
     if not info.get("required", True):
@@ -99,7 +102,8 @@ def describe_method(schema, instrument, method):
         # The numeric leaves are the ones an optimizer can use as an objective, which is the
         # single most common thing a model gets wrong when asked to "optimize yield".
         described["returns"] = [
-            {"save_from": r["path"], "type": r["type"], "numeric": bool(r.get("numeric"))}
+            {"save_from": r["path"], "type": r["type"], "numeric": bool(r.get("numeric")),
+             **({"unit": r["unit"]} if r.get("unit") else {})}
             for r in returns
         ]
     elif entry.get("return_type") not in (None, "None", "NoneType"):

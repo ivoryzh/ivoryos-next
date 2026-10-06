@@ -26,7 +26,7 @@ import { WorkflowDiff } from './WorkflowDiff';
 import { SuggestInput } from './SuggestInput';
 import { AutoFillToggle, LOGIC_TOOLS, ToolChip, ToolboxGroupHeader, ToolboxGroupTitle, ToolboxInstrumentHeader, logicStepLook } from './Toolbox';
 import { FLOW_CONTROL_INSTRUMENTS } from './flowControl';
-import { fieldGuard, guardHint, guardProblem, guardSuggestions } from './safety';
+import { fieldGuard, guardHint, guardProblem, guardSuggestions, unitOf } from './safety';
 import { formatReference, referenceCount, referenceStart, referencesProblem, wellChoices, type TrayChoice } from './labware';
 import { TrayPicker } from './TrayPicker';
 
@@ -65,7 +65,8 @@ export type SequenceBlock = {
   group?: { id: string; name: string; from?: { name: string; version?: number } };
 };
 
-export type ReturnLeaf = { path: string; type: string; numeric: boolean };
+// `unit` is what the driver declared the value to be in (`-> Annotated[float, Unit("°C")]`).
+export type ReturnLeaf = { path: string; type: string; numeric: boolean; unit?: string };
 
 const isNumericTypeName = (t: string | undefined): boolean => {
   const bare = String(t || '').replace(/Optional\[|\]/g, '').trim();
@@ -93,6 +94,7 @@ export const getReturnLeaves = (schema: any): ReturnLeaf[] => {
       path: k,
       type: info.fields[k]?.type || 'Any',
       numeric: isNumericTypeName(info.fields[k]?.type),
+      ...(info.fields[k]?.unit ? { unit: String(info.fields[k].unit) } : {}),
     }));
   }
   const tupleMatch = returnType.match(/tuple\[(.*)\]/i);
@@ -1648,13 +1650,17 @@ export default function WorkflowEditor({
                                       const t = String(v);
                                       return t === '' || /\s/.test(t) ? `"${t}"` : t;
                                     };
-                                    type Arg = { key: string; name: string; text: string; tone: 'set' | 'var' | 'default' | 'missing' | 'empty' };
+                                    // `unit`: what the value is in (the Safety page's choice for the
+                                    // field, or the driver's own declaration), shown after it.
+                                    type Arg = { key: string; name: string; text: string; tone: 'set' | 'var' | 'default' | 'missing' | 'empty'; unit?: string };
                                     const args: Arg[] = [];
                                     const add = (key: string, name: string, pData: any) => {
                                       const v = valueAt(key);
+                                      const unit = isFlowBlock ? undefined
+                                        : unitOf(fieldGuard(statusData?.safety, block.instrument, block.method, key), pData?.unit);
                                       if (typeof v === 'string' && v.trim() === '#') args.push({ key, name, text: '#?', tone: 'missing' });
-                                      else if (v !== undefined && v !== '') args.push({ key, name, text: shown(v), tone: typeof v === 'string' && v.startsWith('#') ? 'var' : 'set' });
-                                      else if (pData?.default !== undefined && pData.default !== '' && pData.default !== null) args.push({ key, name, text: shown(pData.default), tone: 'default' });
+                                      else if (v !== undefined && v !== '') args.push({ key, name, text: shown(v), tone: typeof v === 'string' && v.startsWith('#') ? 'var' : 'set', unit });
+                                      else if (pData?.default !== undefined && pData.default !== '' && pData.default !== null) args.push({ key, name, text: shown(pData.default), tone: 'default', unit });
                                       else args.push({ key, name, text: pData?.required ? '?' : 'None', tone: pData?.required ? 'missing' : 'empty' });
                                     };
                                     const walk = (schemaObj: any, prefix: string) => {
@@ -1752,12 +1758,13 @@ export default function WorkflowEditor({
                                               key={a.key}
                                               type="button"
                                               onClick={(e) => { e.stopPropagation(); editParam(block.id, listId, a.key); }}
-                                              title={`${a.name} = ${a.text}${a.tone === 'default' ? ' (default)' : a.tone === 'missing' ? ' (required, not set)' : ''}. Click to edit.`}
+                                              title={`${a.name} = ${a.text}${a.unit ? ` ${a.unit}` : ''}${a.tone === 'default' ? ' (default)' : a.tone === 'missing' ? ' (required, not set)' : ''}. Click to edit.`}
                                               className="inline-flex items-baseline min-w-0 max-w-full rounded px-0.5 -mx-0.5 font-mono text-[12px] hover:bg-gray-100 dark:hover:bg-white/10"
                                             >
                                               <span className="shrink-0 text-gray-500 dark:text-gray-400">{a.name}</span>
                                               <span className="shrink-0 text-gray-400 dark:text-gray-500">=</span>
                                               <span className={`truncate max-w-[14rem] ${toneClass[a.tone]}`}>{a.text}</span>
+                                              {a.unit && <span className="shrink-0 ml-0.5 text-gray-400 dark:text-gray-500">{a.unit}</span>}
                                             </button>
                                           ))}
 
@@ -2004,6 +2011,9 @@ export default function WorkflowEditor({
                                                 // values are offered, and the shield says what it allows.
                                                 const guard = fieldGuard(statusData?.safety, block.instrument, block.method, paramKey);
                                                 const guardText = guardHint(guard, statusData?.safety);
+                                                // What the value is in: chosen with the field's limit on the
+                                                // Safety page, or declared by the driver. A label, after the box.
+                                                const unit = unitOf(guard, pData.unit);
                                                 // A wells argument names its plate and wells together,
                                                 // `plate[A1:H1]`, picked on the worktable's plates (labware.ts).
                                                 const plates = pData.wells ? wellChoices(statusData?.safety, block.instrument, pData.wells.labware) : [];
@@ -2014,7 +2024,7 @@ export default function WorkflowEditor({
                                                 return (
                                                     // name = value, as the call would be written (the folded card reads the same).
                                                     <div key={paramKey} className="inline-flex items-center gap-1 font-mono text-[12px]">
-                                                      <label htmlFor={paramFieldId(lId, bId, paramKey)} className="whitespace-nowrap text-gray-600 dark:text-gray-300" title={displayType || undefined}>
+                                                      <label htmlFor={paramFieldId(lId, bId, paramKey)} className="whitespace-nowrap text-gray-600 dark:text-gray-300" title={[displayType, unit ? `in ${unit}` : ''].filter(Boolean).join(', ') || undefined}>
                                                         {paramName}
                                                         {pData.required && <span className="text-red-500/80 ml-0.5">*</span>}
                                                       </label>
@@ -2042,6 +2052,8 @@ export default function WorkflowEditor({
                                                         }}
                                                         className={`w-28 h-6 rounded-md border bg-white px-1.5 font-mono text-[12px] focus:outline-none focus:border-accent dark:bg-white/5 placeholder:text-gray-300 dark:placeholder:text-gray-600 ${typeof actualVal === 'string' && actualVal.startsWith('#') ? 'font-semibold text-gray-900 bg-gray-50 dark:text-white dark:bg-white/10' : 'text-gray-900 dark:text-gray-100'} ${hashInvalid || guardRefuses ? 'border-red-400 dark:border-red-500/70' : 'border-gray-200 dark:border-white/10'}`}
                                                       />
+                                                      {/* The unit, after the value, as on the folded card. */}
+                                                      {unit && <span className="shrink-0 text-gray-400 dark:text-gray-500" title={`Values are in ${unit}`}>{unit}</span>}
                                                       {pData.wells && (
                                                         <button
                                                           type="button"
@@ -2123,6 +2135,7 @@ export default function WorkflowEditor({
                                               >
                                                 <label className="text-[10px] text-gray-500 dark:text-gray-400 font-mono flex items-center whitespace-nowrap">
                                                   <span>{leaf.path}</span>
+                                                  {leaf.unit && <span className="ml-1 text-gray-400 dark:text-gray-500" title={`In ${leaf.unit}`}>{leaf.unit}</span>}
                                                   {leaf.numeric ? (
                                                     <span
                                                       title="A number — this one can be used as an optimization objective."

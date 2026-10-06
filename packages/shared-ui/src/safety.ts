@@ -34,6 +34,12 @@ export interface FieldGuard {
   note?: string;
   /** The instrument, or `class:<Name>`, the limit was written for. */
   source?: string;
+  /**
+   * What the field's numbers are in: chosen with the limit on the Safety page, or declared by
+   * the driver itself (`Annotated[float, Unit("°C")]`, which then takes precedence). A label,
+   * never a conversion: "0 to 120 °C".
+   */
+  unit?: string;
   /** Wells written with their labware (`plate[A1:H1]`) on this instrument's worktable (labware.ts). */
   wells?: { instrument: string; labware: string[] };
 }
@@ -74,6 +80,18 @@ export const guardsFor = (safety: SafetyView | null | undefined, refs: FieldRef[
 
 const show = (n: number) => String(Number(n.toPrecision(12)));
 
+/**
+ * The unit a field's values are in, for a field or for a `#variable` feeding several: the
+ * driver's own declaration (`declared`, from the schema) first, else the one chosen on the Safety
+ * page with the field's limit. Several guards naming different units are a disagreement between
+ * fields, and the first is shown rather than none.
+ */
+export function unitOf(guards: FieldGuard | FieldGuard[] | undefined, declared?: string | null): string | undefined {
+  if (declared) return String(declared);
+  const list = Array.isArray(guards) ? guards : guards ? [guards] : [];
+  return list.find((g) => g.unit)?.unit;
+}
+
 const positionText = (value: unknown) =>
   typeof value === 'number' && Number.isInteger(value) ? String(value) : String(value).trim();
 
@@ -83,9 +101,10 @@ const isReference = (value: unknown) => typeof value === 'string' && value.trim(
 export function guardHint(guard: FieldGuard | undefined, safety: SafetyView | null | undefined): string {
   if (!guard) return '';
   const parts: string[] = [];
-  if (guard.min !== undefined && guard.max !== undefined) parts.push(`${show(guard.min)} to ${show(guard.max)}`);
-  else if (guard.min !== undefined) parts.push(`at least ${show(guard.min)}`);
-  else if (guard.max !== undefined) parts.push(`at most ${show(guard.max)}`);
+  const unit = guard.unit ? ` ${guard.unit}` : '';
+  if (guard.min !== undefined && guard.max !== undefined) parts.push(`${show(guard.min)} to ${show(guard.max)}${unit}`);
+  else if (guard.min !== undefined) parts.push(`at least ${show(guard.min)}${unit}`);
+  else if (guard.max !== undefined) parts.push(`at most ${show(guard.max)}${unit}`);
   if (guard.allowed) parts.push(`one of ${guard.allowed.map(String).join(', ')}`);
   if (guard.wells) parts.push('wells, written plate[A1:H1]');
   const tray = trayOf(safety, guard);
@@ -122,8 +141,9 @@ export function guardProblem(
   if (guard.min !== undefined || guard.max !== undefined) {
     const n = typeof value === 'boolean' || String(value).trim() === '' ? NaN : Number(value);
     if (Number.isNaN(n)) return 'is not a number, and this field has a limit';
-    if (guard.min !== undefined && n < guard.min) return `is below the minimum of ${show(guard.min)}`;
-    if (guard.max !== undefined && n > guard.max) return `is above the maximum of ${show(guard.max)}`;
+    const unit = guard.unit ? ` ${guard.unit}` : '';
+    if (guard.min !== undefined && n < guard.min) return `is below the minimum of ${show(guard.min)}${unit}`;
+    if (guard.max !== undefined && n > guard.max) return `is above the maximum of ${show(guard.max)}${unit}`;
   }
   if (guard.allowed && !guard.allowed.map(String).includes(positionText(value))) {
     return `is not allowed here (allowed: ${guard.allowed.map(String).join(', ')})`;

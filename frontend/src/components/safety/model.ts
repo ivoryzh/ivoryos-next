@@ -14,7 +14,26 @@ export type Limit = {
   allowed?: unknown[];
   tray?: string;
   note?: string;
+  /** What the field's numbers are in, chosen here. A label (no conversion); a unit alone is a limit. */
+  unit?: string;
 };
+
+/**
+ * The units offered on a limit row, grouped the way a lab thinks of them. Anything else is
+ * typed in under "other" and kept as written: a unit is a label, so no list has to be complete.
+ */
+export const UNIT_GROUPS: { label: string; units: string[] }[] = [
+  { label: 'Volume', units: ['µL', 'mL', 'L'] },
+  { label: 'Mass', units: ['mg', 'g', 'kg'] },
+  { label: 'Temperature', units: ['°C', 'K'] },
+  { label: 'Speed', units: ['rpm'] },
+  { label: 'Length', units: ['nm', 'µm', 'mm', 'cm'] },
+  { label: 'Flow rate', units: ['µL/s', 'mL/min', 'L/min'] },
+  { label: 'Time', units: ['s', 'min', 'h'] },
+  { label: 'Percent', units: ['%'] },
+];
+
+export const KNOWN_UNITS = new Set(UNIT_GROUPS.flatMap((g) => g.units));
 
 export type Tray = {
   label: string;
@@ -139,7 +158,9 @@ export function limitFor(config: SafetyConfig, classes: string[], instrument: st
   return undefined;
 }
 
-const CONSTRAINTS = ['min', 'max', 'allowed', 'tray'] as const;
+// What makes a limit worth keeping. A unit on its own counts: "this field is in µL" is a fact
+// about the bench even with no bounds on it.
+const CONSTRAINTS = ['min', 'max', 'allowed', 'tray', 'unit'] as const;
 
 const isBlank = (value: unknown) =>
   value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0);

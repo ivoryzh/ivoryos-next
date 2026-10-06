@@ -20,7 +20,7 @@ import {
   resolveFixedBlock,
   toSubmittedStep,
   toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks,
-  TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, SuggestInput,
+  TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, unitOf, SuggestInput,
   formatReference, referenceStart, rowListVariables,
   type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 import Link from 'next/link';
@@ -128,6 +128,9 @@ export default function RunWorkflowPage({ mode, stage }: {
   const [globalVariables, setGlobalVariables] = useState<string[]>([]);
   const [globalValues, setGlobalValues] = useState<Record<string, string>>({});
   const [varTypes, setVarTypes] = useState<Record<string, string>>({});
+  // A unit a driver itself declared for the field a '#variable' feeds (`unit` in the schema);
+  // the ones chosen on the Safety page arrive with the field's limit (varUnits, below).
+  const [declaredUnits, setDeclaredUnits] = useState<Record<string, string>>({});
   const [rows, setRows] = useState<Record<string, any>[]>([{}]);
   // Vars used by a "batch" step — still spreadsheet columns, but only need one row per batch
   // group filled in (see batchSize below), not every row.
@@ -164,6 +167,15 @@ export default function RunWorkflowPage({ mode, stage }: {
     }
     return out;
   }, [varFields, safety]);
+  // What each column's numbers are in: the driver's declaration, else the Safety page's choice.
+  const varUnits = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const name of new Set([...Object.keys(declaredUnits), ...Object.keys(varGuards)])) {
+      const unit = unitOf(varGuards[name], declaredUnits[name]);
+      if (unit) out[name] = unit;
+    }
+    return out;
+  }, [declaredUnits, varGuards]);
   // The Once form's tray picker: which variable it is open for.
   const [pickingTray, setPickingTray] = useState<string | null>(null);
   // Where a '#' with no name sits ("pump_1.dispense → volume_ml"), if anywhere.
@@ -294,6 +306,7 @@ export default function RunWorkflowPage({ mode, stage }: {
         const gVars = new Set<string>();
         const batchVars = new Set<string>();
         const vTypes: Record<string, string> = {};
+        const vUnits: Record<string, string> = {};
         const vOptions: Record<string, any[]> = {};
         const vFields: Record<string, FieldRef[]> = {};
         let sawEmptyHash: string | null = null;
@@ -317,6 +330,7 @@ export default function RunWorkflowPage({ mode, stage }: {
                     targetSet.add(varName);
 
                     if (pData?.type) vTypes[varName] = pData.type;
+                    if (pData?.unit) vUnits[varName] = String(pData.unit);
                     if (pData?.options) vOptions[varName] = pData.options;
                     const ref: FieldRef = { instrument: scanningBlock.instrument, method: scanningBlock.method, param: `${prefix}${k}` };
                     // A wells column holds `plate[A1]` per row (shared-ui labware.ts): it gets a
@@ -355,6 +369,7 @@ export default function RunWorkflowPage({ mode, stage }: {
         setBatchVariables(Array.from(batchVars));
         setListVariables(rowListVariables(parsedSeq, (v) => liveVars.has(v)));
         setVarTypes(vTypes);
+        setDeclaredUnits(vUnits);
         setVarOptions(vOptions);
         
         const savedGlobalValues = restored ? JSON.stringify(restored.globalValues) : localStorage.getItem('ivoryos_global_values');
@@ -730,6 +745,7 @@ export default function RunWorkflowPage({ mode, stage }: {
                          : 'border-amber-300 dark:border-amber-700/50 focus:border-amber-500'
                      }`}
                   />
+                  {varUnits[v] && <span className="text-xs text-amber-700/80 dark:text-amber-300/80">{varUnits[v]}</span>}
                 </div>
               ))}
             </div>
@@ -797,7 +813,7 @@ export default function RunWorkflowPage({ mode, stage }: {
                           <Grid3x3 className="h-4 w-4" />
                         </button>
                       )}
-                      {varTypes[v] && <span className="w-14 shrink-0 text-xs text-gray-400">{varTypes[v]}</span>}
+                      {(varTypes[v] || varUnits[v]) && <span className="shrink-0 whitespace-nowrap text-xs text-gray-400">{[varTypes[v], varUnits[v]].filter(Boolean).join(' · ')}</span>}
                     </div>
                     {(refused || hint) && (
                       <p className={`mt-1 pl-[10.75rem] text-xs ${refused ? 'text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
@@ -828,6 +844,7 @@ export default function RunWorkflowPage({ mode, stage }: {
               onRemoveRow={removeRow}
               onReorder={reorderRows}
               varTypes={varTypes}
+              varUnits={varUnits}
               varOptions={varOptions}
               batchVariables={batchVariables}
               rowListVariables={listVariables}

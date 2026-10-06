@@ -7,7 +7,7 @@ import Link from 'next/link';
 import { restartEdge } from '@/restartEdge';
 import Sidebar from '@/components/Sidebar';
 import DeckHistory from '@/components/DeckHistory';
-import { ExtraArguments, ResultView, SuggestInput, TrayPicker, confirmDialog, fieldGuard, guardHint, guardProblem, guardSuggestions, trayOf, useDocumentTheme, type TrayView } from '@ivoryos/shared-ui';
+import { ExtraArguments, ResultView, SuggestInput, TrayPicker, confirmDialog, fieldGuard, guardHint, guardProblem, guardSuggestions, trayOf, unitOf, useDocumentTheme, type TrayView } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
 type LogEntry = {
@@ -492,6 +492,8 @@ export default function InstrumentsPage() {
                               const guardText = guardHint(guard, safety);
                               const refused = guardProblem(guard, currentValue !== undefined && currentValue !== '' ? currentValue : pData.default, safety);
                               const tray = trayOf(safety, guard);
+                              // What the field's numbers are in: the Safety page's choice, or the driver's own.
+                              const unit = unitOf(guard, pData.unit);
 
                               return (
                                 <div key={paramPath} className="space-y-1">
@@ -529,6 +531,7 @@ export default function InstrumentsPage() {
                                           handleInputChange(instName, methodName, paramPath, val);
                                         }}
                                       />
+                                      {unit && <span className="shrink-0 text-xs text-gray-400 dark:text-gray-500" title={`Values are in ${unit}`}>{unit}</span>}
                                       {tray && (
                                         <button
                                           type="button"

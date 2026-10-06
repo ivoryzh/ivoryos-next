@@ -264,10 +264,11 @@ def check_value(constraint: dict, value, trays: dict) -> List[Tuple[str, str]]:
             if number is None:
                 problems.append((shown, "is not a number, and this field has a limit"))
                 continue
+            unit = f" {constraint['unit']}" if constraint.get("unit") else ""
             if "min" in constraint and number < constraint["min"]:
-                problems.append((shown, f"is below the minimum of {_fmt(constraint['min'])}"))
+                problems.append((shown, f"is below the minimum of {_fmt(constraint['min'])}{unit}"))
             if "max" in constraint and number > constraint["max"]:
-                problems.append((shown, f"is above the maximum of {_fmt(constraint['max'])}"))
+                problems.append((shown, f"is above the maximum of {_fmt(constraint['max'])}{unit}"))
         if constraint.get("allowed") is not None:
             allowed = [str(a) for a in constraint["allowed"]]
             if _position_text(item) not in allowed:
@@ -358,8 +359,15 @@ def resolve_fields(config: dict, deck: Deck) -> Dict[str, Dict[str, Dict[str, di
             if key in rank and rank[key] <= closeness:
                 continue
             rank[key] = closeness
-            constraint = {k: limit[k] for k in ("min", "max", "allowed", "tray", "note") if k in limit}
+            constraint = {k: limit[k] for k in ("min", "max", "allowed", "tray", "note", "unit") if k in limit}
             constraint["source"] = limit["target"]
+            # The field's unit: a limit of 120 is 120 °C on the Safety page, in a refusal and over
+            # a spreadsheet column, not a bare 120. It is the one chosen with the limit; a unit
+            # the driver itself declared (`Annotated[float, Unit("°C")]`, units.py) describes
+            # what its code does and so takes precedence, and the page shows it as fixed.
+            declared = (_schema_param(deck.schemas[name][limit["method"]], limit["param"]) or {}).get("unit")
+            if declared:
+                constraint["unit"] = declared
             out.setdefault(name, {}).setdefault(limit["method"], {})[limit["param"]] = constraint
     return out
 
@@ -482,8 +490,13 @@ def validate(raw, deck: Optional[Deck] = None) -> Tuple[dict, List[dict]]:
                 entry["tray"] = tray_name
         if limit.get("note"):
             entry["note"] = str(limit["note"])
-        if not any(k in entry for k in ("min", "max", "allowed", "tray")):
-            err(where, f"{label} sets nothing: give it a minimum, a maximum, allowed values or a tray.")
+        # The unit the field's numbers are in, chosen on the Safety page (a dropdown of common
+        # lab units, or typed). A label for people, the log and the assistant: nothing is
+        # converted, and a unit alone -- no bounds -- is a limit worth keeping.
+        if str(limit.get("unit") or "").strip():
+            entry["unit"] = str(limit["unit"]).strip()
+        if not any(k in entry for k in ("min", "max", "allowed", "tray", "unit")):
+            err(where, f"{label} sets nothing: give it a minimum, a maximum, allowed values, a tray or a unit.")
             continue
         if (target, method, param) in seen:
             err(where, f"{label} has two limits. Keep one.")

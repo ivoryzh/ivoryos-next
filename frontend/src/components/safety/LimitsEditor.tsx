@@ -3,14 +3,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import {
-  CLASS_PREFIX, cardClass, inputClass, isNumeric, leafParams, limitFor, limitIsLive, methodLabel, patchLimit, targetLabel,
-  type Limit, type SafetyConfig, type Schema,
+  CLASS_PREFIX, KNOWN_UNITS, UNIT_GROUPS, cardClass, inputClass, isNumeric, leafParams, limitFor, limitIsLive, methodLabel,
+  patchLimit, targetLabel, type Limit, type SafetyConfig, type Schema,
 } from './model';
+
+const OTHER_UNIT = '__other';
 
 /**
  * Limits, set on the deck itself: pick an instrument, and every field of every method is there to
- * be given a range, a list of allowed values, or a tray. Nothing to look up or spell: the fields
- * are the ones the drivers publish.
+ * be given a range, a list of allowed values, or a tray, and told what unit its numbers are in.
+ * Nothing to look up or spell: the fields are the ones the drivers publish.
  */
 export default function LimitsEditor({ config, onChange, schema, classes }: {
   config: SafetyConfig;
@@ -21,6 +23,8 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
   const instruments = Object.keys(schema);
   const [active, setActive] = useState('');
   const [query, setQuery] = useState('');
+  // Rows whose unit is being typed rather than picked ("other…" chosen, nothing written yet).
+  const [typingUnit, setTypingUnit] = useState<Record<string, boolean>>({});
   useEffect(() => { if (!schema[active] && instruments.length) setActive(instruments[0]); }, [instruments, active, schema]);
 
   const trayNames = Object.keys(config.trays);
@@ -43,6 +47,7 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
     l.max !== undefined && l.max !== '' ? `max ${l.max}` : '',
     l.allowed ? `only ${l.allowed.join(', ')}` : '',
     l.tray ? `tray ${l.tray}` : '',
+    l.unit ? `in ${l.unit}` : '',
   ].filter(Boolean).join(', ');
 
   if (instruments.length === 0) {
@@ -95,6 +100,16 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
                 const set = (patch: Partial<Limit>) => onChange(patchLimit(config, mine, active, method, path, patch));
                 const options: unknown[] | undefined = info?.options;
                 const allowed = limit?.allowed?.map(String);
+                // The unit the field's numbers are in. One the driver itself declared is shown
+                // as it is: it says what the code does, so it is not up for choosing here. Any
+                // other field takes one from the dropdown, or typed under "other…" and kept as
+                // written. A label only -- the edge converts nothing.
+                const rowKey = `${active}.${method}.${path}`;
+                const declaredUnit: string | undefined = info?.unit ? String(info.unit) : undefined;
+                const chosenUnit = limit?.unit || '';
+                const unitSelect = typingUnit[rowKey] || (chosenUnit && !KNOWN_UNITS.has(chosenUnit)) ? OTHER_UNIT : chosenUnit;
+                const typeText = String(info?.type || 'any').toLowerCase();
+                const takesUnit = !options && (isNumeric(info) || typeText === 'any' || typeText === '');
                 return (
                   <div key={path} className="flex flex-wrap items-center gap-x-4 gap-y-2 py-2">
                     <div className="w-44 shrink-0">
@@ -151,6 +166,56 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
                               className={`${inputClass} w-20`}
                             />
                           </div>
+                        )}
+                        {declaredUnit ? (
+                          <span
+                            className="text-xs text-gray-600 dark:text-gray-300"
+                            title="Declared by the driver itself, so the bounds are in it and it cannot be changed here"
+                          >
+                            {declaredUnit} <span className="text-[10px] text-gray-400 dark:text-gray-500">(driver)</span>
+                          </span>
+                        ) : takesUnit && (
+                          <span className="flex items-center gap-1.5">
+                            <select
+                              aria-label={`${path} unit`}
+                              title="What this field's numbers are in. Shown with the bounds and on every form; nothing is converted."
+                              value={unitSelect}
+                              onChange={(e) => {
+                                const picked = e.target.value;
+                                if (picked === OTHER_UNIT) {
+                                  setTypingUnit((t) => ({ ...t, [rowKey]: true }));
+                                  if (chosenUnit && KNOWN_UNITS.has(chosenUnit)) set({ unit: undefined });
+                                  return;
+                                }
+                                setTypingUnit((t) => ({ ...t, [rowKey]: false }));
+                                set({ unit: picked || undefined });
+                              }}
+                              className={`${inputClass} w-28`}
+                            >
+                              <option value="">no unit</option>
+                              {UNIT_GROUPS.map((group) => (
+                                <optgroup key={group.label} label={group.label}>
+                                  {group.units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                                </optgroup>
+                              ))}
+                              <option value={OTHER_UNIT}>other…</option>
+                            </select>
+                            {unitSelect === OTHER_UNIT && (
+                              <input
+                                aria-label={`${path} unit, typed`}
+                                placeholder="unit"
+                                defaultValue={KNOWN_UNITS.has(chosenUnit) ? '' : chosenUnit}
+                                key={`${rowKey}.unit.${chosenUnit}`}
+                                autoFocus={!!typingUnit[rowKey]}
+                                onBlur={(e) => {
+                                  const text = e.target.value.trim();
+                                  setTypingUnit((t) => ({ ...t, [rowKey]: false }));
+                                  set({ unit: text || undefined });
+                                }}
+                                className={`${inputClass} w-20`}
+                              />
+                            )}
+                          </span>
                         )}
                         {!isNumeric(info) && (
                           <input

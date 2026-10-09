@@ -2,11 +2,12 @@
 import { API_BASE } from '@/config';
 
 import { useState, useEffect, useRef } from 'react';
-import { Info, Search, RotateCw, AlertTriangle, Grid3x3, ShieldCheck } from 'lucide-react';
+import { Info, Search, RotateCw, AlertTriangle, Grid3x3, Shield, ShieldCheck } from 'lucide-react';
 import Link from 'next/link';
 import { restartEdge } from '@/restartEdge';
 import Sidebar from '@/components/Sidebar';
 import DeckHistory from '@/components/DeckHistory';
+import FieldGuardDialog, { type GuardedField } from '@/components/safety/FieldGuardDialog';
 import { ExtraArguments, ResultView, SuggestInput, TrayPicker, confirmDialog, fieldGuard, guardHint, guardProblem, guardSuggestions, trayOf, unitOf, useDocumentTheme, type TrayView } from '@ivoryos/shared-ui';
 import { WS_BASE } from '@/config';
 
@@ -38,6 +39,8 @@ export default function InstrumentsPage() {
   const [restarting, setRestarting] = useState(false);
   // A field that is a position on a tray (safety guard) can be picked on the tray itself.
   const [pickingTray, setPickingTray] = useState<{ instrument: string; method: string; param: string; tray: TrayView } | null>(null);
+  // The field whose limit is being set from beside it (the shield at the end of each field).
+  const [guarding, setGuarding] = useState<GuardedField | null>(null);
   // Manual instrument actions bypass the queue and drive hardware directly. If a workflow is
   // mid-run, firing one can collide with whatever the run is doing — legacy IvoryOS made you
   // confirm the override first, so this page watches the queue for the same reason.
@@ -542,6 +545,22 @@ export default function InstrumentsPage() {
                                           <Grid3x3 className="h-3.5 w-3.5" />
                                         </button>
                                       )}
+                                      {/* The same limit as on the Safety page, set without going there.
+                                          Only on an edge that has the guard (an older one, or the tour's
+                                          simulated edge, publishes no `safety`). */}
+                                      {safety && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setGuarding({ instrument: instName, method: methodName, param: paramPath, info: pData })}
+                                          title={guardText ? `${guardText}. Click to change it.` : 'Set a limit or a unit for this field'}
+                                          aria-label={`Limit on ${paramLabel}`}
+                                          className={`shrink-0 rounded-lg p-1.5 ${guard
+                                            ? 'text-accent-fg hover:bg-gray-100 dark:hover:bg-white/10'
+                                            : 'text-gray-300 hover:bg-gray-100 hover:text-gray-600 dark:text-gray-600 dark:hover:bg-white/10 dark:hover:text-gray-300'}`}
+                                        >
+                                          {guard ? <ShieldCheck className="h-3.5 w-3.5" /> : <Shield className="h-3.5 w-3.5" />}
+                                        </button>
+                                      )}
                                     </div>
                                   )}
                                   {isMissing && (
@@ -614,6 +633,14 @@ export default function InstrumentsPage() {
             </>
           )}
         </div>
+
+        {guarding && (
+          <FieldGuardDialog
+            field={guarding}
+            onSaved={(resolved) => setStatusData((prev: any) => (prev ? { ...prev, safety: resolved } : prev))}
+            onClose={() => setGuarding(null)}
+          />
+        )}
 
         {pickingTray && (
           <TrayPicker

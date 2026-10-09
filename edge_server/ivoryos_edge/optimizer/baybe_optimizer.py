@@ -1,8 +1,27 @@
 from pandas import DataFrame
 
 from ivoryos_edge.optimizer.base_optimizer import OptimizerBase
+from ivoryos_edge.optimizer.constraints import ConstraintError, describe, parse_all
+
+# How a substance is described to the model (BayBE's SubstanceEncoding names). Mordred
+# descriptors are BayBE's default and the usual choice for solvents and reagents; fingerprints
+# (ECFP) are quicker and suit larger, more varied sets.
+SUBSTANCE_ENCODINGS = ["MORDRED", "ECFP", "RDKIT2DDESCRIPTORS"]
+
+
+def chemistry_available() -> bool:
+    """Whether BayBE's chemistry extras (`baybe[chem]`) are installed, which substances need."""
+    try:
+        from baybe._optional.info import CHEM_INSTALLED
+        return bool(CHEM_INSTALLED)
+    except Exception:
+        import importlib.util
+        return all(importlib.util.find_spec(m) is not None for m in ("rdkit", "skfp"))
 
 class BaybeOptimizer(OptimizerBase):
+    # Its two-phase recommender switches after this many *results*, so an optimizer rebuilt from a
+    # campaign's results (campaigns.py) is already in the right phase.
+    random_start_counts_results = True
     def __init__(self, experiment_name, parameter_space, objective_config, optimizer_config,
                  parameter_constraints:list=None, datapath=None, additional_params:dict=None):
         try:
@@ -16,17 +35,31 @@ class BaybeOptimizer(OptimizerBase):
         super().__init__(experiment_name, parameter_space, objective_config, optimizer_config, parameter_constraints, datapath, additional_params)
         self._trial_id = 0
         self._trials = {}
+        self._pending = None
 
         self.experiment = Campaign(
-            searchspace=self._convert_parameter_to_searchspace(parameter_space),
+            searchspace=self._convert_parameter_to_searchspace(parameter_space, parameter_constraints),
             objective=self._convert_objective_to_baybe_format(objective_config),
             recommender=self._convert_recommender_to_baybe_format(optimizer_config),
+            # Never suggest a point already measured: one from existing data, or (in a suggest-only
+            # campaign, rebuilt from its results each time, campaigns.py) one this optimizer did
+            # not itself suggest and so would otherwise suggest again. BayBE allows the setting
+            # only when every parameter is stepped or a choice; a continuous point is not repeated
+            # exactly anyway.
+            **({} if any(self._kind(p) == "continuous" for p in parameter_space)
+               else {"allow_recommending_already_measured": False}),
         )
 
 
     def suggest(self, n=1):
         # self.df = self.experiment.recommend(batch_size=n)
-        return self.experiment.recommend(batch_size=n).to_dict(orient="records")
+        return self.experiment.recommend(batch_size=n, pending_experiments=self._pending).to_dict(orient="records")
+
+    def add_pending(self, points):
+        """Suggestions still waiting for their results: BayBE leaves them out of the next ones."""
+        names = [p["name"] for p in self.parameter_space]
+        rows = [{name: point[name] for name in names} for point in points or [] if all(name in point for name in names)]
+        self._pending = DataFrame(rows) if rows else None
 
     def observe(self, results, index=None):
         """
@@ -75,7 +108,66 @@ class BaybeOptimizer(OptimizerBase):
         #     self.client.complete_trial(trial_index=trial_index, raw_data=raw_data)
 
 
-    def _convert_parameter_to_searchspace(self, parameter_space):
+    @staticmethod
+    def _kind(param):
+        """How BayBE holds a parameter (as _convert_parameter_to_searchspace builds it)."""
+        if param.get("type") == "substance":
+            return "substance"
+        if param.get("type") == "choice":
+            values = param.get("bounds") or []
+            return "discrete" if values and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values) else "categorical"
+        if len(param.get("bounds") or []) == 3 or param.get("value_type") == "int":
+            return "discrete"
+        return "continuous"
+
+    @classmethod
+    def check_constraints(cls, constraints, parameter_space):
+        """For each constraint, why BayBE cannot use it, or None (the Optimize page's live check).
+
+        BayBE constrains plain ranges (continuous) and stepped, whole-number or choice parameters
+        (a list of combinations, filtered) in two different ways, so one constraint has to stay on
+        one side. A choice of names or a substance has no number to add up.
+        """
+        by_name = {p["name"]: p for p in parameter_space}
+        problems = []
+        for con in constraints:
+            kinds = {name: cls._kind(by_name[name]) for name in con.names}
+            named = [n for n, k in kinds.items() if k in ("categorical", "substance")]
+            continuous = [n for n, k in kinds.items() if k == "continuous"]
+            discrete = [n for n, k in kinds.items() if k == "discrete"]
+            if named:
+                problems.append(f"'{con.text}': {named[0]} is {describe(by_name[named[0]])}, which has no number to add up.")
+            elif continuous and discrete:
+                problems.append(
+                    f"'{con.text}' mixes {continuous[0]} ({describe(by_name[continuous[0]])}) with {discrete[0]} "
+                    f"({describe(by_name[discrete[0]])}). BayBE constrains plain ranges and stepped or choice "
+                    "parameters separately: give them the same kind, or split the constraint."
+                )
+            else:
+                problems.append(None)
+        return problems
+
+    @staticmethod
+    def _convert_constraints(constraints, parameter_space):
+        """Parsed constraints as BayBE's: linear ones over plain ranges, filters over the rest."""
+        from baybe.constraints import ContinuousLinearConstraint, DiscreteCustomConstraint
+        kinds = {p["name"]: BaybeOptimizer._kind(p) for p in parameter_space}
+        out = []
+        for con in constraints:
+            if all(kinds[name] == "continuous" for name in con.names):
+                out.append(ContinuousLinearConstraint(
+                    parameters=con.names, operator=con.operator,
+                    coefficients=[con.coefficients[name] for name in con.names], rhs=con.rhs,
+                ))
+            else:
+                # The combinations BayBE lists out, kept when they meet the constraint. A step of
+                # 0.1 does not add up exactly in floating point, hence the tolerance in `holds`.
+                def keep(df, con=con):
+                    return df[con.names].apply(lambda row: con.holds(row.to_dict()), axis=1)
+                out.append(DiscreteCustomConstraint(parameters=con.names, validator=keep))
+        return out
+
+    def _convert_parameter_to_searchspace(self, parameter_space, parameter_constraints=None):
         """
         Converts the parameter space configuration to Baybe format.
         :param parameter_space: The parameter space configuration.
@@ -92,6 +184,10 @@ class BaybeOptimizer(OptimizerBase):
         from baybe.parameters.categorical import CategoricalParameter
         from baybe.parameters.numerical import NumericalContinuousParameter, NumericalDiscreteParameter
         from baybe.searchspace import SearchSpace
+        constraints = parse_all(parameter_constraints, [p["name"] for p in parameter_space])
+        problems = self.check_constraints(constraints, parameter_space)
+        if any(problems):
+            raise ConstraintError(" ".join(problem for problem in problems if problem))
         parameters = []
         for p in parameter_space:
             value_type = p.get("value_type", "float")
@@ -110,7 +206,38 @@ class BaybeOptimizer(OptimizerBase):
                     parameters.append(NumericalDiscreteParameter(name=p["name"], values=p["bounds"]))
                 else:
                     parameters.append(CategoricalParameter(name=p["name"], values=p["bounds"]))
-        return SearchSpace.from_product(parameters)
+
+            elif p["type"] == "substance":
+                parameters.append(self._substance(p))
+        searchspace = SearchSpace.from_product(parameters, self._convert_constraints(constraints, parameter_space))
+        discrete = [p for p in parameter_space if self._kind(p) != "continuous"]
+        if constraints and discrete and len(searchspace.discrete.exp_rep) == 0:
+            raise ConstraintError("No combination of the stepped and choice values meets the constraints.")
+        return searchspace
+
+    @staticmethod
+    def _substance(p):
+        """A substance parameter: names the workflow receives, each with the SMILES BayBE describes
+        it by (`bounds` is {name: SMILES}), so the model knows methanol is closer to ethanol than to
+        toluene instead of treating them as unrelated labels."""
+        if not chemistry_available():
+            raise ImportError(
+                f"{p['name']} is a substance, which needs BayBE's chemistry extras. Install BayBE with "
+                "chemistry in the deck's Settings, Optimizers (or `pip install \"baybe[chem]\"`)."
+            )
+        from baybe.parameters import SubstanceParameter
+        data = p.get("bounds") or {}
+        if isinstance(data, list):  # [{name, smiles}] as well as {name: smiles}
+            data = {str(d.get("name")): str(d.get("smiles")) for d in data}
+        if len(data) < 2:
+            raise ValueError(f"{p['name']} needs at least two substances to choose between.")
+        encoding = str(p.get("encoding") or "MORDRED").upper()
+        if encoding not in SUBSTANCE_ENCODINGS:
+            raise ValueError(f"{p['name']}: unknown substance encoding {encoding} (one of {', '.join(SUBSTANCE_ENCODINGS)}).")
+        try:
+            return SubstanceParameter(name=p["name"], data=data, encoding=encoding)
+        except Exception as e:
+            raise ValueError(f"{p['name']}: {e}") from e
 
     def _convert_objective_to_baybe_format(self, objective_config):
         """
@@ -240,7 +367,11 @@ class BaybeOptimizer(OptimizerBase):
             "parameter_types": ["range", "choice", "substance"],
             "multiple_objectives": True,
             "supports_continuous": True,
-            "supports_constraints": False,
+            "supports_constraints": True,
+            "supports_suggest_only": True,
+            # Substances need `baybe[chem]`; the page offers them only when it is installed.
+            "substance_available": chemistry_available(),
+            "substance_encodings": SUBSTANCE_ENCODINGS,
             "optimizer_config": {
                 "step_1": {"model": ["Random", "FPS"], "num_samples": 10},
                 "step_2": {"model": ["BOTorch", "Naive Hybrid Space"]}

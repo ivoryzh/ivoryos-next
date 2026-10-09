@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronUp, CircleDot, FastForward, Flag, HandHelping, ListTodo, Pause, Play, RefreshCcw, Square, X } from 'lucide-react';
 import { decideFailure, stopGracefully } from '@/runControl';
 import { setPromptMinimized } from '@/inputPrompt';
-import RunProgress, { buildProgress, parseServerTime, type RunLike } from './RunProgress';
+import RunProgress, { buildProgress, parseServerTime, positionText, type RunLike } from './RunProgress';
 import { openQueue } from './QueueDrawer';
 
 const FINISHED = ['completed', 'cancelled', 'error'];
@@ -227,7 +227,7 @@ export default function LiveRun() {
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold truncate" title={run.name}>{run.name}</div>
           <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
-            {state} · {progress.done} of {progress.total}
+            <span title={`${progress.done} of ${progress.total} steps`}>{state} · {positionText(progress)}</span>
             {current && <> · <span className="font-mono">{current.instrument}.{current.method}</span></>}
           </div>
         </div>

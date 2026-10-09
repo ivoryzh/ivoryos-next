@@ -233,7 +233,16 @@ export interface HubSelection {
 }
 
 /** An optimizer backend IvoryOS supports and the versions tested with it (desktop/src/optimizers.js). */
-export interface OptimizerChoice { id: string; name: string; package: string; versions: string[] }
+/** `extras`: extra installs offered with it (BayBE's `chem`, for substances), by name, with a label. */
+/** What switching an IvoryOS Classic script to NextGen changes (edge ivoryos_edge/classic.py). */
+export interface ClassicScript {
+  classic: boolean;
+  converted: string;
+  notes: string[];
+  changes: { line: number; before: string[]; after: string[] }[];
+}
+
+export interface OptimizerChoice { id: string; name: string; package: string; versions: string[]; extras?: Record<string, string> }
 
 /** What the page knows about a failure that the report should carry. */
 export interface ReportFailure { log?: string; message?: string; output?: string; kind?: 'install' | 'start' | 'crash' }
@@ -290,7 +299,11 @@ export interface DesktopApi {
   install(id: string, manifest: { name?: string; packages: string[]; instruments: DeckInstrument[]; plugins?: string[] }): Promise<{ added: string[]; replaced: string[]; pluginsAdded?: string[] }>;
   /** Add workflows to a profile's library without replacing any; a name in use gets a number. */
   addWorkflows(id: string, workflows: { name: string; body: Record<string, unknown> }[]): Promise<{ requested: string; saved: string }[]>;
-  installFromFile(): Promise<void>;
+  /**
+   * A script written for IvoryOS Classic (`import ivoryos`): the script switched to NextGen, each
+   * edit, and what does not carry over (edge classic.py); null for any other script.
+   */
+  classicScript(id: string): Promise<ClassicScript | null>;
   /** A script profile's file, for the Code tab. */
   readScript(id: string): Promise<string>;
   writeScript(id: string, text: string): Promise<void>;

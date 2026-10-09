@@ -5,6 +5,10 @@ from abc import ABC, abstractmethod
 
 
 class OptimizerBase(ABC):
+    # Whether step_1's random start counts results on record (BayBE) rather than the trials the
+    # random step itself generated (Ax). A suggest-only campaign rebuilds the optimizer from its
+    # results each time and has to know which (campaigns.py).
+    random_start_counts_results = False
     def __init__(self, experiment_name:str, parameter_space: list, objective_config: dict, optimizer_config: dict,
                  parameter_constraints:list=None, datapath:str=None, additional_params:dict=None):
         """
@@ -53,6 +57,15 @@ class OptimizerBase(ABC):
     @abstractmethod
     def get_plots(self, plot_type):
         pass
+
+    def add_pending(self, points):
+        """Suggestions given out whose results are not in yet (a suggest-only campaign), so the
+        next ones are not the same points. A backend that cannot use them ignores them."""
+
+    @classmethod
+    def check_constraints(cls, constraints, parameter_space):
+        """For each parsed constraint (constraints.py), why this backend cannot use it, or None."""
+        return [f"'{c.text}': this optimizer does not take constraints." for c in constraints]
 
     @staticmethod
     def _create_discrete_search_space(range_with_step=None, value_type ="float"):

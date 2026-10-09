@@ -3,26 +3,23 @@ import { useSyncExternalStore } from 'react';
 
 /**
  * Where the plugin panel is and what it shows, shared by the panel itself (PluginPanel, mounted
- * once in the root layout so it survives navigation) and the sidebar's plugin entries, which
- * open plugins into it. Saved per browser in localStorage.
+ * once in the root layout so it survives navigation) and the nav's plugin entries, which open
+ * plugins into it. Saved per browser in localStorage.
+ *
+ * Two sizes: a window floating over the pages, or full size over the page area (the nav stays in
+ * sight). Neither moves the page. Docking beside the page squeezed every page each time it
+ * opened, and a minimized window showed the plugin scaled down past reading, so both went; a
+ * state saved with either opens as a window.
  */
-export type PanelMode = 'dock' | 'float';
-export type PanelSide = 'left' | 'right';
+export type PanelMode = 'window' | 'full';
 export type FloatRect = { x: number; y: number; w: number; h: number };
 
 export type PanelState = {
   /** The plugin shown, or null when the panel is closed. */
   open: string | null;
   mode: PanelMode;
-  side: PanelSide;
-  /** Docked width in px. */
-  width: number;
-  /** Shown as a small floating window, whatever `mode` is; restoring returns to `mode`/`side`.
-   * The plugin keeps running (and showing, scaled down) the whole time. */
-  minimized: boolean;
+  /** The window's place and size. An x below 0 means "not placed yet": the right-hand side. */
   float: FloatRect;
-  /** Where the minimized window sits; -1 means "not placed yet": bottom right. */
-  mini: { x: number; y: number };
   /** Set once anything has been saved: the first visit opens a panel plugin by default, later
    * visits respect a panel the person closed. */
   touched: boolean;
@@ -30,8 +27,7 @@ export type PanelState = {
 
 const KEY = 'ivoryos_plugin_panel';
 export const DEFAULT_PANEL: PanelState = {
-  open: null, mode: 'dock', side: 'right', width: 420, minimized: false,
-  float: { x: -1, y: 96, w: 420, h: 560 }, mini: { x: -1, y: -1 }, touched: false,
+  open: null, mode: 'window', float: { x: -1, y: 96, w: 420, h: 560 }, touched: false,
 };
 
 let state: PanelState = DEFAULT_PANEL;
@@ -49,7 +45,12 @@ export function loadPanel(): PanelState {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
     if (saved && typeof saved === 'object') {
-      state = { ...DEFAULT_PANEL, ...saved, float: { ...DEFAULT_PANEL.float, ...(saved.float || {}) }, mini: { ...DEFAULT_PANEL.mini, ...(saved.mini || {}) } };
+      state = {
+        open: typeof saved.open === 'string' ? saved.open : null,
+        mode: saved.mode === 'full' ? 'full' : 'window',
+        float: { ...DEFAULT_PANEL.float, ...(saved.float || {}) },
+        touched: !!saved.touched,
+      };
     }
   } catch { /* private window or bad JSON: defaults */ }
   emit();
@@ -62,11 +63,17 @@ export function setPanel(patch: Partial<PanelState>) {
   emit();
 }
 
-/** Show a plugin in the panel, restoring it if minimized; its placement picks the side the
- * first time. */
-export function openInPanel(id: string, placement?: string) {
-  const side = !state.touched && placement === 'panel-left' ? 'left' : state.side;
-  setPanel({ open: id, minimized: false, side });
+/**
+ * Show a plugin in the panel, in `mode` or the size it was last shown at. A `panel-left` plugin's
+ * window starts on the left, the first time it is placed.
+ */
+export function openInPanel(id: string, placement?: string, mode?: PanelMode) {
+  const unplaced = state.float.x < 0;
+  setPanel({
+    open: id,
+    mode: mode ?? state.mode,
+    ...(unplaced && placement === 'panel-left' ? { float: { ...state.float, x: 24 } } : {}),
+  });
 }
 
 export function usePanel(): PanelState {

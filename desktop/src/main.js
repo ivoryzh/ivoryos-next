@@ -3,8 +3,8 @@
 //
 // The launcher window lists saved profiles (profiles.js): decks and Python scripts, each started,
 // stopped and watched from one place (manager.js). Opening a running profile shows that edge's
-// own web UI in its own window. Drivers are installed from the Hub, from a deck file, or from an
-// `ivoryos://install` link. The app never talks to an instrument itself.
+// own web UI in its own window. Drivers are installed from the Hub or from an `ivoryos://install`
+// link. The app never talks to an instrument itself.
 //
 // The launcher page is part of the IvoryOS frontend (frontend/src/app/launcher), served from the
 // bundled build over the `ivoryos-app://` scheme, so it looks like the rest of IvoryOS and works
@@ -41,6 +41,8 @@ const report = require('./problemReport');
 const { AttentionWatcher } = require('./attention');
 const { OPTIMIZERS, selectionOf } = require('./optimizers');
 const { parseInstallLink } = require('./installLink');
+const { OriginOwners } = require('./originOwners');
+const { looksClassic } = require('./classicScript');
 const os = require('node:os');
 const crypto = require('node:crypto');
 
@@ -80,6 +82,7 @@ const ICON = path.join(__dirname, '..', 'build', process.platform === 'darwin' ?
 let manager = null;
 let account = null;
 let catalog = null; // the Automation Hub, read from its database (hubCatalog.js)
+let originOwners = null; // which deck each edge address last belonged to (originOwners.js)
 let git = null;
 let updates = null;
 let runtimePromise = null;
@@ -289,8 +292,17 @@ function openEdgeTab(id, page) {
         view = new WebContentsView({ webPreferences });
         keepToOrigin(view, (url) => url.startsWith(origin));
         addShortcuts(view.webContents);
-        view.webContents.loadURL(target || origin);
         edgeTabs.set(id, view);
+        // Another deck had this address before (a removed deck's port, reused): its Designer
+        // canvas, cached schema and page settings are in the address's storage. Cleared before
+        // this deck's page reads any of it. Cookies are left alone: they are not per port.
+        const contents = view.webContents;
+        let address = null;
+        try { address = new URL(origin).origin; } catch { /* loadURL says what is wrong with it */ }
+        const cleared = address && originOwners.claim(address, id)
+            ? contents.session.clearStorageData({ origin: address, storages: ['localstorage', 'indexdb', 'cachestorage', 'serviceworkers'] }).catch(() => {})
+            : Promise.resolve();
+        cleared.then(() => { if (!contents.isDestroyed()) contents.loadURL(target || origin); });
     } else if (target) {
         view.webContents.loadURL(target);
     }
@@ -467,19 +479,16 @@ async function manifestFromLink(url) {
  * Ask which deck profile to install into (or make a new one), show exactly what will change, and
  * install on "Install". Everything that reaches the machine from outside goes through here.
  */
-async function confirmAndInstall(text, { source, fromFile = null }) {
+async function confirmAndInstall(text, { source }) {
     const parent = showLauncher();
     let checked;
     try {
-        checked = validateManifest(text, { allowPaths: !!fromFile });
+        checked = validateManifest(text);
     } catch (e) {
         await dialog.showMessageBox(parent, { type: 'error', message: 'This install cannot be used', detail: e.message });
         return;
     }
-    let { manifest } = checked;
-    if (fromFile && manifest.paths) {
-        manifest = { ...manifest, paths: manifest.paths.map((p) => path.resolve(path.dirname(fromFile), p)) };
-    }
+    const { manifest } = checked;
 
     const decks = manager.list().filter((p) => p.kind === 'deck');
     const choices = [...decks.map((p) => p.name), 'New deck profile', 'Cancel'];
@@ -507,7 +516,7 @@ async function confirmAndInstall(text, { source, fromFile = null }) {
     });
     if (response !== 0) return;
     try {
-        await manager.install(target.id, manifest, { allowPaths: !!fromFile });
+        await manager.install(target.id, manifest);
         broadcast('launcher:select', target.id);
     } catch (e) {
         await dialog.showMessageBox(parent, {
@@ -542,13 +551,6 @@ async function handleLink(link) {
     } catch (e) {
         await dialog.showMessageBox(showLauncher(), { type: 'error', message: 'Could not install from this link', detail: e.message });
     }
-}
-
-async function installFromFile() {
-    const { canceled, filePaths } = await dialog.showOpenDialog(showLauncher(), {
-        title: 'Install drivers from a deck file', filters: [{ name: 'IvoryOS deck', extensions: ['json'] }], properties: ['openFile'],
-    });
-    if (!canceled && filePaths[0]) await confirmAndInstall(fs.readFileSync(filePaths[0], 'utf8'), { source: filePaths[0], fromFile: filePaths[0] });
 }
 
 // --- IvoryOS Cloud ---------------------------------------------------------------------------------
@@ -795,8 +797,9 @@ function handle(channel, fn) {
             return { ok: true, value: await fn(...args) };
         } catch (e) {
             // Errors are returned, not thrown: Electron would otherwise prefix every message with
-            // "Error invoking remote method", which is not something to show a scientist.
-            return { ok: false, error: e.message, output: e.output };
+            // "Error invoking remote method", which is not something to show a scientist. A code
+            // goes along, so a page can tell kinds apart (the Hub's 'offline', hubCatalog.js).
+            return { ok: false, error: e.message, output: e.output, code: typeof e.code === 'string' ? e.code : undefined };
         }
     });
 }
@@ -877,6 +880,17 @@ function registerIpc() {
         if (typeof text !== 'string') throw new Error('Expected the script text.');
         fs.writeFileSync(p.script, text);
     });
+    // A script written for IvoryOS Classic (`import ivoryos`): what switching it to NextGen would
+    // change, from the edge's own classic.py, or null for any other script (classicScript.js).
+    handle('launcher:classic-script', async (id) => {
+        const p = manager.get(id);
+        if (p.kind !== 'script' || !p.script || !fs.existsSync(p.script)) return null;
+        if (!looksClassic(fs.readFileSync(p.script, 'utf8'))) return null;
+        const runtime = await getRuntime();
+        const out = await runProcess(runtime.python, ['-m', 'ivoryos_edge.classic', p.script]);
+        const result = JSON.parse(out.trim().split(/\r?\n/).pop());
+        return result.classic ? result : null;
+    });
     // "Try the example": the simulated lab as a script profile of its own (example.js).
     handle('launcher:example', () => {
         const src = exampleSource({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, repoRoot: REPO_ROOT });
@@ -892,7 +906,6 @@ function registerIpc() {
     handle('launcher:instrument:remove', (id, name) => manager.removeInstrument(id, name));
     handle('launcher:instrument:enable', (id, name, enabled) => manager.setInstrumentEnabled(id, name, enabled));
     handle('launcher:install', (id, manifest) => manager.install(id, manifest));
-    handle('launcher:install-file', () => installFromFile());
     handle('launcher:free-name', (id, suggestion) => freeName(manager.readDeck(id), suggestion));
     handle('launcher:rebuild-python', async () => {
         await manager.stopAll();
@@ -1166,7 +1179,6 @@ function buildMenu() {
             submenu: [
                 { label: 'Show Launcher', accelerator: 'CmdOrCtrl+L', click: () => { showLauncher(); showTab(null); } },
                 { label: 'Show or Hide Sidebar', accelerator: 'CmdOrCtrl+B', click: () => broadcast('launcher:toggle-sidebar') },
-                { label: 'Install Drivers from Deck File…', click: () => installFromFile() },
                 { type: 'separator' },
                 isMac ? { role: 'close' } : { role: 'quit' },
             ],
@@ -1267,10 +1279,12 @@ app.whenReady().then(async () => {
     manager.on('crashed', (id) => closeEdgeTab(id));
     account = new Account({ fetch: (...a) => net.fetch(...a), store: secretFile(path.join(home(), 'account.bin'), safeStorage) });
     // Same project as the accounts, so a signed-in session is also what the catalog's RLS reads.
+    originOwners = new OriginOwners(path.join(home(), 'edge-origins.json'));
     catalog = new HubCatalog({
         fetch: (...a) => net.fetch(...a), url: account.url, key: account.key,
         token: async () => (account.describe().signedIn ? account.token() : null),
         userId: () => (account.describe().user ? account.describe().user.id : null),
+        online: () => net.isOnline(),
     });
     git = new GitConnections({
         fetch: (...a) => net.fetch(...a),

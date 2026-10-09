@@ -716,6 +716,35 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
   const failed = s.state === 'error' || s.state === 'crashed';
   // "Send to IvoryOS" with this session's log, as the Log tab shows it.
   const report = () => openReport(api, profile.id, { log: log.join('\n') });
+  // A script written for IvoryOS Classic (`import ivoryos`) stops at that import here, so it is
+  // offered the switch first: the import and run() call change, each original line kept,
+  // commented out, so going back is uncommenting (edge classic.py).
+  const startProfile = async () => {
+    if (profile.kind === 'script') {
+      const classic = await api.classicScript(profile.id).catch(() => null);
+      if (classic) {
+        const lines = classic.changes.flatMap(c => [...c.before.map(l => `- ${l.trim()}`), ...c.after.map(l => `+ ${l.trim()}`)]);
+        const shown = lines.slice(0, 16).join('\n') + (lines.length > 16 ? `\n… and ${lines.length - 16} more lines` : '');
+        const notes = classic.notes.length ? `\n\n${classic.notes.map(n => `• ${n}`).join('\n')}` : '';
+        const choice = await chooseDialog({
+          title: 'Written for IvoryOS Classic',
+          message: `${(profile.script || '').split(/[\\/]/).pop()} imports ivoryos (IvoryOS Classic), which this app does not run. `
+            + `Switched to IvoryOS NextGen, each changed line stays in the file, commented out, so switching back is uncommenting.\n\n${shown}${notes}`,
+          actions: [
+            { id: 'convert', label: 'Update the script and start', kind: 'primary' },
+            { id: 'start', label: 'Start as it is' },
+            { id: 'cancel', label: 'Cancel', kind: 'cancel' },
+          ],
+        });
+        if (choice !== 'convert' && choice !== 'start') return;
+        if (choice === 'convert') {
+          try { await api.writeScript(profile.id, classic.converted); } catch (e: any) { notify(e.message, { title: 'Could not update the script', tone: 'error' }); return; }
+        }
+      }
+    }
+    setTab('log');
+    run(() => api.start(profile.id));
+  };
   const tabs: { id: ProfileTab; label: string }[] = [
     { id: 'main', label: profile.kind === 'deck' ? 'Instruments' : 'Overview' },
     // A script is usually one short file; showing it here is what lets a change be tried without
@@ -743,9 +772,10 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
           {running || busy ? (
             <Button tone="stop" disabled={busy} onClick={() => run(() => api.stop(profile.id))}><Square className="w-4 h-4" /> Stop</Button>
           ) : (
-            <Button tone="go" disabled={profile.problems.length > 0} title={profile.problems.join(' ')} onClick={() => run(() => api.start(profile.id))}><Play className="w-4 h-4" /> Start</Button>
+            // Starting shows the Log: it is where a start is seen to happen (or to fail), line by line.
+            <Button tone="go" disabled={profile.problems.length > 0} title={profile.problems.join(' ')} onClick={startProfile}><Play className="w-4 h-4" /> Start</Button>
           )}
-          <Button disabled={!running} onClick={() => run(() => api.restart(profile.id))} title="Stop and start again: reloads the deck or script"><RotateCw className="w-4 h-4" /> Restart</Button>
+          <Button disabled={!running} onClick={() => { setTab('log'); run(() => api.restart(profile.id)); }} title="Stop and start again: reloads the deck or script"><RotateCw className="w-4 h-4" /> Restart</Button>
           <Button tone={running ? 'primary' : 'default'} disabled={!running} title="Open this edge in a tab of this window" onClick={() => run(() => api.open(profile.id))}><LayoutGrid className="w-4 h-4" /> Open</Button>
           <Button disabled={!running} title="Open this edge in your web browser instead" onClick={() => run(() => api.openInBrowser(profile.id))}><ExternalLink className="w-4 h-4" /></Button>
         </div>
@@ -872,7 +902,9 @@ function SideAction({ icon, label, hint, title, onClick }: { icon: React.ReactNo
 
 /**
  * The first thing a new install shows: nothing is configured, so instead of an empty page it
- * offers the three ways in (a deck, the Hub, the example) and the account, none of them required.
+ * offers the three ways in and the account, none of them required. The Hub leads and the example
+ * comes last: the example is the easy click, but a real deck from the Hub (or your own) is where
+ * people should start.
  */
 function Welcome({ account, cloudComingSoon, onSignIn, onSignUp, onAddDeck, onHub, onExample, onCloudOnly }: {
   account: AccountInfo; cloudComingSoon?: boolean; onSignIn: () => void; onSignUp: () => void; onAddDeck: () => void; onHub: () => void; onExample: () => void; onCloudOnly: () => void;
@@ -898,9 +930,9 @@ function Welcome({ account, cloudComingSoon, onSignIn, onSignUp, onAddDeck, onHu
           </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {action(<FlaskConical className="w-5 h-5" />, 'Try the example', 'A simulated lab with pumps, a reactor and analytics. Nothing to plug in; see a workflow run in a minute.', onExample, true)}
-          {action(<Plus className="w-5 h-5" />, 'Add a deck', 'Your own instruments: an empty deck to add drivers to, or a Python script you already have. Or drop a .py file here.', onAddDeck)}
-          {action(<Store className="w-5 h-5" />, 'Browse the Automation Hub', 'Drivers, whole platforms, plugins and workflow templates shared by the community.', onHub)}
+          {action(<Store className="w-5 h-5" />, 'Browse the Hub', 'Drivers, platforms and workflows shared by the community.', onHub, true)}
+          {action(<Plus className="w-5 h-5" />, 'Add a deck', 'Your own instruments, or a Python script you already have.', onAddDeck)}
+          {action(<FlaskConical className="w-5 h-5" />, 'Try the example', 'A simulated lab. Nothing to plug in.', onExample)}
         </div>
         {!cloudComingSoon && (
           <p className="text-sm text-gray-500 dark:text-gray-400">

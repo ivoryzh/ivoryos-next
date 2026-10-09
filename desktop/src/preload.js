@@ -6,7 +6,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const call = async (channel, ...args) => {
     const res = await ipcRenderer.invoke(channel, ...args);
-    if (res && res.ok === false) throw Object.assign(new Error(res.error), { output: res.output });
+    if (res && res.ok === false) throw Object.assign(new Error(res.error), { output: res.output, code: res.code });
     return res ? res.value : undefined;
 };
 
@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     optimizers: (id) => call('launcher:optimizers', id),
     joinEarlyAccess: (details) => call('launcher:early-access', details),
     setOptimizers: (id, selection) => call('launcher:optimizers:set', id, selection),
+    classicScript: (id) => call('launcher:classic-script', id),
     sendReport: (report) => call('launcher:report:send', report),
 
     deck: (id) => call('launcher:deck', id),
@@ -47,7 +48,6 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     removeInstrument: (id, name) => call('launcher:instrument:remove', id, name),
     setInstrumentEnabled: (id, name, enabled) => call('launcher:instrument:enable', id, name, enabled),
     install: (id, manifest) => call('launcher:install', id, manifest),
-    installFromFile: () => call('launcher:install-file'),
     readScript: (id) => call('launcher:script:read', id),
     writeScript: (id, text) => call('launcher:script:write', id, text),
     createExample: () => call('launcher:example'),

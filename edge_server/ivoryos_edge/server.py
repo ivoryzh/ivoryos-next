@@ -1263,6 +1263,88 @@ def get_optimizers():
     from ivoryos_edge.optimizer.registry import OPTIMIZER_REGISTRY
     return {name: cls.get_schema() for name, cls in OPTIMIZER_REGISTRY.items()}
 
+@app.post("/api/optimizers/{name}/constraints")
+async def check_optimizer_constraints(name: str, req: Request):
+    """Whether optimizer `name` can keep each constraint over this search space, as the Optimize
+    page types them: {results: [{text, error}]}, one per constraint sent (optimizer/constraints.py)."""
+    from ivoryos_edge.optimizer.registry import check_constraints
+    data = await req.json()
+    return {"results": check_constraints(name, data.get("constraints") or [], data.get("parameter_space") or [])}
+
+# --- Suggest-only campaigns (campaigns.py) ---
+
+def _campaign_error(e: Exception):
+    """A campaign request that cannot be done, said in words (a missing optimizer, a bad
+    constraint, a substance without BayBE's chemistry extras, a result that is not a number)."""
+    return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.get("/api/campaigns")
+async def list_campaigns():
+    from . import campaigns
+    return {"campaigns": await campaigns.list_campaigns()}
+
+
+@app.post("/api/campaigns")
+async def create_campaign(req: Request):
+    """{name, parameters}: the optimization as the Optimize page builds it. Answers with the
+    campaign and its first batch of suggestions (`parameters.batch_size` of them)."""
+    from . import campaigns
+    data = await req.json()
+    try:
+        return await campaigns.create(data.get("name") or "", data.get("parameters") or {})
+    except (campaigns.CampaignError, ValueError, ImportError) as e:
+        return _campaign_error(e)
+
+
+@app.get("/api/campaigns/{campaign_id}")
+async def get_campaign(campaign_id: int):
+    from . import campaigns
+    try:
+        return await campaigns.get(campaign_id)
+    except campaigns.CampaignError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+
+@app.post("/api/campaigns/{campaign_id}/suggest")
+async def suggest_in_campaign(campaign_id: int, req: Request):
+    """{n}: n more suggestions, from every result typed in so far."""
+    from . import campaigns
+    data = await req.json()
+    try:
+        return await campaigns.suggest(campaign_id, data.get("n") or 1)
+    except (campaigns.CampaignError, ValueError, ImportError) as e:
+        return _campaign_error(e)
+
+
+@app.put("/api/campaigns/{campaign_id}/rows/{row_id}")
+async def update_campaign_row(campaign_id: int, row_id: int, req: Request):
+    """{results?, note?, discarded?}: a suggestion's measured objectives (a blank clears one)."""
+    from . import campaigns
+    data = await req.json()
+    try:
+        return await campaigns.update_row(campaign_id, row_id, data.get("results"), data.get("note"), data.get("discarded"))
+    except campaigns.CampaignError as e:
+        return _campaign_error(e)
+
+
+@app.patch("/api/campaigns/{campaign_id}")
+async def rename_campaign(campaign_id: int, req: Request):
+    from . import campaigns
+    data = await req.json()
+    try:
+        return await campaigns.rename(campaign_id, data.get("name") or "")
+    except campaigns.CampaignError as e:
+        return _campaign_error(e)
+
+
+@app.delete("/api/campaigns/{campaign_id}")
+async def delete_campaign(campaign_id: int):
+    from . import campaigns
+    await campaigns.delete(campaign_id)
+    return {"ok": True}
+
+
 # --- Queue Manager Endpoints ---
 
 @app.get("/api/queue/runs")
@@ -1340,6 +1422,15 @@ def prepare_run(parameters: dict, prep: list, sequence: list, cleanup: list):
     cleanup = expand_workflow_blocks(cleanup, WORKFLOWS_DIR, "cleanup", resolved=resolved_links)
 
     if parameters.get("type") == "Optimization":
+        # Constraints the optimizer cannot keep are refused here, in the words the Optimize page
+        # shows, rather than failing once the run starts (optimizer/registry.py).
+        if any(str(c or "").strip() for c in parameters.get("parameter_constraints") or []):
+            from ivoryos_edge.optimizer.registry import check_constraints
+            problems = [r["error"] for r in check_constraints(
+                parameters.get("optimizer"), parameters.get("parameter_constraints"),
+                parameters.get("parameter_space")) if r["error"]]
+            if problems:
+                raise WorkflowError(" ".join(problems))
         parameters["prep_template"] = prep
         parameters["cleanup_template"] = cleanup
         # The sequence_template is already inside parameters, but it's not expanded!
@@ -2239,11 +2330,30 @@ def _alias_main_script(module_name):
         sys.modules.setdefault(stem, main)
 
 
+def _echo_loggers(names):
+    """Send these loggers' records to stdout (run's `logger`), once each, at INFO unless set."""
+    import logging
+    for name in [names] if isinstance(names, str) else list(names or []):
+        log = logging.getLogger(name)
+        if not any(getattr(h, "_ivoryos_echo", False) for h in log.handlers):
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s"))
+            handler._ivoryos_echo = True
+            log.addHandler(handler)
+        if log.level == logging.NOTSET:
+            log.setLevel(logging.INFO)
+
+
 def run(module_name: str = None, port: int = None, plugins: list = None, *,
         instruments: dict = None, instrument_errors: list = None, deck_path: str = None,
-        host: str = None, frontend_dir: str = None, plugins_dir: str = None, plugin_errors: list = None):
+        host: str = None, frontend_dir: str = None, plugins_dir: str = None, plugin_errors: list = None,
+        logger=None):
     """
     Entry point to start the Edge Server.
+
+    `logger` names Python loggers (one, or a list) whose messages go to the edge's output, which is
+    what the desktop app's Log shows: an instrument's own logging, at INFO and up. IvoryOS Classic's
+    run() took the same argument, so a converted script (classic.py) keeps it.
 
     Two ways to say what is on the deck:
       run(__name__)                 every instrument object defined in the calling script
@@ -2260,6 +2370,8 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
     # now, but refusing here still keeps a second copy off the port, the database and Cloud.
     from .instance_lock import acquire_or_exit
     acquire_or_exit(os.path.dirname(ENV_PATH))
+
+    _echo_loggers(logger)
 
     # A launcher running someone's script (a desktop "script profile") chooses the port and
     # interface through the environment, since the script itself just says run(__name__).

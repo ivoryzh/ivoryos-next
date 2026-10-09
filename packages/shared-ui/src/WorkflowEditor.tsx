@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, Scissors, ListChecks, MoreHorizontal, Wrench, ShieldCheck, Grid3x3, Workflow as WorkflowIcon } from 'lucide-react';
+import { ArrowRight, Trash2, Settings2, ChevronDown, AlertTriangle, Eye, EyeOff, PanelRightOpen, ChevronRight, Search, Layers, Link2, Copy, CopyPlus, Scissors, ListChecks, MoreHorizontal, Wrench, ShieldCheck, Grid3x3, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   LIBRARY_INSTRUMENT,
   collectReturnVars,
@@ -816,6 +816,16 @@ export default function WorkflowEditor({
         >
           Ungroup
         </button>
+        {/* An icon beside the delete, not a third word: the header is narrow, and its name comes first. */}
+        <button
+          type="button"
+          onClick={() => duplicateGroup(listId, group.startIndex, group.size)}
+          title="Duplicate this group: a copy of every step, as a new group right after it"
+          aria-label="Duplicate this group"
+          className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-200/70 dark:hover:text-gray-200 dark:hover:bg-white/10 shrink-0"
+        >
+          <CopyPlus className="w-3.5 h-3.5" />
+        </button>
         <button
           type="button"
           onClick={() => removeGroup(listId, group.startIndex, group.size)}
@@ -848,6 +858,31 @@ export default function WorkflowEditor({
     if (!ok) return;
     list.splice(startIndex, size);
     setSequenceList(listId, list);
+  };
+
+  /**
+   * The whole group again, right after it: each step a copy with its own id and parameters, as
+   * Duplicate step does. The copy is a group of its own (a new id, or the two would read as one
+   * group), named after the original, and opened or closed as the original is.
+   */
+  const duplicateGroup = (listId: string, startIndex: number, size: number) => {
+    const list = Array.from(getSequenceList(listId));
+    const original = list[startIndex]?.group;
+    if (!original) return;
+    const taken = new Set(list.map(b => b.group?.name).filter(Boolean) as string[]);
+    let name = `${original.name} (copy)`;
+    for (let n = 2; taken.has(name); n += 1) name = `${original.name} (copy ${n})`;
+    const group = { ...original, id: newGroupId(), name };
+    const copies = list.slice(startIndex, startIndex + size).map(b => ({
+      ...b,
+      id: newBlockId(),
+      params: JSON.parse(JSON.stringify(b.params || {})),
+      group,
+    }));
+    if (!copies.length) return;
+    list.splice(startIndex + size, 0, ...copies);
+    setSequenceList(listId, list);
+    setExpandedGroups(prev => ({ ...prev, [groupKey(listId, copies[0].id)]: !!prev[groupKey(listId, list[startIndex].id)] }));
   };
 
   /** Dissolve the grouping. The steps are untouched — they just stop being drawn as a unit. */

@@ -48,7 +48,7 @@ export default function OptimizerSettings({ api, profile }: { api: DesktopApi; p
     <section className={`${cardClass} p-4 space-y-3`}>
       <div>
         <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Optimizers</h3>
-        <p className="text-xs text-gray-500 dark:text-gray-400">For the Optimize page. Versions tested with IvoryOS; PyTorch installs without GPU support.</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">For the Optimize page. Versions tested with IvoryOS; PyTorch installs without GPU support. BayBE with chemistry adds substances (solvents, reagents by structure) and a few hundred MB.</p>
       </div>
       <div className="space-y-2">
         {state.catalog.map(o => {
@@ -64,6 +64,10 @@ export default function OptimizerSettings({ api, profile }: { api: DesktopApi; p
                 <option value="">Not used</option>
                 {value === 'any' && <option value="any">Any version (from the Hub)</option>}
                 {o.versions.map((v, i) => <option key={v} value={v}>{v}{i === 0 ? ' · recommended' : ''}</option>)}
+                {/* The same versions with an extra install (BayBE's chemistry, for substances). */}
+                {Object.entries(o.extras || {}).flatMap(([extra, label]) => o.versions.map(v => (
+                  <option key={`${v}[${extra}]`} value={`${v}[${extra}]`}>{v} {label}</option>
+                )))}
               </select>
               </div>
               <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">{installed ? `installed ${installed}` : 'not installed'}</span>

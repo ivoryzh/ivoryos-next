@@ -53,7 +53,7 @@ from ivoryos_edge.plugins import Plugin
 plugin = Plugin(
     "Shaker view",            # shown in the sidebar
     page="page",              # folder with index.html, relative to this file
-    placement="panel-right",  # "tab" (default), "panel-left" or "panel-right"
+    placement="panel-right",  # "tab" (default), or "panel-left"/"panel-right": opens in a window over the pages
     icon="activity",          # optional lucide icon name
 )
 
@@ -457,12 +457,13 @@ unclear which deck instrument a patched class corresponds to.
 
 - Python plugins (`Plugin`, `observe`, `publish`, deck-file and script registration) are in
   the edge and tested.
-- Side panels are drawn (`frontend/src/components/PluginPanel.tsx`): a `panel-left`/`panel-right`
-  plugin opens docked on that side the first time, and the person can move it to the other side,
-  float it over the pages (drag the title bar, resize from the corner), or minimize it to a small
-  floating window that still shows the plugin, scaled down (drag it anywhere; restore returns it
-  to where it was). The choice is remembered per browser. The panel sits in the root layout,
-  around the pages, and is one element in every state, so neither moving between pages nor
-  docking, floating or minimizing ever reloads it: it keeps receiving updates the whole time. Any tab plugin can be
-  shown in the panel too, with "Show beside pages" on its page.
+- Panels are drawn (`frontend/src/components/PluginPanel.tsx`): a `panel-left`/`panel-right`
+  plugin opens in a window over the pages (on that side the first time it is placed), which can be
+  dragged and resized, or switched to full size over the page area with the nav still in sight
+  (Esc or the same button for the window again). Neither size moves the page underneath. Clicking
+  the plugin in the nav opens or closes it; right-clicking any plugin there offers the window, full
+  size or a page of its own, so a tab plugin can be kept in the window too ("Open in a window" on
+  its page does the same). The choice is remembered per browser. The panel sits in the root
+  layout, around the pages, and is one element in both sizes, so neither moving between pages nor
+  changing size ever reloads it: it keeps receiving updates the whole time.
 - Legacy Flask blueprints are not run by the edge; they are converted as above.

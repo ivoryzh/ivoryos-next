@@ -23,11 +23,8 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
   const instruments = Object.keys(schema);
   const [active, setActive] = useState('');
   const [query, setQuery] = useState('');
-  // Rows whose unit is being typed rather than picked ("other…" chosen, nothing written yet).
-  const [typingUnit, setTypingUnit] = useState<Record<string, boolean>>({});
   useEffect(() => { if (!schema[active] && instruments.length) setActive(instruments[0]); }, [instruments, active, schema]);
 
-  const trayNames = Object.keys(config.trays);
   const mine = classes[active] || [];
   const sameClass = mine[0] ? instruments.filter((i) => (classes[i] || [])[0] === mine[0]).length : 0;
 
@@ -98,18 +95,6 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
                 const limit = limitFor(config, mine, active, method, path);
                 const shared = !!limit && limit.target.startsWith(CLASS_PREFIX);
                 const set = (patch: Partial<Limit>) => onChange(patchLimit(config, mine, active, method, path, patch));
-                const options: unknown[] | undefined = info?.options;
-                const allowed = limit?.allowed?.map(String);
-                // The unit the field's numbers are in. One the driver itself declared is shown
-                // as it is: it says what the code does, so it is not up for choosing here. Any
-                // other field takes one from the dropdown, or typed under "other…" and kept as
-                // written. A label only -- the edge converts nothing.
-                const rowKey = `${active}.${method}.${path}`;
-                const declaredUnit: string | undefined = info?.unit ? String(info.unit) : undefined;
-                const chosenUnit = limit?.unit || '';
-                const unitSelect = typingUnit[rowKey] || (chosenUnit && !KNOWN_UNITS.has(chosenUnit)) ? OTHER_UNIT : chosenUnit;
-                const typeText = String(info?.type || 'any').toLowerCase();
-                const takesUnit = !options && (isNumeric(info) || typeText === 'any' || typeText === '');
                 return (
                   <div key={path} className="flex flex-wrap items-center gap-x-4 gap-y-2 py-2">
                     <div className="w-44 shrink-0">
@@ -119,128 +104,7 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
                       </div>
                     </div>
 
-                    {options ? (
-                      // Choices the driver itself declares (an Enum, a Literal). The edge holds every
-                      // call to them with nothing set here; this is only for forbidding some of them.
-                      <div className="flex flex-wrap items-center gap-1.5" title="Only these are ever accepted, with nothing set here. Click one to forbid it on this bench.">
-                        {options.map((option) => {
-                          const text = String(option);
-                          const on = !allowed || allowed.includes(text);
-                          return (
-                            <button
-                              key={text}
-                              type="button"
-                              aria-pressed={on}
-                              title={on ? 'Allowed. Click to forbid.' : 'Forbidden. Click to allow.'}
-                              onClick={() => {
-                                const now = (allowed || options.map(String)).filter((o) => o !== text);
-                                if (on && now.length === 0) return; // forbidding every choice forbids the call
-                                const next = on ? now : [...(allowed || []), text];
-                                // Everything allowed again is no limit at all.
-                                set({ allowed: next.length === options.length ? undefined : options.filter((o) => next.includes(String(o))) });
-                              }}
-                              className={`rounded-md border px-2 py-0.5 font-mono text-[11px] ${
-                                on ? 'border-gray-300 text-gray-700 dark:border-white/20 dark:text-gray-200'
-                                  : 'border-red-200 bg-red-50 text-red-500 line-through dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400'
-                              }`}
-                            >
-                              {text}
-                            </button>
-                          );
-                        })}
-                        {!allowed && <span className="text-[10px] text-gray-400 dark:text-gray-500">always held to these; click one to forbid it</span>}
-                      </div>
-                    ) : (
-                      <>
-                        {isNumeric(info) && (
-                          <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-                            <input
-                              type="number" step="any" placeholder="min" aria-label={`${path} minimum`}
-                              value={limit?.min ?? ''} onChange={(e) => set({ min: e.target.value === '' ? undefined : Number(e.target.value) })}
-                              className={`${inputClass} w-20`}
-                            />
-                            <span>to</span>
-                            <input
-                              type="number" step="any" placeholder="max" aria-label={`${path} maximum`}
-                              value={limit?.max ?? ''} onChange={(e) => set({ max: e.target.value === '' ? undefined : Number(e.target.value) })}
-                              className={`${inputClass} w-20`}
-                            />
-                          </div>
-                        )}
-                        {declaredUnit ? (
-                          <span
-                            className="text-xs text-gray-600 dark:text-gray-300"
-                            title="Declared by the driver itself, so the bounds are in it and it cannot be changed here"
-                          >
-                            {declaredUnit} <span className="text-[10px] text-gray-400 dark:text-gray-500">(driver)</span>
-                          </span>
-                        ) : takesUnit && (
-                          <span className="flex items-center gap-1.5">
-                            <select
-                              aria-label={`${path} unit`}
-                              title="What this field's numbers are in. Shown with the bounds and on every form; nothing is converted."
-                              value={unitSelect}
-                              onChange={(e) => {
-                                const picked = e.target.value;
-                                if (picked === OTHER_UNIT) {
-                                  setTypingUnit((t) => ({ ...t, [rowKey]: true }));
-                                  if (chosenUnit && KNOWN_UNITS.has(chosenUnit)) set({ unit: undefined });
-                                  return;
-                                }
-                                setTypingUnit((t) => ({ ...t, [rowKey]: false }));
-                                set({ unit: picked || undefined });
-                              }}
-                              className={`${inputClass} w-28`}
-                            >
-                              <option value="">no unit</option>
-                              {UNIT_GROUPS.map((group) => (
-                                <optgroup key={group.label} label={group.label}>
-                                  {group.units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
-                                </optgroup>
-                              ))}
-                              <option value={OTHER_UNIT}>other…</option>
-                            </select>
-                            {unitSelect === OTHER_UNIT && (
-                              <input
-                                aria-label={`${path} unit, typed`}
-                                placeholder="unit"
-                                defaultValue={KNOWN_UNITS.has(chosenUnit) ? '' : chosenUnit}
-                                key={`${rowKey}.unit.${chosenUnit}`}
-                                autoFocus={!!typingUnit[rowKey]}
-                                onBlur={(e) => {
-                                  const text = e.target.value.trim();
-                                  setTypingUnit((t) => ({ ...t, [rowKey]: false }));
-                                  set({ unit: text || undefined });
-                                }}
-                                className={`${inputClass} w-20`}
-                              />
-                            )}
-                          </span>
-                        )}
-                        {!isNumeric(info) && (
-                          <input
-                            placeholder="only these values (a, b, c)" aria-label={`${path} allowed values`}
-                            defaultValue={(limit?.allowed || []).join(', ')}
-                            key={`${active}.${method}.${path}.${(limit?.allowed || []).join(',')}`}
-                            onBlur={(e) => {
-                              const values = e.target.value.split(',').map((v) => v.trim()).filter(Boolean);
-                              set({ allowed: values.length ? values : undefined });
-                            }}
-                            className={`${inputClass} w-48`}
-                          />
-                        )}
-                        {trayNames.length > 0 && String(info?.type || '').toLowerCase() !== 'float' && (
-                          <select
-                            aria-label={`${path} tray`}
-                            value={limit?.tray || ''} onChange={(e) => set({ tray: e.target.value || undefined })}
-                            className={`${inputClass} w-40`}
-                          >
-                            <option value="">not a tray position</option>
-                            {trayNames.map((name) => <option key={name} value={name}>position on {config.trays[name].label || name}</option>)}
-                          </select>
-                        )}
-                      </>
-                    )}
+                    <LimitControls rowKey={`${active}.${method}.${path}`} path={path} info={info} limit={limit} set={set} trays={config.trays} />
 
                     {limit && mine[0] && (
                       <label
@@ -284,5 +148,163 @@ export default function LimitsEditor({ config, onChange, schema, classes }: {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The controls for one field's limit: which values it allows (a range, a list, a tray, or some of
+ * the choices the driver declares) and what unit its numbers are in. The Safety page draws one per
+ * row; the Instruments page draws one in the dialog its fields open (FieldGuardDialog), so a limit
+ * set beside a field is the same limit, set the same way.
+ */
+export function LimitControls({ rowKey, path, info, limit, set, trays }: {
+  /** Unique per field, for the inputs that are re-seeded when their value changes elsewhere. */
+  rowKey: string;
+  path: string;
+  /** The field's schema entry (type, options, a unit its driver declares). */
+  info: any;
+  limit: Limit | undefined;
+  set: (patch: Partial<Limit>) => void;
+  trays: SafetyConfig['trays'];
+}) {
+  // The unit is being typed rather than picked ("other…" chosen, nothing written yet).
+  const [typing, setTyping] = useState(false);
+  const trayNames = Object.keys(trays);
+  const options: unknown[] | undefined = info?.options;
+  const allowed = limit?.allowed?.map(String);
+  // The unit the field's numbers are in. One the driver itself declared is shown as it is: it
+  // says what the code does, so it is not up for choosing here. Any other field takes one from
+  // the dropdown, or typed under "other…" and kept as written. A label only -- the edge converts
+  // nothing.
+  const declaredUnit: string | undefined = info?.unit ? String(info.unit) : undefined;
+  const chosenUnit = limit?.unit || '';
+  const unitSelect = typing || (chosenUnit && !KNOWN_UNITS.has(chosenUnit)) ? OTHER_UNIT : chosenUnit;
+  const typeText = String(info?.type || 'any').toLowerCase();
+  const takesUnit = !options && (isNumeric(info) || typeText === 'any' || typeText === '');
+  return (
+    <>
+      {options ? (
+        // Choices the driver itself declares (an Enum, a Literal). The edge holds every
+        // call to them with nothing set here; this is only for forbidding some of them.
+        <div className="flex flex-wrap items-center gap-1.5" title="Only these are ever accepted, with nothing set here. Click one to forbid it on this bench.">
+          {options.map((option) => {
+            const text = String(option);
+            const on = !allowed || allowed.includes(text);
+            return (
+              <button
+                key={text}
+                type="button"
+                aria-pressed={on}
+                title={on ? 'Allowed. Click to forbid.' : 'Forbidden. Click to allow.'}
+                onClick={() => {
+                  const now = (allowed || options.map(String)).filter((o) => o !== text);
+                  if (on && now.length === 0) return; // forbidding every choice forbids the call
+                  const next = on ? now : [...(allowed || []), text];
+                  // Everything allowed again is no limit at all.
+                  set({ allowed: next.length === options.length ? undefined : options.filter((o) => next.includes(String(o))) });
+                }}
+                className={`rounded-md border px-2 py-0.5 font-mono text-[11px] ${
+                  on ? 'border-gray-300 text-gray-700 dark:border-white/20 dark:text-gray-200'
+                    : 'border-red-200 bg-red-50 text-red-500 line-through dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400'
+                }`}
+              >
+                {text}
+              </button>
+            );
+          })}
+          {!allowed && <span className="text-[10px] text-gray-400 dark:text-gray-500">always held to these; click one to forbid it</span>}
+        </div>
+      ) : (
+        <>
+          {isNumeric(info) && (
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+              <input
+                type="number" step="any" placeholder="min" aria-label={`${path} minimum`}
+                value={limit?.min ?? ''} onChange={(e) => set({ min: e.target.value === '' ? undefined : Number(e.target.value) })}
+                className={`${inputClass} w-20`}
+              />
+              <span>to</span>
+              <input
+                type="number" step="any" placeholder="max" aria-label={`${path} maximum`}
+                value={limit?.max ?? ''} onChange={(e) => set({ max: e.target.value === '' ? undefined : Number(e.target.value) })}
+                className={`${inputClass} w-20`}
+              />
+            </div>
+          )}
+          {declaredUnit ? (
+            <span
+              className="text-xs text-gray-600 dark:text-gray-300"
+              title="Declared by the driver itself, so the bounds are in it and it cannot be changed here"
+            >
+              {declaredUnit} <span className="text-[10px] text-gray-400 dark:text-gray-500">(driver)</span>
+            </span>
+          ) : takesUnit && (
+            <span className="flex items-center gap-1.5">
+              <select
+                aria-label={`${path} unit`}
+                title="What this field's numbers are in. Shown with the bounds and on every form; nothing is converted."
+                value={unitSelect}
+                onChange={(e) => {
+                  const picked = e.target.value;
+                  if (picked === OTHER_UNIT) {
+                    setTyping(true);
+                    if (chosenUnit && KNOWN_UNITS.has(chosenUnit)) set({ unit: undefined });
+                    return;
+                  }
+                  setTyping(false);
+                  set({ unit: picked || undefined });
+                }}
+                className={`${inputClass} w-28`}
+              >
+                <option value="">no unit</option>
+                {UNIT_GROUPS.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                  </optgroup>
+                ))}
+                <option value={OTHER_UNIT}>other…</option>
+              </select>
+              {unitSelect === OTHER_UNIT && (
+                <input
+                  aria-label={`${path} unit, typed`}
+                  placeholder="unit"
+                  defaultValue={KNOWN_UNITS.has(chosenUnit) ? '' : chosenUnit}
+                  key={`${rowKey}.unit.${chosenUnit}`}
+                  autoFocus={typing}
+                  onBlur={(e) => {
+                    const text = e.target.value.trim();
+                    setTyping(false);
+                    set({ unit: text || undefined });
+                  }}
+                  className={`${inputClass} w-20`}
+                />
+              )}
+            </span>
+          )}
+          {!isNumeric(info) && (
+            <input
+              placeholder="only these values (a, b, c)" aria-label={`${path} allowed values`}
+              defaultValue={(limit?.allowed || []).join(', ')}
+              key={`${rowKey}.${(limit?.allowed || []).join(',')}`}
+              onBlur={(e) => {
+                const values = e.target.value.split(',').map((v) => v.trim()).filter(Boolean);
+                set({ allowed: values.length ? values : undefined });
+              }}
+              className={`${inputClass} w-48`}
+            />
+          )}
+          {trayNames.length > 0 && String(info?.type || '').toLowerCase() !== 'float' && (
+            <select
+              aria-label={`${path} tray`}
+              value={limit?.tray || ''} onChange={(e) => set({ tray: e.target.value || undefined })}
+              className={`${inputClass} w-40`}
+            >
+              <option value="">not a tray position</option>
+              {trayNames.map((name) => <option key={name} value={name}>position on {trays[name].label || name}</option>)}
+            </select>
+          )}
+        </>
+      )}
+    </>
   );
 }

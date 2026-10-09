@@ -188,6 +188,45 @@ def step_phase(step) -> str:
     return params.get("_phase") or "main"
 
 
+class NoImprovement:
+    """The "no improvement in N iterations" stopping rule for an optimization run.
+
+    An iteration improves when any objective beats its best so far (lower when minimized, higher
+    when maximized), existing data included. Iterations of the random start (`random_start`) never
+    count against it, and an improvement starts the count again. `add` says when to stop.
+    """
+
+    def __init__(self, objectives, patience: int, random_start: int = 0, existing=None):
+        self.objectives = [(o.get("name"), bool(o.get("minimize"))) for o in objectives or []]
+        self.patience = max(0, int(patience or 0))
+        self.random_start = max(0, int(random_start or 0))
+        self.best = {}
+        self.since = 0
+        for row in existing or []:
+            self._improves(row)
+
+    def _improves(self, values) -> bool:
+        improved = False
+        for name, minimize in self.objectives:
+            try:
+                value = float(values.get(name))
+            except (TypeError, ValueError):
+                continue
+            best = self.best.get(name)
+            if best is None or (value < best if minimize else value > best):
+                self.best[name] = value
+                improved = True
+        return improved
+
+    def add(self, trial_number: int, values) -> bool:
+        """Record trial `trial_number` (1-based); True when the run should stop after it."""
+        if self._improves(values or {}):
+            self.since = 0
+        elif trial_number > self.random_start:
+            self.since += 1
+        return bool(self.patience) and self.since >= self.patience
+
+
 def graceful_stop_here(steps: list, index: int, batch_size: int = 1) -> bool:
     """Whether a graceful stop ends the main block before `steps[index]`.
 
@@ -1655,6 +1694,11 @@ class WorkflowQueueManager:
         # optimizer backend already implements append_existing_data(); this was just never wired
         # up to a real run before.
         existing_data = parameters.get("existing_data")
+        # Stop once no objective has improved for this many iterations in a row, counted from the
+        # end of the random start (step_1's num_samples): random points are not expected to improve.
+        patience = int(parameters.get("stop_after_no_improvement") or 0)
+        random_start = int((opt_config.get("step_1") or {}).get("num_samples") or 0)
+        no_improvement = NoImprovement(obj_config, patience, random_start, existing_data)
 
         OptClass = OPTIMIZER_REGISTRY.get(opt_name)
         if not OptClass:
@@ -2027,6 +2071,13 @@ class WorkflowQueueManager:
                                 print(f"Early stop ({mode}): criteria met after {completed + trial_num + 1} trial(s)")
                                 stop_early = True
                                 break
+                if not stop_early:
+                    for trial_num, objective_values in enumerate(round_results):
+                        if no_improvement.add(completed + trial_num + 1, objective_values):
+                            print(f"Stopped: no objective improved in {patience} iteration(s), "
+                                  f"after {completed + trial_num + 1} trial(s)")
+                            stop_early = True
+                            break
                 if stop_early:
                     break
 

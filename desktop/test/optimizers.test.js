@@ -28,3 +28,13 @@ test('changing the choice replaces only the optimizers and keeps every other pac
     assert.deepEqual(withSelection(['ax-platform==1.3.1', 'numpy'], { ax: null }), ['numpy']);
     assert.throws(() => withSelection([], { ax: '0.4.0' }), /not a version IvoryOS has tested/);
 });
+
+test('BayBE with chemistry is a choice of its own, written with its extra', () => {
+    assert.deepEqual(withSelection(['numpy'], { baybe: '0.15.0[chem]' }), ['numpy', 'baybe[chem]==0.15.0']);
+    assert.equal(selectionOf(['baybe[chem]==0.15.0']).baybe, '0.15.0[chem]');
+    // Read back and written again unchanged, and switched back to plain BayBE.
+    assert.deepEqual(withSelection(['baybe[chem]==0.15.0'], {}), ['baybe[chem]==0.15.0']);
+    assert.deepEqual(withSelection(['baybe[chem]==0.15.0'], { baybe: '0.15.0' }), ['baybe==0.15.0']);
+    assert.throws(() => withSelection([], { baybe: '0.15.0[gpu]' }), /no extra called gpu/);
+    assert.throws(() => withSelection([], { ax: '1.3.1[chem]' }), /no extra called chem/);
+});

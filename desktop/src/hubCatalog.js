@@ -30,6 +30,28 @@ const TEMPLATE_FIELDS = 'id,title,description,module_ids,platform_id,updated_at,
 
 class HubError extends Error {}
 
+// Chromium's names (Electron's net.fetch fails with "net::ERR_INTERNET_DISCONNECTED") and Node's
+// (fetch's `cause.code`) for a computer that is not on the internet: no network, or no name
+// server answering, which is how a Wi-Fi without an uplink looks.
+const OFFLINE = /ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_NAME_RESOLUTION_FAILED|ERR_NETWORK_CHANGED|ERR_ADDRESS_UNREACHABLE|ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN/;
+
+/**
+ * A request that never got an answer, said so a person knows what to do: offline (the commonest
+ * case, a laptop off Wi-Fi) is told to connect, with `code: 'offline'` so a page can say it its
+ * own way; anything else on the way (a timeout, a firewall or proxy, a certificate) is told what
+ * to check, with the cause kept for whoever has to look into it.
+ */
+function unreachable(e, name, online) {
+    const cause = [e && e.message, e && e.cause && e.cause.code, e && e.code].filter(Boolean).join(' ');
+    if (online() === false || OFFLINE.test(cause)) {
+        return Object.assign(new HubError(`No internet connection. Connect to the internet to reach ${name}.`), { code: 'offline' });
+    }
+    return Object.assign(
+        new HubError(`Could not reach ${name} (${e && e.message}). Check the internet connection, or a firewall or proxy in the way, and try again.`),
+        { code: 'unreachable' },
+    );
+}
+
 // --- conversions (mirror landing-page-supabase utils/deck-manifest.ts) ----------------------------
 
 /** A pip requirement for a Hub package field: a bare repository URL gets the `git+` it needs. */
@@ -234,9 +256,12 @@ class HubCatalog {
      * @param {string} opts.key     its public (anon) key
      * @param {() => Promise<string|null>} opts.token   the signed-in session's access token, or null
      * @param {() => string|null} opts.userId           the signed-in user's id, or null
+     * @param {() => boolean|null} [opts.online]        whether this computer is on a network (Electron's
+     *                                                  net.isOnline), or null when it cannot tell
      */
-    constructor({ fetch, url, key, token = async () => null, userId = () => null }) {
+    constructor({ fetch, url, key, token = async () => null, userId = () => null, online = () => null }) {
         this.fetch = fetch;
+        this.online = online;
         this.url = url.replace(/\/+$/, '');
         this.key = key;
         this.token = token;
@@ -252,11 +277,16 @@ class HubCatalog {
                 headers: { apikey: this.key, Authorization: `Bearer ${token || this.key}`, Accept: 'application/json' },
             });
         } catch (e) {
-            throw new HubError(`Could not reach the Automation Hub (${e.message}).`);
+            throw unreachable(e, 'the Automation Hub', this.online);
         }
         const text = await res.text();
         let body = null;
         try { body = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+        // The service in front of the database is down or overloaded (a gateway's answer, not the
+        // database's): nothing the person did, and nothing to read in its page of HTML.
+        if ([502, 503, 504].includes(res.status)) {
+            throw Object.assign(new HubError(`The Automation Hub is not answering right now (${res.status}). Try again in a few minutes.`), { code: 'hub-down' });
+        }
         if (!res.ok) {
             throw Object.assign(new HubError((body && (body.message || body.error)) || `The Automation Hub answered ${res.status}.`), { code: body && body.code });
         }
@@ -281,7 +311,7 @@ class HubCatalog {
                 body: JSON.stringify({ name, email, message }),
             });
         } catch (e) {
-            throw new HubError(`Could not reach IvoryOS (${e.message}).`);
+            throw unreachable(e, 'IvoryOS', this.online);
         }
         if (res.ok) return true;
         const text = await res.text().catch(() => '');
@@ -308,7 +338,7 @@ class HubCatalog {
                 body: JSON.stringify(row),
             });
         } catch (e) {
-            throw new HubError(`Could not reach IvoryOS (${e.message}).`);
+            throw unreachable(e, 'IvoryOS', this.online);
         }
         if (res.ok) return { id: row.id };
         const text = await res.text().catch(() => '');

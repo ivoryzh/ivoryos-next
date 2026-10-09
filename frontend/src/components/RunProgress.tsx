@@ -66,6 +66,20 @@ type TemplateStep = {
 
 type Group = { index: number; rows: number[] };
 
+/** One loop counter, 1-based: "iteration 12 of 40". */
+type Count = { noun: 'iteration' | 'sample' | 'batch'; index: number; total: number };
+
+/**
+ * Where the run is now, in the loop's own terms: which iteration, sample or batch (`units`, the
+ * one that says most first) and which step within it. "89 of 555 steps" said how much was done,
+ * not where the run was.
+ */
+export type Position = {
+  phase: 'prep' | 'main' | 'cleanup';
+  units: Count[];
+  step: { index: number; total: number };
+};
+
 export type Progress = {
   prep: RunStep[];
   cleanup: RunStep[];
@@ -77,6 +91,8 @@ export type Progress = {
   iterations: { total: number; done: number };
   total: number;
   done: number;
+  /** The step running, failed or next, placed in its loop; null once nothing is left to run. */
+  position: Position | null;
 };
 
 const aggregate = (steps: RunStep[]) => {
@@ -175,13 +191,88 @@ export function buildProgress(run: RunLike): Progress {
     ? { total: budget, done: Math.floor(main.filter(s => DONE.has(s.status)).length / templateLength) }
     : { total: rows.length, done: rows.filter(r => rowState.get(r) === 'done').length };
 
+  // The step the run is on: running, waiting or failed, else the next to go (as the edge's own
+  // run summary picks it, queue.py).
+  const current = steps.find(s => ACTIVE.has(s.status) || s.status === 'error') || steps.find(s => s.status === 'pending');
+  let position: Position | null = null;
+  if (current) {
+    const phase = phaseOf(current) as Position['phase'];
+    const within = (list: RunStep[]) => ({ index: list.indexOf(current) + 1, total: list.length });
+    if (phase !== 'main') {
+      position = { phase, units: [], step: within(phase === 'prep' ? prep : cleanup) };
+    } else if (isOptimization) {
+      // A trial is one pass of the template; trials are asked for `batch_size` at a time.
+      const at = main.indexOf(current);
+      const trial = Math.floor(at / templateLength);
+      const perBatch = Math.max(1, Number(params.batch_size) || 1);
+      const total = Math.max(budget, trial + 1);
+      position = {
+        phase,
+        units: [
+          { noun: 'iteration', index: trial + 1, total },
+          ...(perBatch > 1 ? [{ noun: 'batch' as const, index: Math.floor(trial / perBatch) + 1, total: Math.ceil(total / perBatch) }] : []),
+        ],
+        step: { index: (at % templateLength) + 1, total: templateLength },
+      };
+    } else if (kind === 'rows' && rowOf(current) !== null) {
+      // In batches the steps of a batch's samples interleave (and a batch step runs once for all
+      // of them), so the batch is the unit; otherwise each sample runs its steps in turn.
+      const row = rowOf(current)!;
+      const size = Math.max(1, groupSize);
+      if (size > 1 && groups.length > 1) {
+        const index = Math.floor(row / size);
+        position = {
+          phase,
+          units: [{ noun: 'batch', index: groups.findIndex(g => g.index === index) + 1, total: groups.length }],
+          step: within(main.filter(s => rowOf(s) !== null && Math.floor(rowOf(s)! / size) === index)),
+        };
+      } else {
+        position = {
+          phase,
+          units: [{ noun: 'sample', index: rows.indexOf(row) + 1, total: rows.length }],
+          step: within(main.filter(s => rowOf(s) === row)),
+        };
+      }
+    } else {
+      position = { phase, units: [], step: within(main) };
+    }
+  }
+
   const plannedMain = isOptimization ? Math.max(budget * templateLength, main.length) : main.length;
   return {
     prep, cleanup, template, kind, rows, groups, rowState, iterations,
     total: prep.length + plannedMain + cleanup.length,
     done: steps.filter(s => DONE.has(s.status)).length,
+    position,
   };
 }
+
+const counted = (n: number, total: number, noun: string) => `${n} of ${total} ${noun}${total === 1 ? '' : 's'}`;
+
+/**
+ * The run's place as words: `where` is the loop ("iteration 12 of 40", or "prep"), `step` the step
+ * within it ("step 4 of 9"), and `extra` any further counter ("batch 3 of 10"). Once nothing is
+ * left to run, `where` is how much of the loop ran ("40 of 40 iterations") and the rest is empty.
+ */
+export function describePosition(p: Progress): { where: string; extra: string; step: string } {
+  const pos = p.position;
+  if (!pos) {
+    if (p.kind === 'optimization') return { where: counted(p.iterations.done, p.iterations.total, 'iteration'), extra: '', step: '' };
+    if (p.kind === 'rows') return { where: counted(p.iterations.done, p.iterations.total, 'sample'), extra: '', step: '' };
+    return { where: counted(p.done, p.total, 'step'), extra: '', step: '' };
+  }
+  const step = `step ${pos.step.index} of ${pos.step.total}`;
+  if (pos.phase !== 'main') return { where: pos.phase, extra: '', step };
+  if (!pos.units.length) return { where: step, extra: '', step: '' };
+  const [first, ...rest] = pos.units.map(u => `${u.noun} ${u.index} of ${u.total}`);
+  return { where: first, extra: rest.join(' · '), step };
+}
+
+/** The same, as one line: "iteration 12 of 40 · batch 3 of 10 · step 4 of 9". */
+export const positionText = (p: Progress) => {
+  const d = describePosition(p);
+  return [d.where, d.extra, d.step].filter(Boolean).join(' · ');
+};
 
 const formatSeconds = (s: number) => {
   if (!isFinite(s) || s < 0) return '';
@@ -296,6 +387,7 @@ export default function RunProgress({ run, live, stepEditor, hideOverall = false
   }, [live]);
 
   const p = buildProgress(run);
+  const where = describePosition(p);
   const percent = p.total ? Math.round((p.done / p.total) * 100) : 0;
   const loops = p.kind !== 'once';
   const hasBatches = p.groups.length > 1 || p.template.some(t => t.perBatch);
@@ -322,10 +414,13 @@ export default function RunProgress({ run, live, stepEditor, hideOverall = false
         {!hideOverall && (
           <>
             <div className="flex items-baseline justify-between gap-3 mb-1.5">
-              <span className="text-lg font-bold text-gray-900 dark:text-white">
-                {p.done} <span className="text-gray-400 dark:text-gray-500 font-medium">of</span> {p.total} steps
+              <span className="min-w-0 truncate">
+                <span className="text-lg font-bold text-gray-900 dark:text-white first-letter:uppercase inline-block">{where.where}</span>
+                {(where.extra || where.step) && (
+                  <span className="ml-2 text-sm font-medium text-gray-500 dark:text-gray-400">{[where.extra, where.step].filter(Boolean).join(' · ')}</span>
+                )}
               </span>
-              <span className="text-lg font-bold text-gray-900 dark:text-white tabular-nums">{percent}%</span>
+              <span className="text-lg font-bold text-gray-900 dark:text-white tabular-nums" title={`${p.done} of ${p.total} steps`}>{percent}%</span>
             </div>
             <div className="h-2.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
               <div className={`h-full ${barColor} transition-all duration-500`} style={{ width: `${percent}%` }} />

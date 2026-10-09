@@ -1,6 +1,9 @@
 from pandas import DataFrame
 
 from ivoryos_edge.optimizer.base_optimizer import OptimizerBase
+from ivoryos_edge.optimizer.constraints import (
+    ConstraintError, LinearConstraint, describe, finite_bounds, is_stepped, parse_all,
+)
 
 # hardcoded blacklist for Ax objective names from SymPy
 AX_OBJ_BLACKLIST = ["test", "factor", "range", "product", "prod", "sum", "type", "yield"]
@@ -20,11 +23,19 @@ class AxOptimizer(OptimizerBase):
                          datapath, additional_params)
 
         self.client = Client()
+        # Constraints are read here (constraints.py) rather than handed to Ax as typed: Ax takes
+        # only inequalities, so an equality is kept exactly by solving it for one parameter
+        # (`self._solved`), searching the rest, and working that one out for each suggestion.
+        constraints = parse_all(parameter_constraints, [p["name"] for p in parameter_space])
+        self._solved, inequalities, problems = self._plan_constraints(constraints, parameter_space)
+        if any(problems):
+            raise ConstraintError(" ".join(problem for problem in problems if problem))
         # 2. Configure where Ax will search.
         self.client.configure_experiment(
             name=experiment_name,
-            parameters=self._convert_parameter_to_ax_format(parameter_space),
-            parameter_constraints=parameter_constraints
+            parameters=self._convert_parameter_to_ax_format(
+                [p for p in parameter_space if p["name"] not in self._solved]),
+            parameter_constraints=[c.as_text() for c in inequalities] or None,
         )
         # 3. Configure the objective function.
         self.client.configure_optimization(objective=self._convert_objective_to_ax_format(objective_config))
@@ -54,10 +65,13 @@ class AxOptimizer(OptimizerBase):
         for p in parameter_space:
             value_type = p.get("value_type", "float")
             if p["type"] == "range":
-                # if step is used here, convert to ChoiceParameterConfig
+                # if step is used here, convert to ChoiceParameterConfig, keeping whole numbers
+                # whole: it was always declared float, so 1, 2, 3 reached the workflow as 1.0, 2.0
                 if  len(p["bounds"]) == 3:
                     values = self._create_discrete_search_space(range_with_step=p["bounds"],value_type=value_type)
-                    ax_params.append(ChoiceParameterConfig(name=p["name"], values=values, parameter_type="float", is_ordered=True))
+                    ax_params.append(ChoiceParameterConfig(name=p["name"], values=values,
+                                                           parameter_type="int" if value_type == "int" else "float",
+                                                           is_ordered=True))
                 else:
                     ax_params.append(
                         RangeParameterConfig(
@@ -142,7 +156,120 @@ class AxOptimizer(OptimizerBase):
             trial_index_list.append(trial_index)
             param_list.append(params)
         self.trial_index_list = trial_index_list
-        return param_list
+        return [self._with_solved(params) for params in param_list]
+
+    def add_pending(self, points):
+        """Suggestions still waiting for their results (a suggest-only campaign): attached as
+        trials that are running, so Ax does not suggest the same points again."""
+        searched = [p["name"] for p in self.parameter_space if p["name"] not in self._solved]
+        for point in points or []:
+            self.client.attach_trial(parameters={name: point[name] for name in searched if name in point})
+
+    def _with_solved(self, params):
+        """A suggestion with each parameter an equality was solved for worked out from the rest."""
+        out = dict(params)
+        by_name = {p["name"]: p for p in self.parameter_space}
+        for name, expression in self._solved.items():
+            value = expression.get("", 0.0) + sum(c * float(params[n]) for n, c in expression.items() if n)
+            bounds = finite_bounds(by_name[name])
+            if bounds:  # rounding only: the constraints Ax was given keep it inside
+                value = min(max(value, bounds[0]), bounds[1])
+            out[name] = value
+        return out
+
+    @classmethod
+    def check_constraints(cls, constraints, parameter_space):
+        """For each constraint, why Ax cannot use it, or None (the Optimize page's live check)."""
+        return cls._plan_constraints(constraints, parameter_space)[2]
+
+    @staticmethod
+    def _plan_constraints(constraints, parameter_space):
+        """Turn the constraints into what Ax takes: (solved, inequalities, problems).
+
+        Ax searches only plain ranges under constraints, and only inequalities. An equality is
+        solved for its last decimal-range parameter (`a + b + c = 1` keeps a and b and works out
+        c = 1 - a - b), that parameter leaves the search, and two inequalities keep it inside its
+        own range. Every other constraint is rewritten without the solved parameters.
+        """
+        by_name = {p["name"]: p for p in parameter_space}
+        problems = [None] * len(constraints)
+        solved, solved_by = {}, {}
+
+        for i, con in enumerate(constraints):
+            for name in con.names:
+                param = by_name[name]
+                if param.get("type") != "range" or is_stepped(param):
+                    problems[i] = (f"'{con.text}': {name} is {describe(param)}; Ax applies constraints "
+                                   "only to plain ranges (min to max, no step).")
+                    break
+
+        def substitute(coefficients):
+            out, constant = {}, 0.0
+            for name, c in coefficients.items():
+                for n, d in (solved[name].items() if name in solved else [(name, 1.0)]):
+                    if n:
+                        out[n] = out.get(n, 0.0) + c * d
+                    else:
+                        constant += c * d
+            return {n: c for n, c in out.items() if abs(c) > 1e-12}, constant
+
+        def never_holds(constant_lhs, operator, rhs):
+            return not LinearConstraint("", {"_": 1.0}, operator, rhs).holds({"_": constant_lhs})
+
+        for i, con in enumerate(constraints):
+            if problems[i] or con.operator != "=":
+                continue
+            coefficients, constant = substitute(con.coefficients)
+            rhs = con.rhs - constant
+            if not coefficients:
+                if never_holds(0.0, "=", rhs):
+                    problems[i] = f"'{con.text}' can never hold together with the other '=' constraints."
+                continue
+            candidates = [n for n in coefficients if by_name[n].get("value_type", "float") != "int"]
+            if not candidates:
+                problems[i] = (f"'{con.text}': Ax keeps an '=' exactly by working one parameter out from "
+                               "the others, so one of them has to be a decimal range not already worked "
+                               "out by another '='.")
+                continue
+            k = candidates[-1]
+            ck = coefficients[k]
+            expression = {n: -c / ck for n, c in coefficients.items() if n != k}
+            expression[""] = rhs / ck
+            for earlier in solved.values():  # keep every solved parameter in searched ones only
+                if k in earlier:
+                    ek = earlier.pop(k)
+                    for n, d in expression.items():
+                        earlier[n] = earlier.get(n, 0.0) + ek * d
+            solved[k], solved_by[k] = expression, i
+
+        inequalities = []
+        for i, con in enumerate(constraints):
+            if problems[i] or con.operator == "=":
+                continue
+            coefficients, constant = substitute(con.coefficients)
+            rhs = con.rhs - constant
+            if not coefficients:
+                if never_holds(0.0, con.operator, rhs):
+                    problems[i] = f"'{con.text}' can never hold together with the '=' constraints."
+                continue
+            inequalities.append(LinearConstraint(con.text, coefficients, con.operator, rhs))
+
+        for name, expression in solved.items():
+            bounds = finite_bounds(by_name[name])
+            if not bounds:
+                continue
+            coefficients = {n: c for n, c in expression.items() if n and abs(c) > 1e-12}
+            constant = expression.get("", 0.0)
+            if not coefficients:
+                if not (bounds[0] - 1e-9 <= constant <= bounds[1] + 1e-9):
+                    i = solved_by[name]
+                    problems[i] = (f"'{constraints[i].text}' sets {name} to {constant:g}, outside its "
+                                   f"range {bounds[0]:g} to {bounds[1]:g}.")
+                continue
+            label = f"{name} within {bounds[0]:g} to {bounds[1]:g}"
+            inequalities.append(LinearConstraint(label, coefficients, ">=", bounds[0] - constant))
+            inequalities.append(LinearConstraint(label, coefficients, "<=", bounds[1] - constant))
+        return solved, inequalities, problems
 
     def observe(self, results):
         for trial_index, result in zip(self.trial_index_list, results):
@@ -258,6 +385,8 @@ class AxOptimizer(OptimizerBase):
             # "objective_weights": True,
             "supports_continuous": True,
             "supports_constraints": True,
+            # A suggest-only campaign rebuilds the optimizer from its results each time (campaigns.py).
+            "supports_suggest_only": True,
             "optimizer_config": {
                 "step_1": {"model": ["Sobol", "Uniform", "Factorial", "Thompson"], "num_samples": 5},
                 "step_2": {"model": ["BoTorch", "SAASBO", "SAAS_MTGP", "Legacy_GPEI", "EB", "EB_Ashr", "ST_MTGP", "BO_MIXED", "Contextual_SACBO"]}
@@ -276,7 +405,8 @@ class AxOptimizer(OptimizerBase):
             if existing_data.empty:
                 return
             existing_data = existing_data.to_dict(orient="records")
-        parameter_names = [i.get("name") for i in self.parameter_space]
+        # A parameter an equality was solved for is not one Ax knows.
+        parameter_names = [i.get("name") for i in self.parameter_space if i.get("name") not in self._solved]
         objective_names = [i.get("name") for i in self.objective_config]
         for entry in existing_data:
             # for name, value in entry.items():

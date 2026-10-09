@@ -1,6 +1,6 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, FileJson, Package, Pencil, Plus, Store, Trash2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Package, Pencil, Plus, Store, Trash2 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { Deck, DeckInstrument, DesktopApi, HubLinkRequest, Profile } from '@/desktop';
 import HubBrowser, { type HubKind } from './HubBrowser';
@@ -73,14 +73,18 @@ export default function DeckPanel({ api, profile, hubUrl, pro, onUpgrade, onOpen
     <div className="space-y-5">
       <div className="flex items-center gap-2 flex-wrap">
         <Button tone="primary" onClick={() => setBrowsing(true)}><Store className="w-4 h-4" /> Add from Hub</Button>
-        <Button onClick={() => { setSeed(null); setEditing('new'); }}><Plus className="w-4 h-4" /> Add by hand</Button>
-        <Button onClick={() => act(() => api.installFromFile())}><FileJson className="w-4 h-4" /> Install from deck file…</Button>
+        {/* Writes an entry naming a module and class; it installs nothing, so the driver has to be
+            importable by the app's Python already. */}
+        <Button
+          onClick={() => { setSeed(null); setEditing('new'); }}
+          title="For a driver already installed in IvoryOS's Python: name its module and class. Nothing is installed."
+        ><Plus className="w-4 h-4" /> Add installed driver</Button>
         {running && <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">Changes restart this deck.</span>}
       </div>
 
       {instruments.length === 0 ? (
         <div className={`${cardClass} p-8 text-center text-sm text-gray-500 dark:text-gray-400`}>
-          No instruments on this deck yet. Add one from the Hub, or by hand if its driver is your own code.
+          No instruments on this deck yet. Add one from the Hub, or name a driver that is already installed.
         </div>
       ) : (
         <ul className={`${cardClass} divide-y divide-gray-100 dark:divide-white/5 overflow-hidden`}>

@@ -20,7 +20,7 @@ export function makeDesktopApi(lab: Lab, realFetch: typeof fetch): DesktopApi {
   // Plain JavaScript (desktop/src/hubCatalog.js): its answers are read as the launcher's own Hub
   // types (src/desktop.ts), here as in the app. Anonymous: the tour has no accounts.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const catalog: any = new HubCatalog({ fetch: realFetch, url: HUB_AUTH.url, key: HUB_AUTH.key, token: async () => null, userId: () => null });
+  const catalog: any = new HubCatalog({ fetch: realFetch, url: HUB_AUTH.url, key: HUB_AUTH.key, token: async () => null, userId: () => null, online: () => navigator.onLine });
   // A driver's methods as the Hub introspected them (modules.schema): what its simulated stand-in
   // (sim.ts) offers in the Designer and answers when run. Empty when the Hub has none for it.
   const hubSchema = async (filter: string): Promise<Record<string, MethodSchema>> => {
@@ -241,6 +241,8 @@ export function makeDesktopApi(lab: Lab, realFetch: typeof fetch): DesktopApi {
     account: async () => SIGNED_OUT,
     // The launcher's Python check (Settings): there is none to check, and none needed.
     inspectPython: async () => ({ ok: true, python: 'Simulated in your browser: the tour runs no Python', version: '3.12', edge: '(simulated)' }),
+    // The tour's scripts are its own simulated lab, never IvoryOS Classic.
+    classicScript: async () => null,
     reorderProfiles: async () => {},
     setTheme: async () => {},
   };

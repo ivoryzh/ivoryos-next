@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
-import { Maximize2, Minus, PanelLeft, PanelRight, PictureInPicture2, Plug, X } from 'lucide-react';
+import { Check, ChevronsUpDown, Maximize2, Minimize2, Plug, X } from 'lucide-react';
 import { API_BASE } from '@/config';
 import { isPanelPlugin, loadPanel, openInPanel, setPanel, usePanel, type PanelState } from '@/pluginPanel';
 
@@ -11,30 +11,24 @@ type Rect = { x: number; y: number; w: number; h: number };
 const MIN_W = 280;
 const MIN_H = 200;
 const HEADER = 36;
-/** The minimized window: small, but still the live plugin, scaled down. */
-const MINI_W = 300;
-const MINI_BODY_H = 220;
-/** The width the plugin is laid out at inside the minimized window, before being scaled down to
- * MINI_W. Fixed rather than the docked width: a narrow dock would otherwise scale it *up*. */
-const MINI_LAYOUT_W = 440;
+/** Kept between the window and the edges of the browser window. */
+const MARGIN = 8;
 
 function frameSrc(p: PluginInfo) {
   return p.url.startsWith('http') ? p.url : `${API_BASE}${p.url}`;
 }
 
 /**
- * The plugin panel: a plugin shown beside every page, docked left or right, floating over the
- * pages, or minimized to a small floating window, so a live view (the bench animation, a camera,
- * a running plot) stays in sight while you click through the app and while a workflow runs.
+ * The plugin panel: a plugin shown over every page, in a window or full size, so a live view (the
+ * bench animation, a camera, a running plot, the liquid handler's worktable) stays in reach while
+ * you click through the app and while a workflow runs. Neither size moves the page underneath.
  *
  * Two rules keep the plugin running without interruption:
  * - It lives in the root layout, around the pages, not in any page: client-side navigation
  *   keeps the layout mounted, so moving between pages never reloads the plugin.
- * - It is ONE fixed-position element in every state; docking, floating, minimizing and changing
- *   sides only change its style. React therefore keeps the same iframe throughout, where
- *   rendering a different element per state would reload the plugin on every change. Docking
- *   makes room by padding the page area, which is likewise always the same element, so the page
- *   underneath is never remounted either.
+ * - It is ONE fixed-position element in both sizes; switching only changes its style. React
+ *   therefore keeps the same iframe throughout, where rendering a different element per size
+ *   would reload the plugin on every change.
  */
 export default function PluginPanelHost({ children }: { children: React.ReactNode }) {
   const onLauncher = (usePathname() || '').startsWith('/launcher');
@@ -58,21 +52,12 @@ export default function PluginPanelHost({ children }: { children: React.ReactNod
   }, [onLauncher]);
 
   const plugin = onLauncher ? undefined : plugins.find(p => p.id === panel.open);
-  const docked = !!plugin && panel.mode === 'dock' && !panel.minimized;
-  const padLeft = docked && panel.side === 'left' ? panel.width : 0;
-  const padRight = docked && panel.side === 'right' ? panel.width : 0;
-
-  // Fixed-position things pinned to the right edge (the queue status pill) move aside for a
-  // panel docked there.
-  useEffect(() => {
-    document.documentElement.style.setProperty('--ivoryos-dock-right', `${padRight}px`);
-  }, [padRight]);
-
-  const choices = plugins.filter(p => isPanelPlugin(p) || p.id === panel.open);
+  // Any plugin can be shown here (the nav's right-click menu), so any can be switched to.
+  const choices = plugins;
 
   return (
     <>
-      <div className="h-screen w-full overflow-hidden" style={{ paddingLeft: padLeft, paddingRight: padRight }}>
+      <div className="h-screen w-full overflow-hidden">
         <div className="h-full w-full overflow-auto">{children}</div>
       </div>
       {plugin ? <Panel plugin={plugin} choices={choices} panel={panel} /> : null}
@@ -89,6 +74,41 @@ function useViewport() {
     return () => window.removeEventListener('resize', read);
   }, []);
   return vp;
+}
+
+/**
+ * The page area beside the nav, which full size covers so the nav stays in sight and usable: below
+ * the bar along the top, or right of the sidebar. Each page draws its own nav, and a page can draw
+ * it a moment after the address changes (measuring on navigation found none, and full size covered
+ * the bar), so the nav element is followed whenever it appears or is replaced, and as it changes
+ * size (the sidebar expanding).
+ */
+function usePageArea() {
+  const [area, setArea] = useState({ top: 0, left: 0 });
+  useEffect(() => {
+    let nav: Element | null = null;
+    const measure = () => {
+      const r = nav?.getBoundingClientRect();
+      // Along the top it is wider than it is tall; a sidebar is the other way round.
+      const next = !r ? { top: 0, left: 0 } : r.width > r.height ? { top: Math.max(0, r.bottom), left: 0 } : { top: 0, left: Math.max(0, r.right) };
+      setArea(prev => (prev.top === next.top && prev.left === next.left ? prev : next));
+    };
+    const sized = new ResizeObserver(measure);
+    const follow = () => {
+      const found = document.querySelector('[data-ivoryos-nav-bar]');
+      if (found === nav) return;
+      if (nav) sized.unobserve(nav);
+      nav = found;
+      if (nav) sized.observe(nav);
+      measure();
+    };
+    const changed = new MutationObserver(follow);
+    changed.observe(document.body, { childList: true, subtree: true });
+    const frame = requestAnimationFrame(follow);
+    window.addEventListener('resize', measure);
+    return () => { cancelAnimationFrame(frame); changed.disconnect(); sized.disconnect(); window.removeEventListener('resize', measure); };
+  }, []);
+  return area;
 }
 
 /** Follow the mouse until it is released. An overlay covers everything meanwhile, because the
@@ -117,106 +137,118 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi
 
 function Panel({ plugin, choices, panel }: { plugin: PluginInfo; choices: PluginInfo[]; panel: PanelState }) {
   const vp = useViewport();
+  const area = usePageArea();
   const { start, overlay } = useDrag();
   // While dragging, the live geometry is held here and saved once, on release.
-  const [live, setLive] = useState<Partial<{ width: number; float: Rect; mini: { x: number; y: number } }>>({});
-  const state: 'dock' | 'float' | 'mini' = panel.minimized ? 'mini' : panel.mode;
-  const right = panel.side === 'right';
+  const [live, setLive] = useState<Rect | null>(null);
+  // The list of plugins to switch to, open under the name.
+  const [picking, setPicking] = useState(false);
+  useEffect(() => {
+    if (!picking) return;
+    const close = () => setPicking(false);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    // A click into the plugin's own page blurs this window; a click on this page is a mousedown.
+    window.addEventListener('mousedown', close);
+    window.addEventListener('blur', close);
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', onKey); };
+  }, [picking]);
+  const full = panel.mode === 'full';
+  const toggleSize = () => setPanel({ mode: full ? 'window' : 'full' });
 
-  const width = live.width ?? panel.width;
+  // Esc leaves full size, while the page (not the plugin, which keeps its own keys) has the focus.
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPanel({ mode: 'window' }); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [full]);
 
-  // Floating: kept reachable, since a position saved on a larger screen must not strand it.
-  const f = live.float ?? panel.float;
-  const fw = clamp(f.w, MIN_W, vp.w - 16);
-  const fh = clamp(f.h, MIN_H, vp.h - 16);
-  const float = { x: clamp(f.x < 0 ? vp.w - fw - 24 : f.x, 8, vp.w - fw - 8), y: clamp(f.y, 8, vp.h - fh - 8), w: fw, h: fh };
+  // The window, kept reachable: a place saved on a larger screen must not strand it.
+  const f = live ?? panel.float;
+  const fw = clamp(f.w, MIN_W, vp.w - 2 * MARGIN);
+  const fh = clamp(f.h, MIN_H, vp.h - 2 * MARGIN);
+  const win = { x: clamp(f.x < 0 ? vp.w - fw - 24 : f.x, MARGIN, vp.w - fw - MARGIN), y: clamp(f.y, MARGIN, vp.h - fh - MARGIN), w: fw, h: fh };
 
-  // Minimized: bottom right by default, clear of the queue status card (taller while a run is on).
-  const m = live.mini ?? panel.mini;
-  const miniH = HEADER + MINI_BODY_H;
-  const mini = { x: clamp(m.x < 0 ? vp.w - MINI_W - 16 : m.x, 8, vp.w - MINI_W - 8), y: clamp(m.y < 0 ? vp.h - miniH - 110 : m.y, 8, vp.h - miniH - 8) };
+  const box: React.CSSProperties = full
+    ? { top: area.top, left: area.left, right: 0, bottom: 0 }
+    : { left: win.x, top: win.y, width: win.w, height: win.h };
 
-  const box: React.CSSProperties =
-    state === 'dock' ? { top: 0, bottom: 0, width, ...(right ? { right: 0 } : { left: 0 }) }
-    : state === 'float' ? { left: float.x, top: float.y, width: float.w, height: float.h }
-    : { left: mini.x, top: mini.y, width: MINI_W, height: miniH };
-
-  // The minimized window shows the plugin laid out at its normal width, scaled down to fit, so
-  // the whole view stays visible rather than its top-left corner.
-  const scale = MINI_W / MINI_LAYOUT_W;
-  const frameStyle: React.CSSProperties = state === 'mini'
-    ? { width: MINI_LAYOUT_W, height: MINI_BODY_H / scale, transform: `scale(${scale})`, transformOrigin: 'top left' }
-    : { width: '100%', height: '100%' };
-
-  const resizeDock = (e: React.MouseEvent) => {
-    let w = panel.width;
-    start(e, 'col-resize', (dx) => { w = clamp(panel.width + (right ? -dx : dx), MIN_W, vp.w * 0.7); setLive({ width: w }); },
-      () => { setPanel({ width: Math.round(w) }); setLive({}); });
+  // Both keep the window inside the browser window as it goes. A place left of the edge used to
+  // be saved as a negative x, which is also how "not placed yet" is saved, so a window dragged
+  // past the left edge jumped to the right-hand side.
+  const moveWindow = (e: React.MouseEvent) => {
+    let next = win;
+    start(e, 'move', (dx, dy) => {
+      next = { ...win, x: clamp(win.x + dx, MARGIN, vp.w - win.w - MARGIN), y: clamp(win.y + dy, MARGIN, vp.h - win.h - MARGIN) };
+      setLive(next);
+    }, () => { setPanel({ float: next }); setLive(null); });
   };
-  const moveFloat = (e: React.MouseEvent) => {
-    let next = float;
-    start(e, 'move', (dx, dy) => { next = { ...float, x: float.x + dx, y: float.y + dy }; setLive({ float: next }); },
-      () => { setPanel({ float: next }); setLive({}); });
-  };
-  const resizeFloat = (e: React.MouseEvent) => {
-    let next = float;
-    start(e, 'nwse-resize', (dx, dy) => { next = { ...float, w: Math.max(MIN_W, float.w + dx), h: Math.max(MIN_H, float.h + dy) }; setLive({ float: next }); },
-      () => { setPanel({ float: next }); setLive({}); });
-  };
-  const moveMini = (e: React.MouseEvent) => {
-    let next = mini;
-    start(e, 'move', (dx, dy) => { next = { x: mini.x + dx, y: mini.y + dy }; setLive({ mini: next }); },
-      () => { setPanel({ mini: next }); setLive({}); });
+  const resizeWindow = (e: React.MouseEvent) => {
+    let next = win;
+    start(e, 'nwse-resize', (dx, dy) => {
+      next = { ...win, w: clamp(win.w + dx, MIN_W, vp.w - win.x - MARGIN), h: clamp(win.h + dy, MIN_H, vp.h - win.y - MARGIN) };
+      setLive(next);
+    }, () => { setPanel({ float: next }); setLive(null); });
   };
 
   const btn = 'p-1 rounded text-gray-400 hover:text-gray-800 hover:bg-gray-100 dark:hover:text-gray-100 dark:hover:bg-white/10';
-  const dragHandle = state === 'float' ? moveFloat : state === 'mini' ? moveMini : undefined;
 
   return (
     <div
-      className={`fixed flex flex-col bg-white dark:bg-[#0d0d0d] border-gray-200 dark:border-white/15 ${
-        state === 'dock' ? `z-[140] ${right ? 'border-l' : 'border-r'}` : 'z-[150] border rounded-xl overflow-hidden shadow-2xl'
+      className={`fixed flex flex-col bg-white dark:bg-[#0d0d0d] ${
+        full ? 'z-[140]' : 'z-[150] border border-gray-200 dark:border-white/15 rounded-xl overflow-hidden shadow-2xl'
       }`}
       style={box}
     >
       <div
-        onMouseDown={dragHandle}
-        onDoubleClick={state === 'mini' ? () => setPanel({ minimized: false }) : undefined}
-        className={`shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03] ${dragHandle ? 'cursor-move select-none' : ''}`}
+        onMouseDown={full ? undefined : moveWindow}
+        onDoubleClick={toggleSize}
+        title={full ? 'Double-click for a window' : 'Drag to move; double-click for full size'}
+        className={`shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03] ${full ? '' : 'cursor-move select-none'}`}
         style={{ height: HEADER }}
       >
         <Plug className="w-3.5 h-3.5 text-gray-700 dark:text-gray-200 shrink-0" />
-        {choices.length > 1 && state !== 'mini' ? (
-          <select
-            value={plugin.id}
-            onMouseDown={e => e.stopPropagation()}
-            onChange={e => setPanel({ open: e.target.value })}
-            className="min-w-0 flex-1 bg-transparent text-xs font-semibold text-gray-700 dark:text-gray-200 focus:outline-none"
-          >
-            {choices.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700 dark:text-gray-200">{plugin.name}</span>
-        )}
-        <div className="flex items-center" onMouseDown={e => e.stopPropagation()}>
-          {state === 'dock' && (
-            <>
-              <button type="button" className={btn} title={right ? 'Dock on the left' : 'Dock on the right'} onClick={() => setPanel({ side: right ? 'left' : 'right' })}>
-                {right ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelRight className="w-3.5 h-3.5" />}
-              </button>
-              <button type="button" className={btn} title="Float over the page" onClick={() => setPanel({ mode: 'float' })}><PictureInPicture2 className="w-3.5 h-3.5" /></button>
-            </>
-          )}
-          {state === 'float' && (
-            <button type="button" className={btn} title={`Dock on the ${panel.side}`} onClick={() => setPanel({ mode: 'dock' })}>
-              {right ? <PanelRight className="w-3.5 h-3.5" /> : <PanelLeft className="w-3.5 h-3.5" />}
+        {/* The switcher is the name itself, its mark right beside it: a dropdown stretched across
+            the bar put its arrow next to the window buttons, where it read as one of them. */}
+        {choices.length > 1 ? (
+          <div className="relative min-w-0" onMouseDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setPicking(o => !o)}
+              title="Switch to another plugin"
+              aria-haspopup="menu"
+              aria-expanded={picking}
+              className={`max-w-full flex items-center gap-1 rounded px-1 py-0.5 text-xs font-semibold text-gray-700 dark:text-gray-200 hover:bg-gray-200/70 dark:hover:bg-white/10 ${picking ? 'bg-gray-200/70 dark:bg-white/10' : ''}`}
+            >
+              <span className="truncate">{plugin.name}</span>
+              <ChevronsUpDown className="w-3 h-3 shrink-0 text-gray-400" />
             </button>
-          )}
-          {state === 'mini' ? (
-            <button type="button" className={btn} title={panel.mode === 'dock' ? `Restore (docked on the ${panel.side})` : 'Restore'} onClick={() => setPanel({ minimized: false })}><Maximize2 className="w-3.5 h-3.5" /></button>
-          ) : (
-            <button type="button" className={btn} title="Minimize to a small window (keeps running)" onClick={() => setPanel({ minimized: true })}><Minus className="w-3.5 h-3.5" /></button>
-          )}
+            {picking && (
+              <div role="menu" className="absolute left-0 top-full mt-1 z-10 w-56 max-h-64 overflow-y-auto py-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#1a1a1a] shadow-xl">
+                {choices.map(c => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setPanel({ open: c.id }); setPicking(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10"
+                  >
+                    <Check className={`w-3.5 h-3.5 shrink-0 ${c.id === plugin.id ? '' : 'invisible'}`} />
+                    <span className="truncate">{c.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="min-w-0 truncate px-1 text-xs font-semibold text-gray-700 dark:text-gray-200">{plugin.name}</span>
+        )}
+        <span className="flex-1" />
+        <div className="flex items-center" onMouseDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
+          <button type="button" className={btn} title={full ? 'Back to a window (Esc)' : 'Full size'} onClick={toggleSize}>
+            {full ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+          </button>
           <button type="button" className={btn} title="Close" onClick={() => setPanel({ open: null })}><X className="w-3.5 h-3.5" /></button>
         </div>
       </div>
@@ -226,21 +258,13 @@ function Panel({ plugin, choices, panel }: { plugin: PluginInfo; choices: Plugin
           key={plugin.id}
           src={frameSrc(plugin)}
           title={plugin.name}
-          className="block border-none bg-white"
-          style={frameStyle}
+          className="block w-full h-full border-none bg-white"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
         />
       </div>
 
-      {state === 'dock' && (
-        <div
-          onMouseDown={resizeDock}
-          title="Drag to resize"
-          className={`absolute top-0 bottom-0 ${right ? '-left-1' : '-right-1'} w-2 cursor-col-resize hover:bg-gray-500/30`}
-        />
-      )}
-      {state === 'float' && (
-        <div onMouseDown={resizeFloat} title="Drag to resize" className="absolute right-0 bottom-0 w-4 h-4 cursor-nwse-resize" style={{ background: 'linear-gradient(135deg, transparent 50%, rgba(99,102,241,0.5) 50%)' }} />
+      {!full && (
+        <div onMouseDown={resizeWindow} title="Drag to resize" className="absolute right-0 bottom-0 w-4 h-4 cursor-nwse-resize" style={{ background: 'linear-gradient(135deg, transparent 50%, rgba(99,102,241,0.5) 50%)' }} />
       )}
       {overlay}
     </div>

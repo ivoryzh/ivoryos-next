@@ -89,8 +89,8 @@ A deck file lists pip `packages` to install and `instruments` to build from them
 documented at the top of `edge_server/ivoryos_edge/deck_config.py`; `example/deck.json` is the
 demo deck written that way.
 
-An **install manifest** is a deck file describing only what to add. Drivers reach a deck three
-ways, all through the same install path:
+An **install manifest** is a deck file describing only what to add. Drivers reach a deck two
+ways, both through the same install path:
 
 - **Add from Hub** on a deck's Instruments tab, or **Automation Hub** in the sidebar: search the
   Hub's drivers, fill in the settings form the Hub provides for that driver (connection, port,
@@ -105,9 +105,13 @@ ways, all through the same install path:
   deck (`?deck=`, the old form) is refused: any web page could build one naming any package or
   importable class, and it would have looked like it came from the Hub.
   `ivoryos://install?manifest=https://…` (a manifest by URL) still goes through the dialog below.
-- **Install from deck file…**: a deck JSON on disk.
 
-Installing a manifest or deck file asks for confirmation (listing the packages, and each
+There is no "install from a deck file on disk": the deck files the app writes live in its own
+data folder, out of a person's way, so the button only invited picking a JSON file nobody had.
+**Add installed driver** writes an entry for a driver the app's Python can already import (module
+and class); it installs nothing.
+
+Installing a manifest asks for confirmation (listing the packages, and each
 instrument with the class it loads, and warning about any package not pinned to one version), then stops the edge, runs `uv pip install`, writes the deck,
 and starts the edge again. If the install fails, the deck is left unchanged and the old edge
 comes back. Instruments that fail to load (a missing driver, an unplugged device) are marked in

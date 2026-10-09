@@ -3,7 +3,7 @@ import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Download, Upload, AlertTriangle, Layers, ListTree, Grid3x3 } from 'lucide-react';
+import { Play, Download, Upload, AlertTriangle, Layers, ListTree, Grid3x3, Target, Plus, X } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
 import LiveRun from '@/components/LiveRun';
@@ -21,12 +21,27 @@ import {
   toSubmittedStep,
   toWireBlock, useDocumentTheme, runtimeVarNames, splitRepeatedLinks, mainOnlyLinks,
   TrayPicker, guardHint, guardProblem, guardSuggestions, guardsFor, trayForGuards, unitOf, SuggestInput,
-  formatReference, referenceStart, rowListVariables,
+  formatReference, referenceStart, rowListVariables, RunConfigError,
   type FieldGuard, type FieldRef } from '@ivoryos/shared-ui';
 import Link from 'next/link';
 import { useQueueBusy } from '@/queueBusy';
 import { editRunIdFromUrl, hydrateBlocks, leaveEdit, loadQueuedRun, saveQueuedRun, sourceBlock, type QueuedEdit } from '@/queuedEdit';
 import { currentStages, loadStage, stageKeeper, type EmbeddedStage } from '@/stages';
+
+/** One condition of Iterate's "Stop early": a saved result compared with a number. */
+type StopCondition = { metric: string; op: '>=' | '<='; threshold: string };
+type StopEarly = { on: boolean; mode: 'any' | 'all'; conditions: StopCondition[] };
+const STOP_EARLY_KEY = 'ivoryos_iterate_stop_early';
+
+/** A run's `early_stop` (edge queue.py target_reached) as this page edits it. */
+function stopEarlyFrom(early: any): StopEarly | null {
+  if (!early?.criteria?.length) return null;
+  return {
+    on: true,
+    mode: early.mode === 'all' ? 'all' : 'any',
+    conditions: early.criteria.map((c: any) => ({ metric: String(c.metric || ''), op: c.op === '<=' ? '<=' : '>=', threshold: String(c.threshold ?? '') })),
+  };
+}
 
 /**
  * Resolve any `Library Workflows` blocks into the steps they stand for, via the server's own
@@ -138,6 +153,9 @@ export default function RunWorkflowPage({ mode, stage }: {
   // Columns a batch step takes from every row of its group, in one call (spreadsheetRun.ts).
   const [listVariables, setListVariables] = useState<string[]>([]);
   const [batchSize, setBatchSize] = useState<string>('');
+  // Iterate's "Stop early": end the run once a sample's results reach a target (queue.py
+  // target_reached). Kept per browser like the batch size; a queued run being edited brings its own.
+  const [stopEarly, setStopEarly] = useState<StopEarly>({ on: false, mode: 'any', conditions: [] });
   // Set once the page has read what it starts from. The batch size is saved only after that: saved
   // on mount, the empty starting value removed the one kept from the last visit before the load
   // (which awaits) could read it, so every visit began at batch size 1.
@@ -221,6 +239,7 @@ export default function RunWorkflowPage({ mode, stage }: {
       try {
         // What the page starts from: a queued run being edited, or the Designer's workflow.
         let restored: { rows: any[]; batchSize: string; globalValues: Record<string, string> } | null = null;
+        let restoredStop: StopEarly | null = null;
         let parsedSeq: any[] = [];
         let pSeq: any[] = [];
         let cSeq: any[] = [];
@@ -233,6 +252,7 @@ export default function RunWorkflowPage({ mode, stage }: {
             cSeq = hydrateBlocks(source.cleanup, instruments);
             const size = Number(run.parameters?.batch_size) || 1;
             restored = { rows: run.parameters?.rows || [], batchSize: size > 1 ? String(size) : '', globalValues: source.globalValues || {} };
+            restoredStop = stopEarlyFrom(run.parameters?.early_stop);
             editingRef.current = true;
             setEditing({ id: run.id, name: run.name });
           } catch (e: any) {
@@ -397,6 +417,13 @@ export default function RunWorkflowPage({ mode, stage }: {
 
         const savedBatchSize = restored ? restored.batchSize : localStorage.getItem('ivoryos_batch_size');
         if (savedBatchSize) setBatchSize(savedBatchSize);
+        if (!stage) {
+          let savedStop: StopEarly | null = restoredStop;
+          if (!editId) {
+            try { savedStop = JSON.parse(localStorage.getItem(STOP_EARLY_KEY) || 'null'); } catch { /* defaults */ }
+          }
+          if (savedStop?.conditions) setStopEarly(savedStop);
+        }
         // From here on, what is typed for a stage is kept as it changes. Told what was just
         // loaded, so that opening a stage to look at it writes nothing.
         if (stage && stageLoaded) {
@@ -419,6 +446,20 @@ export default function RunWorkflowPage({ mode, stage }: {
     if (batchSize) localStorage.setItem('ivoryos_batch_size', batchSize);
     else localStorage.removeItem('ivoryos_batch_size');
   }, [batchSize, hasLoaded]);
+
+  useEffect(() => {
+    if (!hasLoaded || editingRef.current || stage) return;
+    localStorage.setItem(STOP_EARLY_KEY, JSON.stringify(stopEarly));
+  }, [stopEarly, hasLoaded, stage]);
+
+  // What steps save, by name: what a "Stop early" condition can compare.
+  const resultNames = useMemo(() => Array.from(new Set(sequence.flatMap(b =>
+    b.returnBindings?.length
+      ? b.returnBindings.map((bind: { path: string; var: string }) => bind.var).filter(Boolean)
+      : String(b.returnVar || '').split(',').map((v: string) => v.trim()).filter(Boolean)
+  ))) as string[], [sequence]);
+  const setCondition = (i: number, patch: Partial<StopCondition>) =>
+    setStopEarly(s => ({ ...s, conditions: s.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) }));
 
   useEffect(() => {
     if (editingRef.current) return;
@@ -565,6 +606,19 @@ export default function RunWorkflowPage({ mode, stage }: {
    * hint from ever becoming a lie.
    */
   const buildBody = () => {
+    // "Stop early" (Iterate only): conditions with a result and a number; one without a number is
+    // said rather than dropped, since a run that never stops would be the surprise.
+    let earlyStop: Record<string, any> | null = null;
+    if (!once && !stage && stopEarly.on) {
+      const conditions = stopEarly.conditions.filter(c => c.metric && c.threshold.trim() !== '');
+      const unreadable = conditions.filter(c => !Number.isFinite(Number(c.threshold)));
+      if (unreadable.length) {
+        throw new RunConfigError(`Stop early: ${unreadable.map(c => c.metric).join(', ')} needs a number to compare with.`);
+      }
+      if (conditions.length) {
+        earlyStop = { mode: stopEarly.mode, criteria: conditions.map(c => ({ metric: c.metric, op: c.op, threshold: Number(c.threshold) })) };
+      }
+    }
     const fullSequence = expandSpreadsheet({ sequence, rows: runRows, variables, batchSize: runBatchSize, liveInputVars });
     const skip = (v: string) => liveInputVars.has(v);
     const resolvedPrep = prepSequence.map(b => resolveFixedBlock(b, globalValues, { skip }));
@@ -572,6 +626,7 @@ export default function RunWorkflowPage({ mode, stage }: {
     return {
       parameters: {
         ...buildSpreadsheetParameters({ variables, rows: runRows, sequence, batchSize: runBatchSize }),
+        ...(earlyStop ? { early_stop: earlyStop } : {}),
         // Lets the edge time runs of a saved workflow (runtime.py).
         ...(!editing && !stage && unmodifiedSavedWorkflowName() ? { workflow_name: unmodifiedSavedWorkflowName() } : {}),
         // What this page needs to show the run again while it waits (queuedEdit.ts).
@@ -855,6 +910,76 @@ export default function RunWorkflowPage({ mode, stage }: {
               safety={safety}
               onFillColumn={fillColumn}
             />
+          )}
+
+          {!once && !stage && variables.length > 0 && (
+            // Advanced: end the run once a sample reaches a target, instead of running every row.
+            <div className="mt-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-[#111111] p-3">
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-800 dark:text-gray-100 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={stopEarly.on}
+                  onChange={e => setStopEarly(s => ({
+                    ...s, on: e.target.checked,
+                    conditions: e.target.checked && !s.conditions.length && resultNames.length ? [{ metric: resultNames[0], op: '>=', threshold: '' }] : s.conditions,
+                  }))}
+                  className="w-3.5 h-3.5 accent-gray-900 dark:accent-white"
+                />
+                <Target className="w-4 h-4 text-gray-400" />
+                Stop early when a sample reaches a target
+                <span className="text-xs font-normal text-gray-400">(optional)</span>
+              </label>
+              {stopEarly.on && (
+                <div className="mt-2 pl-6 space-y-2">
+                  {resultNames.length === 0 ? (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">No step saves a result to compare. Save one in the Designer (a step&apos;s output name), then come back.</p>
+                  ) : (
+                    <>
+                      {stopEarly.conditions.map((c, i) => (
+                        <div key={i} className="flex flex-wrap items-center gap-2">
+                          <select value={c.metric} onChange={e => setCondition(i, { metric: e.target.value })}
+                            className="h-8 bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-md px-2 text-xs font-mono outline-none focus:border-accent">
+                            {!resultNames.includes(c.metric) && <option value={c.metric}>{c.metric || 'choose a result'}</option>}
+                            {resultNames.map(name => <option key={name} value={name}>{name}</option>)}
+                          </select>
+                          <select value={c.op} onChange={e => setCondition(i, { op: e.target.value === '<=' ? '<=' : '>=' })}
+                            className="h-8 bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-md px-2 text-xs outline-none focus:border-accent">
+                            <option value=">=">at least (≥)</option>
+                            <option value="<=">at most (≤)</option>
+                          </select>
+                          <input type="text" inputMode="decimal" placeholder="value" value={c.threshold} onChange={e => setCondition(i, { threshold: e.target.value })}
+                            className={`h-8 w-24 bg-white dark:bg-black border rounded-md px-2 text-xs font-mono outline-none focus:border-accent ${c.threshold.trim() && !Number.isFinite(Number(c.threshold)) ? 'border-red-300 dark:border-red-500/50' : 'border-gray-200 dark:border-white/10'}`} />
+                          <button type="button" title="Remove this condition" onClick={() => setStopEarly(s => ({ ...s, conditions: s.conditions.filter((_, j) => j !== i) }))}
+                            className="h-8 w-8 inline-flex items-center justify-center rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
+                        <button type="button" onClick={() => setStopEarly(s => ({ ...s, conditions: [...s.conditions, { metric: resultNames[0], op: '>=', threshold: '' }] }))}
+                          className="inline-flex items-center gap-1 font-medium text-accent-fg hover:text-accent">
+                          <Plus className="w-3.5 h-3.5" /> Add condition
+                        </button>
+                        {stopEarly.conditions.length > 1 && (
+                          <label className="inline-flex items-center gap-1.5">
+                            Stop when
+                            <select value={stopEarly.mode} onChange={e => setStopEarly(s => ({ ...s, mode: e.target.value === 'all' ? 'all' : 'any' }))}
+                              className="h-7 bg-gray-50 dark:bg-black/50 border border-gray-200 dark:border-white/10 rounded-md px-1.5 text-xs outline-none">
+                              <option value="any">any one is met</option>
+                              <option value="all">all are met</option>
+                            </select>
+                            by the same sample
+                          </label>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-400 dark:text-gray-500">
+                        Checked as each sample finishes (in batches, once its batch has). The samples after it are skipped; cleanup still runs.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           )}
 
           {(once || variables.length > 0 || globalVariables.length > 0) && (

@@ -71,6 +71,7 @@ export {
   getIterationValue,
   partitionVariables,
   buildOptimizationParameters,
+  optimizationSearchSpace,
 } from './optimizerConfig';
 export type { OptimizeConfig, VarBound, ObjectiveConfig, BuildOptimizationOptions } from './optimizerConfig';
 export { formatDuration, estimateRunSeconds, runtimeSummary } from './workflowRuntime';

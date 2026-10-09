@@ -25,10 +25,17 @@ export interface VarBound {
    */
   mode?: 'optimize' | 'fixed';
   excluded?: boolean;
-  type?: 'range' | 'choice';
+  /** `substance`: a choice of chemicals, each with its SMILES, for BayBE (baybe[chem]). */
+  type?: 'range' | 'choice' | 'substance';
   /** Range minimum, or the comma-separated list of options when `type` is `choice`. */
   min?: string;
   max?: string;
+  /** A range's step: only min, min+step, ... max are tried (blank: anything in between). */
+  step?: string;
+  /** For `substance`: the names the workflow receives, each with the SMILES the model reads. */
+  substances?: { name: string; smiles: string }[];
+  /** For `substance`: how the model describes them (BayBE's encodings; MORDRED by default). */
+  encoding?: string;
   fixedValue?: string;
   /** Independent of, and takes priority over, `mode` — one value per iteration, from a table. */
   perIteration?: boolean;
@@ -52,6 +59,8 @@ export interface OptimizeConfig {
   optimizer_config: Record<string, any>;
   earlyStopMode?: 'any' | 'all';
   constraints?: string[];
+  /** Stop once no objective has improved for this many iterations after the random start (0: off). */
+  stopAfterNoImprovement?: number;
 }
 
 export const emptyOptimizeConfig = (): OptimizeConfig => ({
@@ -73,9 +82,10 @@ export function getVarMode(config: OptimizeConfig, v: string): 'optimize' | 'fix
 }
 
 /** The single Range/Choice/Fixed control's value — mode and bounds type collapsed into one. */
-export function getVarModeType(config: OptimizeConfig, v: string): 'range' | 'choice' | 'fixed' {
+export function getVarModeType(config: OptimizeConfig, v: string): 'range' | 'choice' | 'substance' | 'fixed' {
   if (getVarMode(config, v) === 'fixed') return 'fixed';
-  return config.bounds?.[v]?.type === 'choice' ? 'choice' : 'range';
+  const type = config.bounds?.[v]?.type;
+  return type === 'choice' || type === 'substance' ? type : 'range';
 }
 
 export const isPerIteration = (config: OptimizeConfig, v: string) => !!config.bounds?.[v]?.perIteration;
@@ -105,9 +115,19 @@ export function partitionVariables(config: OptimizeConfig, variables: string[]) 
   };
 }
 
+/** The search space the optimizer is given, for checking constraints against before a run. */
+export function optimizationSearchSpace(config: OptimizeConfig, variables: string[]) {
+  return buildParameterSpace(config, partitionVariables(config, variables).optimized);
+}
+
 function buildParameterSpace(config: OptimizeConfig, optimizedVars: string[]) {
   return optimizedVars.map((v) => {
     const b = config.bounds?.[v] || {};
+    if (b.type === 'substance') {
+      const bounds: Record<string, string> = {};
+      (b.substances || []).forEach((s) => { if (s.name.trim()) bounds[s.name.trim()] = s.smiles.trim(); });
+      return { name: v, type: 'substance', bounds, value_type: 'str', encoding: b.encoding || 'MORDRED' };
+    }
     if (b.type === 'choice') {
       const bounds = String(b.min || '')
         .split(',')
@@ -119,11 +139,19 @@ function buildParameterSpace(config: OptimizeConfig, optimizedVars: string[]) {
     }
     // Range bounds default to 'float' rather than being inferred from whole-number min/max
     // (e.g. 20-80 for a temperature range), which would silently restrict a continuous
-    // parameter to integer-only values.
+    // parameter to integer-only values. A step makes it a grid; whole numbers throughout (2 to
+    // 10 by 2) make that grid whole numbers.
+    const low = parseFloat(b.min || '0');
+    const high = parseFloat(b.max || '1');
+    const step = parseFloat(b.step || '');
+    if (step > 0) {
+      const whole = [low, high, step].every((x) => Number.isInteger(x));
+      return { name: v, type: 'range', bounds: [low, high, step], value_type: whole ? 'int' : 'float' };
+    }
     return {
       name: v,
       type: 'range',
-      bounds: [parseFloat(b.min || '0'), parseFloat(b.max || '1')],
+      bounds: [low, high],
       value_type: 'float',
     };
   });
@@ -139,6 +167,8 @@ export interface BuildOptimizationOptions {
   sequence: any[];
   /** Prior rows to seed the optimizer with, already in `{column: value}` shape. */
   existingData?: any[];
+  /** Whether the chosen optimizer takes constraints (its schema's `supports_constraints`). */
+  supportsConstraints?: boolean;
 }
 
 /**
@@ -149,6 +179,7 @@ export interface BuildOptimizationOptions {
  */
 export function buildOptimizationParameters(opts: BuildOptimizationOptions): Record<string, any> {
   const { config, variables, returns, sequence, existingData = [] } = opts;
+  const takesConstraints = opts.supportsConstraints ?? ['ax', 'baybe'].includes(config.optimizer);
   const { perIteration: perIterationVars, optimized: optimizedVars, fixed: fixedVars } =
     partitionVariables(config, variables);
 
@@ -161,6 +192,11 @@ export function buildOptimizationParameters(opts: BuildOptimizationOptions): Rec
   const incompletePerIteration = perIterationVars.filter((v) =>
     Array.from({ length: budgetCount }).some((_, i) => !getIterationValue(config, v, i)),
   );
+  const fewSubstances = optimizedVars.filter((v) => config.bounds?.[v]?.type === 'substance'
+    && (config.bounds?.[v]?.substances || []).filter((s) => s.name.trim() && s.smiles.trim()).length < 2);
+  if (fewSubstances.length > 0) {
+    throw new RunConfigError(`Give at least two substances, each with its SMILES, for: ${fewSubstances.join(', ')}`);
+  }
   if (incompletePerIteration.length > 0) {
     throw new RunConfigError(
       `Please fill in a value for every iteration (1-${budgetCount}) for: ${incompletePerIteration.join(', ')}`,
@@ -229,11 +265,12 @@ export function buildOptimizationParameters(opts: BuildOptimizationOptions): Rec
     ...(earlyStop ? { early_stop: earlyStop } : {}),
     ...(perIterationVars.length > 0 ? { iteration_values: iterationValues } : {}),
     ...(existingData.length > 0 ? { existing_data: existingData } : {}),
-    // Only Ax's client actually applies parameter_constraints today (BayBE/NIMO accept and store
-    // it but never use it) — see AGENTS.md's Optimizer wiring section.
-    ...(config.optimizer === 'ax' && (config.constraints || []).some((c) => c.trim())
+    // Ax and BayBE keep constraints (optimizer/constraints.py on the edge, which also refuses
+    // one the chosen optimizer cannot keep, before the run is queued); NIMO takes none.
+    ...(takesConstraints && (config.constraints || []).some((c) => c.trim())
       ? { parameter_constraints: (config.constraints || []).filter((c) => c.trim()) }
       : {}),
+    ...((config.stopAfterNoImprovement || 0) > 0 ? { stop_after_no_improvement: config.stopAfterNoImprovement } : {}),
     sequence_template: sequenceTemplate,
   };
 }

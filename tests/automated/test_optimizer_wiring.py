@@ -618,3 +618,75 @@ async def test_optimizing_a_linked_workflow_runs_its_prep_and_cleanup_once():
         assert sum(1 for m, r in order if r == "teardown") == 1
         assert sum(1 for m, _ in order if m == "assay_method") == 3
         assert len([row for call in MockOptimizer.observe_calls for row in call]) == 3
+
+
+def test_no_improvement_counts_only_after_the_random_start_and_restarts_on_improvement():
+    from ivoryos_edge.queue import NoImprovement
+
+    rule = NoImprovement([{"name": "y", "minimize": False}], patience=2, random_start=2)
+    assert [rule.add(1, {"y": 5}), rule.add(2, {"y": 1})] == [False, False]  # random start: not counted
+    assert rule.add(3, {"y": 4}) is False
+    assert rule.add(4, {"y": 6}) is False  # improved: the count starts again
+    assert rule.add(5, {"y": 1}) is False
+    assert rule.add(6, {"y": 2}) is True
+
+    # Several objectives: any one improving is an improvement. Existing data sets the bar.
+    both = NoImprovement([{"name": "a", "minimize": True}, {"name": "b"}], patience=1, existing=[{"a": 1, "b": 1}])
+    assert both.add(1, {"a": 0.5, "b": 0}) is False
+    assert both.add(2, {"a": 2, "b": 0.5}) is True
+    assert NoImprovement([{"name": "y"}], patience=0).add(9, {"y": 0}) is False  # off
+
+
+@pytest.mark.asyncio
+async def test_optimization_run_stops_when_nothing_improves():
+    from ivoryos_edge.server import app as fastapi_app
+    fastapi_app.state.instruments["dummy"].counter = 0
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "name": "Test No Improvement",
+            "parameters": {
+                "type": "Optimization",
+                "optimizer": "mock",
+                "budget": 10,
+                "optimizer_config": {"step_1": {"model": "TestModel", "num_samples": 2}},
+                "parameter_space": [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}],
+                # counting_method returns 1, 2, 3, ...: minimized, only the first is ever an improvement.
+                "objective_config": [{"name": "y", "minimize": True}],
+                "stop_after_no_improvement": 3,
+                "sequence_template": [
+                    {"instrument": "dummy", "method": "counting_method", "params": {}, "returnVar": "y"}
+                ]
+            }
+        }
+        run_id = (await ac.post("/api/queue/runs", json=payload)).json()["run_id"]
+        run = None
+        for _ in range(200):  # up to 10 s: slower where Ax and BayBE are installed beside the edge
+            runs = (await ac.get("/api/queue/runs")).json()["runs"]
+            run = next((r for r in runs if r["id"] == run_id), None)
+            if run and run["status"] in ["completed", "error", "cancelled"]:
+                break
+            await asyncio.sleep(0.05)
+        assert run["status"] == "completed"
+        # Trial 2 is in the random start; trials 3, 4 and 5 do not improve: stop after 5, not 10.
+        assert len(run["steps"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_constraints_an_optimizer_cannot_keep_are_refused_before_the_run_is_queued():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        space = [{"name": "x", "type": "range", "bounds": [0.0, 1.0], "value_type": "float"}]
+        checked = (await ac.post("/api/optimizers/mock/constraints",
+                                 json={"constraints": ["x <= 0.5", "", "x * x <= 1"], "parameter_space": space})).json()
+        errors = [r["error"] for r in checked["results"]]
+        assert "does not take constraints" in errors[0]
+        assert errors[1] is None  # a blank row: nothing to say
+        assert "multiplies two parameters" in errors[2]
+
+        response = await ac.post("/api/queue/runs", json={"name": "refused", "parameters": {
+            "type": "Optimization", "optimizer": "mock", "budget": 2, "parameter_space": space,
+            "objective_config": [{"name": "y"}], "parameter_constraints": ["x <= 0.5"],
+            "sequence_template": [{"instrument": "dummy", "method": "counting_method", "params": {}, "returnVar": "y"}],
+        }})
+        assert response.status_code == 400
+        assert "does not take constraints" in response.json()["error"]

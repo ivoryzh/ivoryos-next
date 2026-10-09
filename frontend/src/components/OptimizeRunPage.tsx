@@ -2,7 +2,8 @@
 import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { API_BASE } from '@/config';
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Settings2, Info, Zap, ChevronDown, ChevronRight, Plus, X, ShieldCheck } from 'lucide-react';
+import { Settings2, Info, Zap, ChevronDown, ChevronRight, Plus, X, ShieldCheck, Lightbulb, Search, Loader2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Sidebar from '@/components/Sidebar';
 import RunTabs from '@/components/RunTabs';
@@ -15,6 +16,7 @@ import {
   getReturnLeaves,
   readNamedOutput,
   buildOptimizationParameters,
+  optimizationSearchSpace,
   resolveFixedBlock,
   getVarMode as sharedGetVarMode,
   getVarModeType as sharedGetVarModeType,
@@ -28,12 +30,11 @@ const OPTIMIZER_LABELS: Record<string, string> = {
   nimo: 'NIMO'
 };
 
-// A run-on "(needs parameters: a, b, c; objectives: d, e)" sentence is hard to scan — pill tags
-// read at a glance instead, and reuse the same visual language wherever these column names
-// need explaining (the "no compatible runs" message and the CSV upload requirement).
 // The Search Space and Objectives rows: a short field for a number, not a full-width box.
 const compactInput = 'h-7 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-md px-2 text-xs font-mono outline-none focus:border-accent';
 
+// What existing data must hold, from Data History or a CSV alike: said once, at the top of the
+// Existing Data card. Pill tags rather than a run-on "(needs parameters: a, b; objectives: c)".
 const RequiredColumns = ({ params, objectives }: { params: string[]; objectives: string[] }) => (
   <div className="flex flex-wrap items-center gap-1.5">
     <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide shrink-0">Requires</span>
@@ -133,7 +134,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
       objectives: saved.objectives || {},
       optimizer_config: saved.optimizer_config || {},
       earlyStopMode: saved.earlyStopMode || 'any',
-      constraints: saved.constraints || []
+      constraints: saved.constraints || [],
+      stopAfterNoImprovement: saved.stopAfterNoImprovement || 0
     };
   });
 
@@ -147,7 +149,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
       objectives: optConfig.objectives,
       optimizer_config: optConfig.optimizer_config,
       earlyStopMode: optConfig.earlyStopMode,
-      constraints: optConfig.constraints
+      constraints: optConfig.constraints,
+      stopAfterNoImprovement: optConfig.stopAfterNoImprovement
     }));
   }, [optConfig]);
 
@@ -372,6 +375,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
         returns,
         sequence,
         existingData,
+        supportsConstraints: !!optimizerSchemas[optConfig.optimizer]?.supports_constraints,
     });
     // Lets the edge time runs of a saved workflow (runtime.py).
     const savedName = unmodifiedSavedWorkflowName();
@@ -473,8 +477,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
   // A single "Range / Choice / Fixed" dropdown, collapsing what used to be an Optimize/Fixed
   // toggle plus a separate Range/Choice select into one control — mode and bounds.type both
   // change from the same select, in one state update so they can't end up disagreeing mid-render.
-  const getVarModeType = (v: string): 'range' | 'choice' | 'fixed' => sharedGetVarModeType(optConfig, v);
-  const setVarModeType = (v: string, value: 'range' | 'choice' | 'fixed') => {
+  const getVarModeType = (v: string): 'range' | 'choice' | 'substance' | 'fixed' => sharedGetVarModeType(optConfig, v);
+  const setVarModeType = (v: string, value: 'range' | 'choice' | 'substance' | 'fixed') => {
     setOptConfig({
       ...optConfig,
       bounds: {
@@ -482,7 +486,9 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
         [v]: {
           ...optConfig.bounds[v],
           mode: value === 'fixed' ? 'fixed' : 'optimize',
-          ...(value !== 'fixed' ? { type: value } : {})
+          ...(value !== 'fixed' ? { type: value } : {}),
+          ...(value === 'substance' && !(optConfig.bounds[v]?.substances || []).length
+            ? { substances: [{ name: '', smiles: '' }, { name: '', smiles: '' }] } : {})
         }
       }
     });
@@ -495,6 +501,96 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
   };
   const removeConstraint = (i: number) => {
     setOptConfig({ ...optConfig, constraints: (optConfig.constraints || []).filter((_: string, idx: number) => idx !== i) });
+  };
+  // A parameter name clicked under the constraints goes into the row last typed in.
+  const [constraintFocus, setConstraintFocus] = useState(0);
+  const insertIntoConstraint = (name: string) => {
+    const list: string[] = [...(optConfig.constraints || [])];
+    if (list.length === 0) list.push('');
+    const at = Math.min(constraintFocus, list.length - 1);
+    list[at] = list[at].trim() ? `${list[at].trimEnd()} ${name}` : name;
+    setOptConfig({ ...optConfig, constraints: list });
+  };
+  // What the edge says of each constraint, as it is typed (optimizer/constraints.py and the
+  // chosen optimizer's own rules): the same words a run would be refused with.
+  const [constraintErrors, setConstraintErrors] = useState<(string | null)[]>([]);
+  const constraintCheck = useRef(0);
+  const takesConstraints = !!optimizerSchemas[optConfig.optimizer]?.supports_constraints;
+  useEffect(() => {
+    const seq = ++constraintCheck.current;
+    const list: string[] = optConfig.constraints || [];
+    const timer = setTimeout(async () => {
+      if (!takesConstraints || !list.some(c => c.trim())) { setConstraintErrors([]); return; }
+      try {
+        const res = await fetch(`${API_BASE}/api/optimizers/${optConfig.optimizer}/constraints`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ constraints: list, parameter_space: optimizationSearchSpace(optConfig, variables) }),
+        });
+        const data = await res.json();
+        if (seq === constraintCheck.current) setConstraintErrors((data.results || []).map((r: any) => r.error || null));
+      } catch { /* the run's own check has the last word */ }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [optConfig, variables, takesConstraints]);
+
+  // Substances (BayBE with baybe[chem]): names the workflow receives, each with its SMILES.
+  const setSubstances = (v: string, substances: { name: string; smiles: string }[]) =>
+    setOptConfig({ ...optConfig, bounds: { ...optConfig.bounds, [v]: { ...optConfig.bounds[v], substances } } });
+  const [findingSmiles, setFindingSmiles] = useState<string | null>(null);
+  // PubChem's answer for a name, so nobody has to know SMILES by heart. Asked only when the
+  // person presses Find; the name is all that is sent.
+  const findSmiles = async (v: string, i: number) => {
+    const list = [...(optConfig.bounds[v]?.substances || [])];
+    const name = (list[i]?.name || '').trim();
+    if (!name) return;
+    setFindingSmiles(`${v}:${i}`);
+    try {
+      const res = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(name)}/property/SMILES/JSON`);
+      const props = res.ok ? (await res.json())?.PropertyTable?.Properties?.[0] : null;
+      const smiles = props?.SMILES || props?.IsomericSMILES || props?.CanonicalSMILES;
+      if (!smiles) throw new Error(`PubChem does not know "${name}". Paste its SMILES instead.`);
+      list[i] = { ...list[i], smiles };
+      setSubstances(v, list);
+    } catch (e: any) {
+      await notify(e.message?.includes('PubChem') ? e.message : `Could not reach PubChem (${e.message}). Paste the SMILES instead.`, { title: 'SMILES not found' });
+    } finally {
+      setFindingSmiles(null);
+    }
+  };
+
+  // Suggest-only campaigns (edge campaigns.py): suggestions without running the workflow, the
+  // results typed in on the campaign page whenever they are ready.
+  const router = useRouter();
+  const [campaigns, setCampaigns] = useState<any[]>([]);
+  const [startingCampaign, setStartingCampaign] = useState(false);
+  useEffect(() => {
+    if (stage) return;
+    fetch(`${API_BASE}/api/campaigns`).then(r => r.json()).then(d => setCampaigns(d.campaigns || [])).catch(() => {});
+  }, [stage]);
+  const suggestOnly = !!optimizerSchemas[optConfig.optimizer]?.supports_suggest_only;
+  const startCampaign = async () => {
+    if (startingCampaign) return;
+    let body: ReturnType<typeof buildBody>;
+    try {
+      body = buildBody();
+    } catch (err: any) {
+      await notify(err.message, { title: 'Check the configuration', tone: 'error' });
+      return;
+    }
+    setStartingCampaign(true);
+    try {
+      const name = experimentName.trim() || `${localStorage.getItem('ivoryos_editing_workflow') || 'Optimization'} suggestions`;
+      const res = await fetch(`${API_BASE}/api/campaigns`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, parameters: body.parameters }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'The edge refused the campaign.');
+      router.push(`/campaign?id=${data.id}`);
+    } catch (e: any) {
+      await notify(e.message, { title: 'Could not get suggestions', tone: 'error' });
+      setStartingCampaign(false);
+    }
   };
   const isPerIteration = (v: string): boolean => sharedIsPerIteration(optConfig, v);
   const setPerIteration = (v: string, on: boolean) => {
@@ -827,8 +923,9 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                     const guards = varGuards[v] || [];
                     const guardText = guards.map(g => guardHint(g, edgeStatus?.safety)).filter(Boolean).join(' · ');
                     const entered = perIter ? [] : mode === 'fixed' ? [bound.fixedValue]
+                      : bound.type === 'substance' ? (bound.substances || []).map((x: any) => x.name).filter(Boolean)
                       : bound.type === 'choice' ? String(bound.min || '').split(',').map(x => x.trim()) : [bound.min, bound.max];
-                    const refusedValue = entered.find(x => guardProblem(guards, x, edgeStatus?.safety));
+                    const refusedValue = entered.find((x: any) => guardProblem(guards, x, edgeStatus?.safety));
                     const refused = refusedValue !== undefined ? `${refusedValue} ${guardProblem(guards, refusedValue, edgeStatus?.safety)}` : '';
                     return (
                     <div key={v} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 min-w-0">
@@ -840,18 +937,27 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                         <>
                           <select
                              value={getVarModeType(v)}
-                             onChange={e => setVarModeType(v, e.target.value as 'range' | 'choice' | 'fixed')}
+                             onChange={e => setVarModeType(v, e.target.value as 'range' | 'choice' | 'substance' | 'fixed')}
                              className={`h-7 w-[84px] shrink-0 border rounded-md px-1.5 text-xs font-semibold outline-none ${mode === 'fixed' ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700/40 dark:text-amber-300' : 'bg-gray-50 border-gray-200 text-gray-800 dark:bg-white/5 dark:border-white/15 dark:text-gray-100'}`}
                           >
                              <option value="range">Range</option>
                              <option value="choice">Choice</option>
+                             {/* Chemicals by structure: BayBE with its chemistry extras only. */}
+                             {(optimizerSchemas[optConfig.optimizer]?.parameter_types || []).includes('substance') && (
+                               <option value="substance" disabled={!optimizerSchemas[optConfig.optimizer]?.substance_available}>
+                                 {optimizerSchemas[optConfig.optimizer]?.substance_available ? 'Substance' : 'Substance (needs BayBE chemistry)'}
+                               </option>
+                             )}
                              <option value="fixed">Fixed</option>
                           </select>
-                          {mode === 'optimize' && bound.type !== 'choice' && (
+                          {mode === 'optimize' && bound.type !== 'choice' && bound.type !== 'substance' && (
                             <span className="inline-flex items-center gap-1">
                               <input type="text" placeholder="min" value={bound.min || ''} onChange={e => setBound({ min: e.target.value })} className={`${compactInput} w-20`} />
                               <span className="text-xs text-gray-400">to</span>
                               <input type="text" placeholder="max" value={bound.max || ''} onChange={e => setBound({ max: e.target.value })} className={`${compactInput} w-20`} />
+                              {/* Optional: a grid of values (2 to 10 by 2) instead of anything in between. */}
+                              <span className="text-xs text-gray-400">by</span>
+                              <input type="text" placeholder="any" title="Step: only min, min+step, ... max are tried. Leave blank for any value in between." value={bound.step || ''} onChange={e => setBound({ step: e.target.value })} className={`${compactInput} w-14`} />
                             </span>
                           )}
                           {mode === 'optimize' && bound.type === 'choice' && (
@@ -860,7 +966,46 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                           {mode === 'fixed' && (
                             <input type="text" placeholder="value" title="Used every iteration" value={bound.fixedValue || ''} onChange={e => setBound({ fixedValue: e.target.value })} className={`${compactInput} w-28 focus:border-amber-500`} />
                           )}
+                          {mode === 'optimize' && bound.type === 'substance' && (
+                            <select
+                               value={bound.encoding || 'MORDRED'}
+                               onChange={e => setBound({ encoding: e.target.value })}
+                               title="How the model describes each substance: Mordred descriptors (the default, good for solvents and reagents), ECFP fingerprints (quicker, suits large varied sets), or RDKit 2D descriptors"
+                               className={`${compactInput} w-32`}
+                            >
+                              {(optimizerSchemas[optConfig.optimizer]?.substance_encodings || ['MORDRED']).map((enc: string) => <option key={enc} value={enc}>{enc}</option>)}
+                            </select>
+                          )}
                         </>
+                      )}
+                      {!perIter && mode === 'optimize' && bound.type === 'substance' && (
+                        // One line per substance, under the row: the name the workflow gets, and the
+                        // SMILES the model reads it by.
+                        <div className="basis-full order-last pl-40 space-y-1 pb-1">
+                          {(bound.substances || []).map((sub: { name: string; smiles: string }, i: number) => {
+                            const list = bound.substances || [];
+                            const change = (patch: Partial<{ name: string; smiles: string }>) => setSubstances(v, list.map((x: any, j: number) => (j === i ? { ...x, ...patch } : x)));
+                            return (
+                              <div key={i} className="flex items-center gap-1.5">
+                                <input type="text" placeholder="name, e.g. methanol" value={sub.name} onChange={e => change({ name: e.target.value })} className={`${compactInput} w-40`} />
+                                <input type="text" placeholder="SMILES, e.g. CO" value={sub.smiles} onChange={e => change({ smiles: e.target.value })} className={`${compactInput} w-52`} />
+                                <button
+                                  type="button"
+                                  onClick={() => findSmiles(v, i)}
+                                  disabled={!sub.name.trim() || findingSmiles === `${v}:${i}`}
+                                  title="Look the SMILES up on PubChem by this name"
+                                  className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-40 dark:text-gray-300 dark:hover:bg-white/10"
+                                >
+                                  {findingSmiles === `${v}:${i}` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />} Find
+                                </button>
+                                <button type="button" title="Remove" onClick={() => setSubstances(v, list.filter((_: any, j: number) => j !== i))} className="h-7 w-7 inline-flex items-center justify-center rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"><X className="w-3.5 h-3.5" /></button>
+                              </div>
+                            );
+                          })}
+                          <button type="button" onClick={() => setSubstances(v, [...(bound.substances || []), { name: '', smiles: '' }])} className="flex items-center gap-1 text-xs font-medium text-accent-fg hover:text-accent">
+                            <Plus className="w-3.5 h-3.5" /> Add substance
+                          </button>
+                        </div>
                       )}
                       {guardText && (
                         <span title={refused ? `Safety guard: ${refused}` : 'What the safety guard allows for this value'}
@@ -985,39 +1130,85 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                       })}
                     </div>
                 )}
+                {returns.length > 0 && (
+                  // Stop once the search has gone flat. Counted after the random start, where
+                  // points are not expected to improve on each other (queue.py NoImprovement).
+                  <label
+                    title="The random start (the first phase's samples) is not counted: random points are not expected to improve on each other, and counting them could stop the run just as the model takes over."
+                    className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={(optConfig.stopAfterNoImprovement || 0) > 0}
+                      onChange={e => setOptConfig({ ...optConfig, stopAfterNoImprovement: e.target.checked ? 5 : 0 })}
+                      className="w-3.5 h-3.5 accent-gray-900 dark:accent-white"
+                    />
+                    <span>Stop when no objective has improved for</span>
+                    <input
+                      type="number" min="1"
+                      disabled={!((optConfig.stopAfterNoImprovement || 0) > 0)}
+                      value={(optConfig.stopAfterNoImprovement || 0) > 0 ? optConfig.stopAfterNoImprovement : 5}
+                      onChange={e => setOptConfig({ ...optConfig, stopAfterNoImprovement: Math.max(1, parseInt(e.target.value) || 1) })}
+                      className={`${compactInput} w-14 disabled:opacity-50`}
+                    />
+                    <span>iterations in a row</span>
+                  </label>
+                )}
               </div>
 
-              {optConfig.optimizer === 'ax' && (
+              {takesConstraints && (
                 <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-white/10 rounded-xl shadow-sm p-4">
-                  <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-1">Constraints <span className="text-xs font-normal text-gray-400">(optional, Ax only)</span></h3>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">Linear relationships between optimized parameters, e.g. <code className="font-mono text-[11px] bg-gray-100 dark:bg-white/5 px-1 py-0.5 rounded">flow_rate + temperature &lt;= 100</code>.</p>
+                  <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-1">Constraints <span className="text-xs font-normal text-gray-400">(optional)</span></h3>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
+                    Sums of the searched parameters, each times a number:{' '}
+                    <code className="font-mono text-[11px] bg-gray-100 dark:bg-white/5 px-1 py-0.5 rounded">flow_rate + 2*temperature &lt;= 100</code>,{' '}
+                    <code className="font-mono text-[11px] bg-gray-100 dark:bg-white/5 px-1 py-0.5 rounded">a &gt;= b</code>, or an exact total like{' '}
+                    <code className="font-mono text-[11px] bg-gray-100 dark:bg-white/5 px-1 py-0.5 rounded">a + b + c = 1</code>.
+                    {optConfig.optimizer === 'ax' && ' Ax keeps an = exactly by working the last decimal parameter out from the others.'}
+                  </p>
                   <div className="space-y-2">
                     {(optConfig.constraints || []).map((c: string, i: number) => (
-                      <div key={i} className="flex items-center gap-2">
-                        <input
-                           type="text"
-                           value={c}
-                           onChange={e => updateConstraint(i, e.target.value)}
-                           placeholder="e.g. x + y <= 10"
-                           className="flex-1 min-w-0 bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm font-mono outline-none focus:border-accent"
-                        />
-                        <button
-                           type="button"
-                           onClick={() => removeConstraint(i)}
-                           title="Remove constraint"
-                           className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
+                      <div key={i}>
+                        <div className="flex items-center gap-2">
+                          <input
+                             type="text"
+                             value={c}
+                             onChange={e => updateConstraint(i, e.target.value)}
+                             onFocus={() => setConstraintFocus(i)}
+                             placeholder="e.g. x + y <= 10"
+                             className={`flex-1 min-w-0 bg-white dark:bg-black border rounded-lg px-3 py-2 text-sm font-mono outline-none ${constraintErrors[i] ? 'border-red-300 dark:border-red-500/50 focus:border-red-500' : 'border-gray-200 dark:border-white/10 focus:border-accent'}`}
+                          />
+                          <button
+                             type="button"
+                             onClick={() => removeConstraint(i)}
+                             title="Remove constraint"
+                             className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                        {constraintErrors[i] && <p className="mt-1 text-xs text-red-600 dark:text-red-400">{constraintErrors[i]}</p>}
                       </div>
                     ))}
-                    <button
-                       type="button"
-                       onClick={addConstraint}
-                       className="flex items-center gap-1.5 text-xs font-medium text-accent-fg hover:text-accent transition-colors"
-                    >
-                      <Plus className="w-3.5 h-3.5" /> Add constraint
-                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                         type="button"
+                         onClick={addConstraint}
+                         className="flex items-center gap-1.5 text-xs font-medium text-accent-fg hover:text-accent transition-colors mr-2"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Add constraint
+                      </button>
+                      {/* The searched parameters, to click into the row last typed in. */}
+                      {requiredParamNames.map(name => (
+                        <button
+                          key={name} type="button" onClick={() => insertIntoConstraint(name)}
+                          title={`Add ${name} to the constraint`}
+                          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10"
+                        >
+                          {name}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1030,6 +1221,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                   <div className="text-sm text-gray-500">Configure at least one optimized parameter and one objective above to attach existing data.</div>
                 ) : (
                   <div className="space-y-4">
+                    <RequiredColumns params={requiredParamNames} objectives={returns} />
                     <div>
                       <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 block">From Data History</label>
                       {(() => {
@@ -1038,10 +1230,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                           .map((run: any) => ({ run, points: extractOptimizationRows(run).length }))
                           .filter(x => x.points > 0);
                         if (usable.length === 0) return (
-                          <div className="space-y-1.5">
-                            <p className="text-xs text-gray-400 dark:text-gray-500 italic">No past optimization runs with data for this search space and these objectives.</p>
-                            <RequiredColumns params={requiredParamNames} objectives={returns} />
-                          </div>
+                          <p className="text-xs text-gray-400 dark:text-gray-500 italic">No past optimization runs with data for this search space and these objectives.</p>
                         );
                         const picked = usable.filter(x => selectedHistoryIds.includes(x.run.id));
                         const pickedPoints = picked.reduce((n, x) => n + x.points, 0);
@@ -1093,9 +1282,6 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                         onChange={e => e.target.files?.[0] && handleUploadCSV(e.target.files[0])}
                         className="text-xs text-gray-500 dark:text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-gray-100 dark:file:bg-white/10 file:text-gray-700 dark:file:text-gray-200 hover:file:bg-gray-200 dark:hover:file:bg-white/20"
                       />
-                      <div className="mt-1.5">
-                        <RequiredColumns params={requiredParamNames} objectives={returns} />
-                      </div>
                       {uploadFileName && !uploadError && (
                         <p className="text-xs text-teal-600 dark:text-teal-400 mt-1">{uploadFileName}: {uploadedExistingRows.length} row(s) loaded.</p>
                       )}
@@ -1109,19 +1295,51 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                 )}
               </div>
 
+              {!stage && campaigns.length > 0 && (
+                <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-white/10 rounded-xl shadow-sm p-4">
+                  <h3 className="text-sm font-bold text-gray-800 dark:text-white mb-1">Suggest-only campaigns</h3>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-2">Suggestions you are running yourself. Open one to type results in or ask for more.</p>
+                  <ul className="divide-y divide-gray-100 dark:divide-white/5">
+                    {campaigns.slice(0, 6).map(c => (
+                      <li key={c.id}>
+                        <Link href={`/campaign?id=${c.id}`} className="flex items-center gap-3 py-1.5 text-sm hover:text-accent-fg">
+                          <Lightbulb className="w-3.5 h-3.5 shrink-0 text-gray-400" />
+                          <span className="flex-1 min-w-0 truncate">{c.name}</span>
+                          <span className="shrink-0 text-xs text-gray-400">
+                            {c.done} with results{c.waiting ? ` · ${c.waiting} waiting` : ''}
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <div className="flex flex-col items-end pt-4 gap-2">
                 {optimizersLoaded && Object.keys(optimizerSchemas).length === 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">No optimizer installed. In the IvoryOS app: this deck&apos;s Settings, Optimizers. Otherwise pip install ax-platform, baybe or nimo.</p>
                 )}
-                {!stage && <input
+                {/* One row: the name, then Suggest only beside Start rather than stacked above it. */}
+                {!stage && <div className="flex flex-wrap items-center justify-end gap-2">
+                <input
                   type="text"
                   value={experimentName}
                   onChange={e => setExperimentName(e.target.value)}
                   placeholder="Experiment name (optional)"
                   title="Shown in Data History instead of the default run label"
                   className="w-56 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-purple-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-500"
-                />}
-                {!stage && <button
+                />
+                {!editing && suggestOnly && <button
+                  type="button"
+                  onClick={startCampaign}
+                  disabled={!optConfig.optimizer || startingCampaign}
+                  title="Get suggestions without running the workflow: run the experiments yourself and type each result in, now or days later, then ask for more"
+                  className="flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold border border-purple-200 text-purple-700 hover:bg-purple-50 disabled:opacity-50 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-500/10"
+                >
+                  {startingCampaign ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lightbulb className="w-4 h-4" />}
+                  <span>{startingCampaign ? 'Asking for suggestions…' : 'Suggest only'}</span>
+                </button>}
+                <button
                   onClick={startOptimization}
                   disabled={!optConfig.optimizer || isStarting}
                   className="flex items-center space-x-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition-colors font-bold shadow-lg shadow-purple-500/20"
@@ -1137,7 +1355,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                       <span>{editing ? 'Save changes' : queueBusy ? 'Add to Queue' : 'Start Optimization'}</span>
                     </>
                   )}
-                </button>}
+                </button>
+                </div>}
               </div>
             </div>
           )}

@@ -29,3 +29,35 @@ for _name, (_package, _module, _cls) in _BACKENDS.items():
     except Exception as e:
         OPTIMIZER_ERRORS[_name] = f"{type(e).__name__}: {e}"
         print(f"[optimizer] {_name} is installed but could not be loaded: {OPTIMIZER_ERRORS[_name]}", file=sys.stderr)
+
+
+def check_constraints(name, texts, parameter_space):
+    """Each constraint as typed, with why optimizer `name` cannot use it, or None where it can.
+
+    Reading first (constraints.py), then the backend's own rules (`check_constraints` on its
+    adapter). One entry per text, blanks included, so a page can put each message by its row. The
+    Optimize page asks this as constraints are typed; `prepare_run` asks it before queueing, so a
+    run is refused with the same words instead of failing once it starts.
+    """
+    from .constraints import ConstraintError, parse
+    names = [p.get("name") for p in parameter_space or []]
+    cls = OPTIMIZER_REGISTRY.get(name)
+    results, parsed, at = [], [], []
+    for text in texts or []:
+        if not str(text or "").strip():
+            results.append({"text": text, "error": None})
+            continue
+        try:
+            con = parse(str(text), names)
+        except ConstraintError as e:
+            results.append({"text": text, "error": str(e)})
+            continue
+        results.append({"text": text, "error": None})
+        parsed.append(con)
+        at.append(len(results) - 1)
+    if parsed:
+        problems = (cls.check_constraints(parsed, parameter_space) if cls
+                    else [f"'{c.text}': the {name} optimizer is not installed here." for c in parsed])
+        for i, problem in zip(at, problems):
+            results[i]["error"] = problem
+    return results

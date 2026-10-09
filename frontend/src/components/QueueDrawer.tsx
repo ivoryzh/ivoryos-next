@@ -129,8 +129,7 @@ export default function QueueDrawer() {
     <>
       <div className="fixed inset-0 z-[10000] bg-black/20 dark:bg-black/40" onClick={() => setOpen(false)} />
       <aside
-        className="fixed inset-y-0 z-[10001] w-[22rem] max-w-[90vw] flex flex-col bg-white dark:bg-[#141414] border-l border-gray-200 dark:border-white/10 shadow-2xl"
-        style={{ right: 'var(--ivoryos-dock-right, 0px)' }}
+        className="fixed inset-y-0 right-0 z-[10001] w-[22rem] max-w-[90vw] flex flex-col bg-white dark:bg-[#141414] border-l border-gray-200 dark:border-white/10 shadow-2xl"
       >
         <div className="h-12 shrink-0 px-4 flex items-center gap-2 border-b border-gray-200 dark:border-white/10">
           <ListTodo className="w-4 h-4 text-gray-400" />

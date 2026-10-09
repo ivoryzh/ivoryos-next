@@ -2,8 +2,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowLeft, Bot, Camera, CheckCircle2, Cpu, Droplets, ExternalLink, FileText, FlaskConical, FlaskRound, Gauge,
-  GitBranch, Globe, GraduationCap, Layers, Loader2, Lock, Microscope, Package, Puzzle, Scale, Search, Sparkles, Star, Syringe,
-  Thermometer, Wind, type LucideIcon,
+  GitBranch, Globe, GraduationCap, Layers, Loader2, Lock, Microscope, Package, Puzzle, RotateCw, Scale, Search, Sparkles, Star, Syringe,
+  Thermometer, WifiOff, Wind, type LucideIcon,
 } from 'lucide-react';
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { Deck, DesktopApi, HubLinkRequest, HubModule, HubPlatform, HubPlugin, HubTemplate } from '@/desktop';
@@ -28,18 +28,23 @@ type Chosen =
   | { kind: 'plugin'; plugin: HubPlugin }
   | { kind: 'template'; template: HubTemplate }
   | { kind: 'link'; request: HubLinkRequest };
-type Loaded<T> = { items: T[] | null; error: string | null };
+/** `offline`: this computer is not on the internet (hubCatalog.js), which gets its own message. */
+type Loaded<T> = { items: T[] | null; error: string | null; offline?: boolean };
 
-/** Load one catalog list once; `items` is null until it arrives, [] (with `error`) if it failed. */
-function useCatalog<T>(load: () => Promise<T[]>): Loaded<T> {
-  const [state, setState] = useState<Loaded<T>>({ items: null, error: null });
+/**
+ * Load one catalog list, again each time `attempt` changes (Try again); `items` is null until it
+ * arrives, [] (with `error`) if it failed.
+ */
+function useCatalog<T>(load: () => Promise<T[]>, attempt: number): Loaded<T> {
+  const [state, setState] = useState<Loaded<T> & { load?: unknown; attempt?: number }>({ items: null, error: null });
   useEffect(() => {
     let cancelled = false;
-    load().then(items => { if (!cancelled) setState({ items, error: null }); })
-      .catch(e => { if (!cancelled) setState({ items: [], error: e.message }); });
+    load().then(items => { if (!cancelled) setState({ items, error: null, load, attempt }); })
+      .catch(e => { if (!cancelled) setState({ items: [], error: e.message, offline: e.code === 'offline', load, attempt }); });
     return () => { cancelled = true; };
-  }, [load]);
-  return state;
+  }, [load, attempt]);
+  // An answer to an earlier request is not shown as this one's: asked again, the list is loading.
+  return state.load === load && state.attempt === attempt ? state : { items: null, error: null };
 }
 
 const KINDS: { kind: ListKind; label: string; icon: LucideIcon; noun: string }[] = [
@@ -145,10 +150,13 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, initial
     </div>
   );
 
-  const modules = useCatalog(useCallback(() => api.hubBrowse().then(r => r.modules), [api]));
-  const platforms = useCatalog(useCallback(() => api.hubPlatforms().then(r => r.platforms), [api]));
-  const plugins = useCatalog(useCallback(() => api.hubPlugins().then(r => r.plugins), [api]));
-  const templates = useCatalog(useCallback(() => api.hubTemplates().then(r => r.templates), [api]));
+  // Bumped by Try again, which asks for every list again (offline, they all failed together).
+  const [attempt, setAttempt] = useState(0);
+  const retry = () => setAttempt(n => n + 1);
+  const modules = useCatalog(useCallback(() => api.hubBrowse().then(r => r.modules), [api]), attempt);
+  const platforms = useCatalog(useCallback(() => api.hubPlatforms().then(r => r.platforms), [api]), attempt);
+  const plugins = useCatalog(useCallback(() => api.hubPlugins().then(r => r.plugins), [api]), attempt);
+  const templates = useCatalog(useCallback(() => api.hubTemplates().then(r => r.templates), [api]), attempt);
 
   // The deck the browser adds to: templates are checked against it, and platform drivers are
   // named clear of what is already on it.
@@ -184,6 +192,10 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, initial
     };
   }, [modules.items, platforms.items, plugins.items, templates.items, starred, words]);
   const starredCount = Object.values(starredLists).reduce((n, l) => n + l.length, 0);
+  // Starred items are found in the lists, so until they arrive (or when they could not) there is
+  // nothing to say about what is starred.
+  const failed = [modules, platforms, plugins, templates].find(l => l.error);
+  const pending = [modules, platforms, plugins, templates].some(l => l.items === null);
   const cards = {
     instruments: (m: HubModule) => withStar(`module:${m.id}`, <ModuleCard module={m} onPick={() => setChosen({ kind: 'instrument', module: m })} />),
     platforms: (p: HubPlatform) => withStar(`platform:${p.id}`, <PlatformCard platform={p} onPick={() => setChosen({ kind: 'platform', platform: p })} />),
@@ -293,7 +305,11 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, initial
 
               <div className="flex-1 overflow-y-auto p-4">
                 {kind === 'starred' ? (
-                  starredCount === 0 ? (
+                  starredCount === 0 && failed ? (
+                    <Unreachable loaded={failed} onRetry={retry} />
+                  ) : starredCount === 0 && pending ? (
+                    <Loading what="starred items from the Hub" />
+                  ) : starredCount === 0 ? (
                     <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1">
                       <p>{query ? <>Nothing starred matches &ldquo;{query}&rdquo;.</> : 'Nothing starred yet.'}</p>
                       {!query && <p className="flex items-center gap-1">Star the drivers, platforms, plugins and workflows you use, with <Star className="w-3.5 h-3.5" /> on their card, and they wait here.</p>}
@@ -314,7 +330,7 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, initial
                     </div>
                   )
                 ) : (
-                  <KindList kind={kind} scope={scope} query={query} category={category} hubUrl={hubUrl} loaded={loaded[kind]}
+                  <KindList kind={kind} scope={scope} query={query} category={category} hubUrl={hubUrl} loaded={loaded[kind]} onRetry={retry}
                     count={kind === 'instruments' ? shownInstruments.length : lists[kind].length}>
                     {kind === 'instruments' && shownInstruments.map(cards.instruments)}
                     {kind === 'platforms' && lists.platforms.map(cards.platforms)}
@@ -331,16 +347,45 @@ export default function HubBrowser({ api, profile, newDeck, initialKind, initial
   );
 }
 
+/**
+ * The Hub could not be read. Offline is the usual reason and says plainly to connect; anything
+ * else shows what went wrong. Both offer another try, since the cause is usually passing.
+ */
+function Unreachable({ loaded, onRetry }: { loaded: Loaded<unknown>; onRetry: () => void }) {
+  if (loaded.offline) {
+    return (
+      <div className="max-w-sm mx-auto mt-12 text-center space-y-3">
+        <WifiOff className="w-8 h-8 mx-auto text-gray-400" />
+        <div className="text-base font-semibold text-gray-900 dark:text-gray-100">No internet connection</div>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          Browsing the Automation Hub needs the internet. Connect, then try again. Decks you already set up keep working offline.
+        </p>
+        <Button onClick={onRetry}><RotateCw className="w-4 h-4" /> Try again</Button>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-3">
+      <ErrorBox>
+        <div className="flex items-start gap-3">
+          <span className="flex-1">{loaded.error}</span>
+          <Button small onClick={onRetry}><RotateCw className="w-3.5 h-3.5" /> Try again</Button>
+        </div>
+      </ErrorBox>
+    </div>
+  );
+}
+
 /** A list's loading and error states, its count, and what to say when it is empty. */
-function KindList({ kind, scope, query, category, hubUrl, loaded, count, children }: {
+function KindList({ kind, scope, query, category, hubUrl, loaded, onRetry, count, children }: {
   kind: ListKind; scope: Scope; query: string; category: string | null; hubUrl: string;
-  loaded: Loaded<unknown>; count: number; children: React.ReactNode;
+  loaded: Loaded<unknown>; onRetry: () => void; count: number; children: React.ReactNode;
 }) {
   const noun = KINDS.find(k => k.kind === kind)!.noun;
   if (loaded.items === null) return <Loading what={`${noun}s from the Hub`} />;
   return (
     <>
-      {loaded.error && <div className="mb-3"><ErrorBox>{loaded.error}</ErrorBox></div>}
+      {loaded.error && <Unreachable loaded={loaded} onRetry={onRetry} />}
       {count === 0 && !loaded.error && (
         <div className="text-sm text-gray-500 dark:text-gray-400 space-y-2">
           {scope === 'private' && !query

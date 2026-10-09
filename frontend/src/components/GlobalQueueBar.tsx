@@ -7,6 +7,7 @@ import { decideFailure, stopGracefully } from '@/runControl';
 import { setPromptMinimized } from '@/inputPrompt';
 import { openQueue } from './QueueDrawer';
 import { notify } from '@ivoryos/shared-ui';
+import { buildProgress, positionText } from './RunProgress';
 
 export default function GlobalQueueBar() {
   const [activeRun, setActiveRun] = useState<any>(null);
@@ -109,7 +110,7 @@ export default function GlobalQueueBar() {
         type="button"
         onClick={openQueue}
         title={pendingCount > 0 ? `Platform is idle — ${pendingCount} run${pendingCount === 1 ? '' : 's'} waiting in the queue` : 'Platform is idle'}
-        className="fixed bottom-4 right-[calc(var(--ivoryos-dock-right,0px)+1rem)] z-[9999] flex items-center gap-2 px-3 py-2 rounded-full border border-gray-200 dark:border-white/10 bg-white/90 dark:bg-gray-900/90 backdrop-blur shadow-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+        className="fixed bottom-4 right-4 z-[9999] flex items-center gap-2 px-3 py-2 rounded-full border border-gray-200 dark:border-white/10 bg-white/90 dark:bg-gray-900/90 backdrop-blur shadow-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
       >
         {pendingCount > 0 && status?.queue_paused ? (
           <>
@@ -148,7 +149,7 @@ export default function GlobalQueueBar() {
   const currentStep = activeRun.steps?.find((s: any) => s.status === 'running' || s.status === 'pending');
 
   return (
-    <div className={`fixed bottom-4 right-[calc(var(--ivoryos-dock-right,0px)+1rem)] z-[9999] transition-all duration-300 ease-in-out ${expanded ? 'w-[400px]' : 'w-[320px]'}`}>
+    <div className={`fixed bottom-4 right-4 z-[9999] transition-all duration-300 ease-in-out ${expanded ? 'w-[400px]' : 'w-[320px]'}`}>
       <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-white/10 shadow-2xl overflow-hidden flex flex-col">
         {/* Progress Bar (Top edge) */}
         <div className="h-1.5 w-full bg-gray-100 dark:bg-white/5">
@@ -172,7 +173,7 @@ export default function GlobalQueueBar() {
                 <div className="flex flex-col min-w-0">
                     <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeRun.name}</span>
                     <span className="text-[11px] text-gray-500 font-medium truncate">
-                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : waitingDecision ? 'a step failed: decide' : graceful ? 'stopping after this iteration' : activeRun.status} · {startedSteps}/{totalSteps} steps
+                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : waitingDecision ? 'a step failed: decide' : graceful ? 'stopping after this iteration' : activeRun.status} · <span title={`${startedSteps} of ${totalSteps} steps`}>{positionText(buildProgress(activeRun))}</span>
                     </span>
                 </div>
             </div>

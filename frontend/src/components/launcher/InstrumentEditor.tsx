@@ -59,7 +59,7 @@ export default function InstrumentEditor({ api, profileId, entry, seed, running,
 
   return (
     <Modal
-      title={entry ? `Edit ${entry.name}` : seed?.from ? `Add ${seed.class} from ${seed.from}` : 'Add an instrument by hand'}
+      title={entry ? `Edit ${entry.name}` : seed?.from ? `Add ${seed.class} from ${seed.from}` : 'Add an installed driver'}
       onClose={onClose}
       footer={<>
         <Button onClick={onClose}>Cancel</Button>
@@ -78,9 +78,19 @@ export default function InstrumentEditor({ api, profileId, entry, seed, running,
             <span className="font-mono"> · {entry.import}.{entry.class}</span>
           </p>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Import from"><input value={importPath} onChange={e => setImportPath(e.target.value)} placeholder="vendor_pumps.syringe" className={`${inputClass} font-mono`} /></Field>
-            <Field label="Class"><input value={className} onChange={e => setClassName(e.target.value)} placeholder="SyringePump" className={`${inputClass} font-mono`} /></Field>
+          <div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Import from"><input value={importPath} onChange={e => setImportPath(e.target.value)} placeholder="vendor_pumps.syringe" className={`${inputClass} font-mono`} /></Field>
+              <Field label="Class"><input value={className} onChange={e => setClassName(e.target.value)} placeholder="SyringePump" className={`${inputClass} font-mono`} /></Field>
+            </div>
+            {/* The deck only records where the class is; the edge imports it when the deck starts. */}
+            {!entry && !seed?.from && (
+              <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                Nothing is installed here: the module must already be importable by IvoryOS&apos;s Python (a package from the Hub, a
+                private repository, or <span className="font-mono">pip install</span> into the interpreter shown in Settings). A driver
+                that is a .py file of your own is easier as a deck from a Python script.
+              </p>
+            )}
           </div>
         )}
         {defs.length > 0 && (

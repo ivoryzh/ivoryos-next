@@ -1,8 +1,8 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 
-import React, { useEffect, useRef, useState } from 'react';
-import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PanelRight, Gauge, Menu, HandHelping, Minimize2, ShieldCheck } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PictureInPicture2, Gauge, Menu, HandHelping, Minimize2, ShieldCheck } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
@@ -11,6 +11,7 @@ import { inDesktopApp, useNavPlacement, TopNavBar, TopNavBrand, TopNavItem, TopN
 import { lastRunTabHref, runTabForPath, samePath } from './RunTabs';
 import RunDecision from './RunDecision';
 import RunNotifier from './RunNotifier';
+import PluginMenu, { type PluginMenuAt } from './PluginMenu';
 
 // The theme is not chosen here: every page follows one setting (ThemeSync in the root layout; in
 // the desktop app, the app's own Settings). See packages/shared-ui/src/theme.tsx.
@@ -27,6 +28,13 @@ export default function Sidebar() {
   const [runHref, setRunHref] = useState('/execution');
   const pathname = usePathname();
   const panel = usePanel();
+  // A plugin entry's right-click menu: window, full size or a page (PluginMenu).
+  const [pluginMenu, setPluginMenu] = useState<PluginMenuAt | null>(null);
+  const closePluginMenu = useCallback(() => setPluginMenu(null), []);
+  const menuFor = (p: PluginMenuAt['plugin']) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    setPluginMenu({ plugin: p, x: e.clientX, y: e.clientY });
+  };
   // Sidebar or top bar (shared-ui navPlacement.tsx): the same entries, laid out along the other axis.
   const [placement] = useNavPlacement();
   // Inside the desktop app the top bar leaves out the wordmark. Read after mount, like the rest.
@@ -150,12 +158,13 @@ export default function Sidebar() {
   };
 
   const panelItem = (p: { id: string; name: string; placement?: string }) => {
-    const isOpen = panel.open === p.id && !panel.minimized;
+    const isOpen = panel.open === p.id;
     return (
       <button
         type="button"
-        onClick={() => (isOpen ? setPanel({ minimized: true }) : openInPanel(p.id, p.placement))}
-        title={isOpen ? `Minimize ${p.name}` : `Show ${p.name} beside the page`}
+        onClick={() => (isOpen ? setPanel({ open: null }) : openInPanel(p.id, p.placement))}
+        onContextMenu={menuFor(p)}
+        title={isOpen ? `Close ${p.name}` : `Open ${p.name} over the page (right-click: window, full size or page)`}
         className={`w-[calc(100%-1.5rem)] flex items-center py-3 rounded-lg overflow-hidden mx-3 text-left ${
           isOpen
             ? 'bg-accent-soft text-accent-fg'
@@ -163,7 +172,7 @@ export default function Sidebar() {
         }`}
       >
         <div className="w-5 h-5 flex justify-center shrink-0 ml-3">
-          <PanelRight className="w-5 h-5 shrink-0" />
+          <PictureInPicture2 className="w-5 h-5 shrink-0" />
         </div>
         {isExpanded && <span className="ml-4 whitespace-nowrap truncate">{p.name}</span>}
       </button>
@@ -225,28 +234,34 @@ export default function Sidebar() {
       <TopNavDivider />
       <TopNavItem link={Link} href="/library" label="Library" icon={<Library className="w-4 h-4 shrink-0" />} active={isOn('/library')} labelFrom="sm" />
       <TopNavItem link={Link} href="/designer" label="Designer" icon={<Workflow className="w-4 h-4 shrink-0" />} active={isOn('/designer')} labelFrom="sm" />
-      <TopNavItem link={Link} href={runEntryHref} label="Run" icon={<Play className="w-4 h-4 shrink-0" />} active={isOn(runEntryHref, ['/once', '/execution', '/optimize', '/stages'])} labelFrom="sm" />
+      <TopNavItem link={Link} href={runEntryHref} label="Run" icon={<Play className="w-4 h-4 shrink-0" />} active={isOn(runEntryHref, ['/once', '/execution', '/optimize', '/stages', '/campaign'])} labelFrom="sm" />
       <TopNavItem link={Link} href="/data" label="Data" icon={<Table2 className="w-4 h-4 shrink-0" />} active={isOn('/data')} labelFrom="sm" />
       <TopNavDivider />
       <TopNavItem link={Link} href="/instruments" label="Instruments" icon={<Gauge className="w-4 h-4 shrink-0" />} active={isOn('/instruments')} labelFrom="sm" />
       <TopNavItem link={Link} href="/safety" label="Safety" icon={<ShieldCheck className="w-4 h-4 shrink-0" />} active={isOn('/safety')} labelFrom="sm" />
       {plugins.length > 0 && <TopNavDivider />}
-      {/* A panel plugin opens beside the page and stays there as you move around (lit while it
+      {/* A panel plugin opens over the page and stays there as you move around (lit while it
           shows); a tab plugin is a page of its own. */}
+      {/* Right-click any of them for the window, full size or a page of its own (PluginMenu). */}
       {plugins.map(p => {
         if (!isPanelPlugin(p)) {
-          return <TopNavItem key={p.id} link={Link} href={`/plugin?id=${p.id}`} label={p.name} icon={<Plug className="w-4 h-4 shrink-0" />} active={isOn(`/plugin?id=${p.id}`)} labelFrom="lg" />;
+          return (
+            <span key={p.id} className="contents" onContextMenu={menuFor(p)}>
+              <TopNavItem link={Link} href={`/plugin?id=${p.id}`} label={p.name} icon={<Plug className="w-4 h-4 shrink-0" />} active={isOn(`/plugin?id=${p.id}`)} labelFrom="lg" />
+            </span>
+          );
         }
-        const isOpen = panel.open === p.id && !panel.minimized;
+        const isOpen = panel.open === p.id;
         return (
-          <TopNavButton
-            key={p.id}
-            onClick={() => (isOpen ? setPanel({ minimized: true }) : openInPanel(p.id, p.placement))}
-            title={isOpen ? `Minimize ${p.name}` : `Show ${p.name} beside the page`}
-            label={p.name}
-            icon={<PanelRight className="w-4 h-4 shrink-0" />}
-            active={isOpen}
-          />
+          <span key={p.id} className="contents" onContextMenu={menuFor(p)}>
+            <TopNavButton
+              onClick={() => (isOpen ? setPanel({ open: null }) : openInPanel(p.id, p.placement))}
+              title={isOpen ? `Close ${p.name}` : `Open ${p.name} over the page (right-click: window, full size or page)`}
+              label={p.name}
+              icon={<PictureInPicture2 className="w-4 h-4 shrink-0" />}
+              active={isOpen}
+            />
+          </span>
         );
       })}
     </TopNavBar>
@@ -256,6 +271,7 @@ export default function Sidebar() {
     <>
     <RunDecision />
     <RunNotifier />
+    {pluginMenu && <PluginMenu at={pluginMenu} onClose={closePluginMenu} />}
     {waitingRun && !promptMinimized && (
       <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
         <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-pink-200 dark:border-pink-500/30 rounded-2xl shadow-2xl p-6">
@@ -334,7 +350,7 @@ export default function Sidebar() {
         {/* One entry for two routes. Both are "fill in this workflow's open parameters"; the tab
             strip in the page header is what switches between filling them yourself and letting
             the optimizer do it. */}
-        {navItem(runEntryHref, 'Run', <Play className="w-5 h-5 shrink-0" />, ['/once', '/execution', '/optimize', '/stages'])}
+        {navItem(runEntryHref, 'Run', <Play className="w-5 h-5 shrink-0" />, ['/once', '/execution', '/optimize', '/stages', '/campaign'])}
         {/* No Queue entry: the queue is a drawer beside whatever page is showing, opened from
             the run panel and the status chip (openQueue in QueueDrawer.tsx). */}
         {navItem('/data', 'Data History', <Table2 className="w-5 h-5 shrink-0" />)}
@@ -346,9 +362,10 @@ export default function Sidebar() {
                 {isExpanded && <div className="px-4 mb-2 text-[10px] font-bold tracking-wider uppercase text-gray-400">Plugins</div>}
                 <div className="space-y-2">
                     {plugins.map(p => (
-                        <div key={p.id}>
-                            {/* A panel plugin opens beside the page (PluginPanel) and stays there as
-                                you move around; a tab plugin is a page of its own. */}
+                        <div key={p.id} onContextMenu={menuFor(p)}>
+                            {/* A panel plugin opens over the page (PluginPanel) and stays there as
+                                you move around; a tab plugin is a page of its own. Right-click
+                                either for the window, full size or a page (PluginMenu). */}
                             {isPanelPlugin(p)
                               ? panelItem(p)
                               : navItem(`/plugin?id=${p.id}`, p.name, <Plug className="w-5 h-5 shrink-0" />)}

@@ -138,3 +138,26 @@ test('contributor names are best effort: a Hub that will not say leaves the rows
     assert.equal(selection.modules[0].name, 'Pump');
     assert.equal(selection.modules[0].contributor_name, undefined);
 });
+
+test('a computer that is offline is told to connect; other failures on the way say what to check', async () => {
+    const failing = (error) => async () => { throw error; };
+    const offline = new HubCatalog({ fetch: failing(new Error('net::ERR_INTERNET_DISCONNECTED')), url: 'https://hub.example', key: 'anon' });
+    await assert.rejects(offline.browse(), (e) => e.code === 'offline' && /No internet connection/.test(e.message));
+
+    // Node's fetch names the cause apart from its message.
+    const dns = new HubCatalog({ fetch: failing(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } })), url: 'https://hub.example', key: 'anon' });
+    await assert.rejects(dns.browse(), (e) => e.code === 'offline');
+
+    // The system says there is no network, whatever the request failed with.
+    const unplugged = new HubCatalog({ fetch: failing(new Error('net::ERR_TIMED_OUT')), url: 'https://hub.example', key: 'anon', online: () => false });
+    await assert.rejects(unplugged.browse(), (e) => e.code === 'offline');
+
+    const blocked = new HubCatalog({ fetch: failing(new Error('net::ERR_CONNECTION_TIMED_OUT')), url: 'https://hub.example', key: 'anon', online: () => true });
+    await assert.rejects(blocked.browse(), (e) => e.code === 'unreachable' && /firewall or proxy/.test(e.message) && /ERR_CONNECTION_TIMED_OUT/.test(e.message));
+});
+
+test('a Hub whose gateway is down says to try later, not its HTML', async () => {
+    const fetch = async () => ({ ok: false, status: 503, text: async () => '<html>Service Unavailable</html>' });
+    const c = new HubCatalog({ fetch, url: 'https://hub.example', key: 'anon' });
+    await assert.rejects(c.browse(), (e) => e.code === 'hub-down' && /not answering right now \(503\)/.test(e.message));
+});

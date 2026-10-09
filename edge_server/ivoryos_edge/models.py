@@ -175,6 +175,26 @@ class AgentProposal(Base):
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class Campaign(Base):
+    """A suggest-only optimization (campaigns.py): the optimizer suggests, a person runs the
+    experiments their own way and types each result in whenever it is ready, then asks for more.
+
+    Nothing of the optimizer is kept: it is rebuilt from `rows` every time it is asked for more,
+    so a campaign outlives a restart and can wait days for its results.
+    """
+    __tablename__ = "campaigns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), default="Campaign")
+    # The optimization as the Optimize page builds it: optimizer, parameter_space,
+    # objective_config, optimizer_config, parameter_constraints, existing_data, batch_size.
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    # One per suggestion: {id, batch, suggested_at, values, results (None until typed in), note}.
+    rows: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 # Database setup
 # See paths.py: the data directory when IVORYOS_DATA_DIR is set, the working directory otherwise.
 from .paths import DB_PATH as DB_FILENAME

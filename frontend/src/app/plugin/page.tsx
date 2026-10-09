@@ -4,7 +4,7 @@ import { API_BASE } from '@/config';
 
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Loader2, PanelRight } from 'lucide-react';
+import { Loader2, PictureInPicture2 } from 'lucide-react';
 import { openInPanel } from '@/pluginPanel';
 import Sidebar from '@/components/Sidebar';
 
@@ -50,11 +50,11 @@ function PluginContent() {
           {plugin && (
             <button
               type="button"
-              onClick={() => openInPanel(plugin.id, plugin.placement)}
-              title="Keep this plugin beside every page, e.g. to watch it while a workflow runs"
+              onClick={() => openInPanel(plugin.id, plugin.placement, 'window')}
+              title="Keep this plugin in a window over every page, e.g. to watch it while a workflow runs"
               className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
             >
-              <PanelRight className="w-3.5 h-3.5" /> Show beside pages
+              <PictureInPicture2 className="w-3.5 h-3.5" /> Open in a window
             </button>
           )}
         </header>

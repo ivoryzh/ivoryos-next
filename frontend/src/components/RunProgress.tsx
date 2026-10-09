@@ -97,6 +97,8 @@ export type Progress = {
 
 const aggregate = (steps: RunStep[]) => {
   if (steps.some(s => s.status === 'error')) return 'error';
+  // Never run: left out by a stop (Iterate's "Stop early", a graceful stop), so not a sample done.
+  if (steps.length && steps.every(s => s.status === 'skipped')) return 'skipped';
   if (steps.some(s => ACTIVE.has(s.status))) return 'running';
   if (steps.length && steps.every(s => DONE.has(s.status))) return 'done';
   if (steps.some(s => DONE.has(s.status))) return 'partial';

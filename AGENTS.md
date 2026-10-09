@@ -334,6 +334,7 @@ A design whose steps are saved workflows is already an orchestration. Run from O
 - **Shown as one**: run summaries carry `group`; Data History puts a strip of the set's stages above a selected one and names the stage on each card; the queue drawer says "stage 2/3". A set is named `<prefix> #N` counting sets, not runs (`_next_group_name`).
 
 Not done: nothing passes between stages (each stage's open values are its own, and a `#name` an earlier stage saved is asked for again); an If cannot decide whether a later stage runs; the stages' tables are not merged on a shared column; Cloud does not dispatch a set. Tests: `tests/automated/test_run_groups.py`.
+- **Iterate's "Stop early"** (`parameters.early_stop = {mode: 'any'|'all', criteria: [{metric, op: '>='|'<=', threshold}]}`, the Iterate page's optional section, kept per browser): `queue.py` checks each sample's own results (`row_contexts`) against it once the sample's last main step is behind the run (`target_reached`), and when met ends the run the way a graceful stop does, between iterations, so a batch finishes first, with cleanup. It is a success, not a stop: the skipped rows carry no error and nothing is recorded under `_issues`. An optimization's `early_stop` is the same shape without `op`, the direction coming from each objective's goal.
 
 ## 9. Data History CSV exports (Spreadsheet runs)
 

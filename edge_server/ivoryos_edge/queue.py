@@ -227,6 +227,31 @@ class NoImprovement:
         return bool(self.patience) and self.since >= self.patience
 
 
+def target_reached(early_stop: Optional[Dict[str, Any]], values: Dict[str, Any]) -> Optional[List[str]]:
+    """Whether one sample's results end an Iterate run early: the conditions it met, or None.
+
+    `early_stop` is `{mode: 'any'|'all', criteria: [{metric, op: '>='|'<=', threshold}]}`, the
+    Iterate page's "Stop early". 'any': one condition met is enough; 'all': every one, by the same
+    sample. A result that is missing or not a number meets nothing. (An optimization's own early
+    stop reads the direction from each objective's goal instead of `op`.)
+    """
+    criteria = (early_stop or {}).get("criteria") or []
+    if not criteria:
+        return None
+    met = []
+    for criterion in criteria:
+        metric, op = criterion.get("metric"), criterion.get("op", ">=")
+        try:
+            value, threshold = float(values.get(metric)), float(criterion.get("threshold"))
+        except (TypeError, ValueError):
+            continue
+        if (value <= threshold) if op == "<=" else (value >= threshold):
+            met.append(f"{metric} {'≤' if op == '<=' else '≥'} {threshold:g} ({value:g})")
+    if (early_stop or {}).get("mode") == "all":
+        return met if len(met) == len(criteria) else None
+    return met or None
+
+
 def graceful_stop_here(steps: list, index: int, batch_size: int = 1) -> bool:
     """Whether a graceful stop ends the main block before `steps[index]`.
 
@@ -481,8 +506,10 @@ def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
         if len(rows) > 1:
             by_row = {r: [s for s in main if (s.get("parameters") or {}).get("_row") == r] for r in rows}
             summary["rows_total"] = len(rows)
+            # A row whose steps were all skipped (left out by a stop) never ran: not done.
             summary["rows_done"] = sum(
                 1 for r in rows if all(s.get("status") in _DONE_STEP_STATUSES for s in by_row[r])
+                and any(s.get("status") != "skipped" for s in by_row[r])
             )
     return summary
 
@@ -1318,6 +1345,17 @@ class WorkflowQueueManager:
                     batch_size = (run.parameters or {}).get("batch_size") or 1
                     stopped_early = False
                     graceful_applied = False  # the cut is made once; cleanup then runs as usual
+                    # Iterate's "Stop early": each sample's results, once its last main step is
+                    # behind the run, against the conditions (target_reached). Met, the run ends
+                    # as a graceful stop does, between iterations with cleanup, but as a success:
+                    # it got where it was going, so nothing is recorded as stopped early.
+                    early_stop = (run.parameters or {}).get("early_stop")
+                    last_of_row: Dict[int, int] = {}
+                    for i, s in enumerate(steps):
+                        if step_phase(s) == "main" and step_row(s) is not None:
+                            last_of_row[step_row(s)] = i
+                    checked_rows: set = set()
+                    reached = None
                     index = 0
                     while index < len(steps):
                         step = steps[index]
@@ -1331,10 +1369,23 @@ class WorkflowQueueManager:
                         if self.cancelled:
                             break
 
+                        if early_stop and reached is None:
+                            for row, last in last_of_row.items():
+                                if last < index and row not in checked_rows:
+                                    checked_rows.add(row)
+                                    met = target_reached(early_stop, row_contexts.get(row, {}))
+                                    if met:
+                                        reached = met
+                                        print(f"Stop early: sample {row + 1} reached {', '.join(met)}; "
+                                              "the rest is skipped and cleanup runs.")
+                                        break
+
                         # A graceful stop takes effect between iterations (graceful_stop_here).
-                        if self.graceful and not graceful_applied and (graceful_stop_here(steps, index, batch_size) or step_phase(step) == "cleanup"):
+                        if (self.graceful or reached) and not graceful_applied and (graceful_stop_here(steps, index, batch_size) or step_phase(step) == "cleanup"):
                             graceful_applied = True
-                            stopped_early = skip_after_graceful_stop(steps, index, self.graceful["cleanup"]) > 0
+                            left_out = skip_after_graceful_stop(steps, index, self.graceful["cleanup"] if self.graceful else True)
+                            if self.graceful:
+                                stopped_early = left_out > 0
                             await session.commit()
                             await self.broadcast_updates(run_id)
                             continue

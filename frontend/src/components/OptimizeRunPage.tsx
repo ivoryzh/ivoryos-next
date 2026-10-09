@@ -1133,7 +1133,10 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                 {returns.length > 0 && (
                   // Stop once the search has gone flat. Counted after the random start, where
                   // points are not expected to improve on each other (queue.py NoImprovement).
-                  <label className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none">
+                  <label
+                    title="The random start (the first phase's samples) is not counted: random points are not expected to improve on each other, and counting them could stop the run just as the model takes over."
+                    className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none"
+                  >
                     <input
                       type="checkbox"
                       checked={(optConfig.stopAfterNoImprovement || 0) > 0}
@@ -1148,7 +1151,7 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                       onChange={e => setOptConfig({ ...optConfig, stopAfterNoImprovement: Math.max(1, parseInt(e.target.value) || 1) })}
                       className={`${compactInput} w-14 disabled:opacity-50`}
                     />
-                    <span>iterations in a row, counted after the random start</span>
+                    <span>iterations in a row</span>
                   </label>
                 )}
               </div>
@@ -1316,25 +1319,27 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                 {optimizersLoaded && Object.keys(optimizerSchemas).length === 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">No optimizer installed. In the IvoryOS app: this deck&apos;s Settings, Optimizers. Otherwise pip install ax-platform, baybe or nimo.</p>
                 )}
-                {!stage && <input
+                {/* One row: the name, then Suggest only beside Start rather than stacked above it. */}
+                {!stage && <div className="flex flex-wrap items-center justify-end gap-2">
+                <input
                   type="text"
                   value={experimentName}
                   onChange={e => setExperimentName(e.target.value)}
                   placeholder="Experiment name (optional)"
                   title="Shown in Data History instead of the default run label"
                   className="w-56 px-3 py-2 rounded-lg text-sm bg-white border border-gray-200 text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-purple-400 dark:bg-black/50 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-500"
-                />}
-                {!stage && !editing && suggestOnly && <button
+                />
+                {!editing && suggestOnly && <button
                   type="button"
                   onClick={startCampaign}
                   disabled={!optConfig.optimizer || startingCampaign}
                   title="Get suggestions without running the workflow: run the experiments yourself and type each result in, now or days later, then ask for more"
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold border border-purple-200 text-purple-700 hover:bg-purple-50 disabled:opacity-50 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-500/10"
+                  className="flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold border border-purple-200 text-purple-700 hover:bg-purple-50 disabled:opacity-50 dark:border-purple-500/30 dark:text-purple-300 dark:hover:bg-purple-500/10"
                 >
                   {startingCampaign ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lightbulb className="w-4 h-4" />}
                   <span>{startingCampaign ? 'Asking for suggestions…' : 'Suggest only'}</span>
                 </button>}
-                {!stage && <button
+                <button
                   onClick={startOptimization}
                   disabled={!optConfig.optimizer || isStarting}
                   className="flex items-center space-x-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition-colors font-bold shadow-lg shadow-purple-500/20"
@@ -1350,7 +1355,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                       <span>{editing ? 'Save changes' : queueBusy ? 'Add to Queue' : 'Start Optimization'}</span>
                     </>
                   )}
-                </button>}
+                </button>
+                </div>}
               </div>
             </div>
           )}

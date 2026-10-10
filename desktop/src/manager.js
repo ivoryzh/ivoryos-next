@@ -16,6 +16,7 @@ const { EdgeSupervisor } = require('./supervisor');
 const {
     loadProfiles, saveProfiles, withDefaults, validateProfile, commandFor, readDeckFile, writeDeckFile,
 } = require('./profiles');
+const { normalizeNotifications, changeNotifications } = require('./notifyPrefs');
 const { validateManifest, mergeIntoDeck } = require('./manifest');
 const { updateInstrument, removeInstrument, setInstrumentEnabled } = require('./deckEdit');
 const { addWorkflows } = require('./library');
@@ -202,6 +203,17 @@ class ProfileManager extends EventEmitter {
         this._save();
     }
 
+    /** What the person is notified about (notifyPrefs.js): one switch per kind of moment. */
+    get notifications() {
+        return normalizeNotifications(this.store.notifications);
+    }
+
+    setNotifications(patch) {
+        this.store.notifications = changeNotifications(this.store.notifications, patch);
+        this._save();
+        return this.store.notifications;
+    }
+
     /**
      * Automation Hub items this account starred ('module:12', 'platform:4', 'plugin:3',
      * 'template:9'), for the browser's Starred view. Kept per account on this computer: two people
@@ -320,10 +332,12 @@ class ProfileManager extends EventEmitter {
             supervisor.on('restart-requested', () => this._setStatus(id, { state: 'starting', message: 'Restarting…' }));
             supervisor.on('ready', () => this._setStatus(id, { state: 'running', message: 'Running', error: null }));
             supervisor.on('crashed', (info) => {
+                // Running until now, or a start that never got there (the Start that asked says so).
+                const wasRunning = this.statusOf(id).state === 'running';
                 this.running.delete(id);
                 const message = info.error ? `Could not start: ${info.error.message}` : `Stopped unexpectedly (exit code ${info.code ?? info.signal}).`;
                 this._setStatus(id, { state: 'crashed', message, error: message, logTail: info.logTail });
-                this.emit('crashed', id, info);
+                this.emit('crashed', id, { ...info, wasRunning });
             });
             this._setStatus(id, { message: 'Loading instruments…' });
             await supervisor.start();

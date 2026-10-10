@@ -39,6 +39,7 @@ const { validateManifest, mergeIntoDeck, describeInstall, ManifestError } = requ
 const { freeName } = require('./deckEdit');
 const report = require('./problemReport');
 const { AttentionWatcher } = require('./attention');
+const { shouldAnnounce, isUrgent } = require('./notifyPrefs');
 const { OPTIMIZERS, selectionOf } = require('./optimizers');
 const { parseInstallLink } = require('./installLink');
 const { OriginOwners } = require('./originOwners');
@@ -167,12 +168,21 @@ function keepToOrigin(win, isOwn) {
 
 // --- notifications --------------------------------------------------------------------------------
 
-// Every running deck is watched for what needs a person (attention.js): a User input waiting for an
-// answer, or a failed step waiting for retry, skip or stop. Each becomes one system notification
-// that opens the deck, so a run waiting on someone is noticed with the app in the background, or
-// with no tab open on that deck at all.
+// Every running deck is watched (attention.js) for what needs a person -- a User input waiting for
+// an answer, a failed step waiting for retry, skip or stop -- and for runs that end. The app adds
+// what only it knows: a deck that crashed, a deck someone started that is ready or failed to start,
+// an install that ended. announce() is the one door: the person's choices (notifyPrefs.js) decide
+// what becomes a system notification, so a run waiting on someone is noticed with the app in the
+// background, or with no tab open on that deck at all.
+//
+// macOS (and Windows) can refuse notifications for the app, and Electron only says so through the
+// notification's 'failed' event: that used to be ignored, so nothing showed and nothing said why.
+// The refusal is kept (`notifyHealth`) and shown in Settings with the way to allow them, and the
+// Dock bounce (taskbar flash on Windows/Linux) works with no permission at all. The Dock badge
+// counts what waits; on macOS it follows the notification permission too.
 let attention = null;
 const shownNotifications = new Set(); // held until clicked or closed: macOS drops a collected one's click
+let notifyHealth = null; // null: not tried yet; {ok: true} | {ok: false, error, at}
 
 function watchRunningDecks() {
     if (!attention) return;
@@ -181,23 +191,147 @@ function watchRunningDecks() {
         .map((p) => ({ id: p.id, name: p.name, url: p.status.url })));
 }
 
-function notifyAttention(item) {
-    if (!Notification.isSupported()) return;
-    // Looking at that deck already: its own pop-up says it.
-    if (launcherWindow && !launcherWindow.isDestroyed() && launcherWindow.isFocused() && activeTab === item.deckId) return;
+function windowFocused() {
+    return !!(launcherWindow && !launcherWindow.isDestroyed() && launcherWindow.isFocused());
+}
+
+/** Whether the person is looking at this deck's own page right now. */
+function lookingAt(deckId) {
+    return windowFocused() && activeTab === deckId;
+}
+
+function deckMuted(deckId) {
+    const p = deckId && manager.get(deckId);
+    return !!(p && p.muteNotifications);
+}
+
+function setNotifyHealth(next) {
+    const changed = !notifyHealth || notifyHealth.ok !== next.ok || notifyHealth.error !== next.error;
+    notifyHealth = next;
+    if (changed) broadcast('launcher:changed');
+}
+
+/**
+ * Announce one moment ({kind, title, body, deckId, deckName, run_name, duration_s}). `onClick`
+ * defaults to opening the deck. Returns false when it was not announced.
+ */
+function announce(moment, { onClick } = {}) {
+    if (!shouldAnnounce(manager.notifications, moment, { muted: deckMuted(moment.deckId) })) return false;
+    const urgent = isUrgent(moment);
+    // Signals that need no permission: a bounce (until looked at, for what needs someone) or a
+    // flashing taskbar button, only while the person is in another app.
+    if (!windowFocused()) {
+        if (process.platform === 'darwin' && app.dock) app.dock.bounce(urgent ? 'critical' : 'informational');
+        else if (launcherWindow && !launcherWindow.isDestroyed()) launcherWindow.flashFrame(true);
+    }
+    if (!Notification.isSupported()) return true;
     const note = new Notification({
-        title: `${item.title} · ${item.deckName}`,
-        body: item.run_name ? `${item.run_name}: ${item.body}` : item.body,
+        title: moment.deckName ? `${moment.title} · ${moment.deckName}` : moment.title,
+        body: moment.run_name ? `${moment.run_name}: ${moment.body}` : (moment.body || ''),
+        silent: !(urgent && manager.notifications.sound),
     });
     shownNotifications.add(note);
     const forget = () => shownNotifications.delete(note);
+    note.on('show', () => setNotifyHealth({ ok: true }));
+    note.on('failed', (_event, error) => { forget(); setNotifyHealth({ ok: false, error: String(error || 'refused'), at: Date.now() }); });
     note.on('click', () => {
         forget();
         showLauncher();
-        openEdgeTab(item.deckId);
+        try {
+            if (onClick) onClick();
+            else if (moment.deckId && manager.statusOf(moment.deckId).state === 'running') openEdgeTab(moment.deckId);
+            else if (moment.deckId) { showTab(null); broadcast('launcher:select', moment.deckId); }
+        } catch { /* the deck stopped since: the launcher is shown */ }
     });
     note.on('close', forget);
     note.show();
+    return true;
+}
+
+/** The Dock badge (macOS, Linux): how many things wait for a person across decks. */
+function refreshBadge() {
+    if (!attention) return;
+    const prefs = manager.notifications;
+    const count = attention.waiting().filter((m) => shouldAnnounce(prefs, m, { muted: deckMuted(m.deckId) })).length;
+    try { app.setBadgeCount(count); } catch { /* not on this platform */ }
+}
+
+function notifyAttention(item) {
+    if (lookingAt(item.deckId)) return; // its own pop-up already says it
+    announce(item);
+}
+
+function notifyRunEnded(notice) {
+    if (lookingAt(notice.deckId)) return; // its run bar already says it
+    announce(notice);
+}
+
+/** A deck that was running stopped on its own (manager 'crashed'); a failed start is not this. */
+function notifyCrashed(id, info) {
+    const viewing = lookingAt(id);
+    closeEdgeTab(id);
+    // Its page is gone: show its launcher page instead, where the reason and the log are.
+    if (viewing) broadcast('launcher:select', id);
+    if (!info || !info.wasRunning) return;
+    const profile = manager.get(id);
+    const run = attention && attention.lastRun(id);
+    const why = info.code !== undefined && info.code !== null ? `exit code ${info.code}` : (info.signal || 'no exit code');
+    announce({
+        kind: 'crashed', deckId: id, deckName: profile ? profile.name : '',
+        title: 'Deck stopped unexpectedly',
+        body: run ? `It was running ${run.name || `run ${run.id}`} (${why}). See its log.` : `${why}. See its log.`,
+    });
+}
+
+/**
+ * A start or an install someone asked for from the launcher: say how it ended when they are in
+ * another app (when they are here, the launcher shows it). Decks started with the app are not
+ * announced: they do not come through here.
+ */
+function announceOutcome(id, what, promise) {
+    const name = () => (manager.get(id) || {}).name || '';
+    return promise.then((value) => {
+        if (!windowFocused()) {
+            announce(what === 'start'
+                ? { kind: 'ready', deckId: id, deckName: name(), title: 'Ready', body: 'The deck is running. Click to open it.' }
+                : { kind: 'installed', deckId: id, deckName: name(), title: 'Installed', body: 'The install finished.' });
+        }
+        return value;
+    }, (error) => {
+        if (!windowFocused()) {
+            announce({
+                kind: what === 'start' ? 'start-failed' : 'install-failed', deckId: id, deckName: name(),
+                title: what === 'start' ? 'Could not start' : 'Install failed', body: String(error && error.message || error).split('\n')[0],
+            }, { onClick: () => { showTab(null); broadcast('launcher:select', id); } });
+        }
+        throw error;
+    });
+}
+
+/** "Send a test notification" in Settings: whether the system showed it. */
+function testNotification() {
+    if (!Notification.isSupported()) return Promise.resolve({ shown: false, error: 'Notifications are not supported here.' });
+    return new Promise((resolve) => {
+        const note = new Notification({ title: 'IvoryOS notifications work', body: 'This is how a run that needs you will reach you.' });
+        shownNotifications.add(note);
+        const timer = setTimeout(() => resolve({ shown: null }), 5000); // no answer either way (some Linux desktops)
+        note.on('show', () => { clearTimeout(timer); setNotifyHealth({ ok: true }); resolve({ shown: true }); });
+        note.on('failed', (_event, error) => {
+            clearTimeout(timer);
+            shownNotifications.delete(note);
+            setNotifyHealth({ ok: false, error: String(error || 'refused'), at: Date.now() });
+            resolve({ shown: false, error: String(error || 'refused') });
+        });
+        note.on('close', () => shownNotifications.delete(note));
+        note.show();
+    });
+}
+
+/** The system's notification settings, where IvoryOS (or "Electron", in development) is allowed. */
+function openNotificationSettings() {
+    if (process.platform === 'darwin') return shell.openExternal('x-apple.systempreferences:com.apple.Notifications-Settings.extension');
+    if (process.platform === 'win32') return shell.openExternal('ms-settings:notifications');
+    throw new Error('Open your desktop\'s notification settings to allow IvoryOS.');
 }
 
 function showLauncher() {
@@ -217,6 +351,8 @@ function showLauncher() {
         ...(fs.existsSync(ICON) ? { icon: ICON } : {}),
     });
     keepToOrigin(launcherWindow, (url) => url.startsWith(`${APP_SCHEME}://`));
+    // A taskbar button flashing for a notification (announce) stops once the window is looked at.
+    launcherWindow.on('focus', () => { if (process.platform !== 'darwin') launcherWindow.flashFrame(false); });
     addShortcuts(launcherWindow.webContents);
     if (resources().frontendDir) launcherWindow.loadURL(LAUNCHER_URL);
     else launcherWindow.loadFile(path.join(__dirname, 'status.html')); // a build without the UI
@@ -280,11 +416,15 @@ function showTab(id) {
     broadcast('launcher:tabs', tabState());
 }
 
-/** Open (or switch to) a profile's tab; `page` such as '/cloud/' opens that page of the edge. */
-function openEdgeTab(id, page) {
+/**
+ * Open (or switch to) a profile's tab; `page` such as '/cloud/' opens that page of the edge.
+ * `raise: false` switches the tab without bringing the window forward: a deck opening by itself
+ * when it is ready must not pull the person out of another app.
+ */
+function openEdgeTab(id, page, { raise = true } = {}) {
     const status = manager.statusOf(id);
     if (status.state !== 'running') throw new Error('Start the profile first.');
-    showLauncher();
+    if (raise || !launcherWindow || launcherWindow.isDestroyed()) showLauncher();
     const origin = status.url;
     const target = page && /^\/[\w\-/]*$/.test(page) ? `${origin}${page}` : null;
     let view = edgeTabs.get(id);
@@ -821,6 +961,8 @@ function snapshot() {
         theme: manager.theme,
         cloudOnly: manager.cloudOnly,
         cloudComingSoon: CLOUD_COMING_SOON,
+        notifications: manager.notifications,
+        notifyHealth,
         // False where the OS has no keychain: sign-ins then last until the app quits.
         secretsPersist: safeStorage.isEncryptionAvailable(),
     };
@@ -831,10 +973,10 @@ function registerIpc() {
     handle('launcher:create', async (fields) => manager.create({ ...fields, port: (fields && fields.port) || await manager.freePort() }));
     handle('launcher:update', (id, patch) => manager.update(id, patch));
     handle('launcher:remove', async (id) => { closeEdgeTab(id); await manager.remove(id); });
-    handle('launcher:start', (id) => manager.start(id));
+    handle('launcher:start', (id) => announceOutcome(id, 'start', manager.start(id)));
     handle('launcher:stop', async (id) => { closeEdgeTab(id); await manager.stop(id); });
-    handle('launcher:restart', async (id) => { const status = await manager.restart(id); reloadEdgeTab(id); return status; });
-    handle('launcher:open', (id, page) => openEdgeTab(id, page));
+    handle('launcher:restart', async (id) => { const status = await announceOutcome(id, 'start', manager.restart(id)); reloadEdgeTab(id); return status; });
+    handle('launcher:open', (id, page, opts) => openEdgeTab(id, page, opts));
     handle('launcher:show-tab', (id) => showTab(id || null));
     handle('launcher:close-tab', (id) => closeEdgeTab(id));
     handle('launcher:tab-bar-height', (px) => { tabBarHeight = Math.max(0, Math.round(Number(px) || 0)); layoutTabs(); });
@@ -905,7 +1047,7 @@ function registerIpc() {
     handle('launcher:instrument:save', (id, originalName, entry) => manager.saveInstrument(id, originalName, entry));
     handle('launcher:instrument:remove', (id, name) => manager.removeInstrument(id, name));
     handle('launcher:instrument:enable', (id, name, enabled) => manager.setInstrumentEnabled(id, name, enabled));
-    handle('launcher:install', (id, manifest) => manager.install(id, manifest));
+    handle('launcher:install', (id, manifest) => announceOutcome(id, 'install', manager.install(id, manifest)));
     handle('launcher:free-name', (id, suggestion) => freeName(manager.readDeck(id), suggestion));
     handle('launcher:rebuild-python', async () => {
         await manager.stopAll();
@@ -1018,6 +1160,9 @@ function registerIpc() {
     handle('app:reveal-data', () => shell.openPath(home()));
     handle('app:set-theme', (theme) => { manager.setTheme(theme); applyTheme(); broadcast('launcher:changed'); });
     handle('app:set-cloud-only', (on) => { manager.setCloudOnly(on); broadcast('launcher:changed'); });
+    handle('app:set-notifications', (patch) => { manager.setNotifications(patch); refreshBadge(); broadcast('launcher:changed'); });
+    handle('app:test-notification', () => testNotification());
+    handle('app:open-notification-settings', () => openNotificationSettings());
     // "Send to IvoryOS" (problemReport.js): prepare gathers and redacts, the person reads and edits
     // it, send files exactly that (redacted again) in the Hub. Nothing is sent by prepare.
     // `failure` is what the page knows and the main process may not: this session's log as the
@@ -1066,7 +1211,7 @@ function registerIpc() {
         const env = runtime ? await runtime.describe(runtime.python) : { error: runtimeStatus.message };
         return { catalog: OPTIMIZERS, selected: selectionOf(deck.packages || []), installed: env.optimizers || {}, error: env.error || null };
     });
-    handle('launcher:optimizers:set', (id, selection) => manager.setOptimizers(id, selection));
+    handle('launcher:optimizers:set', (id, selection) => announceOutcome(id, 'install', manager.setOptimizers(id, selection)));
 
     // "Cloud early access" while Cloud is not offered: a message to the team through the Hub's
     // contact inquiries. Fails with `output` set to the Hub's contact page as the way round.
@@ -1275,8 +1420,10 @@ app.whenReady().then(async () => {
     manager.on('changed', () => { broadcast('launcher:changed'); refreshTray(); reloadReturnedTabs(); watchRunningDecks(); });
     attention = new AttentionWatcher({ WebSocket: globalThis.WebSocket });
     attention.on('attention', notifyAttention);
+    attention.on('notice', notifyRunEnded);
+    attention.on('changed', refreshBadge);
     manager.on('log', (id, line) => broadcast('launcher:log', id, line));
-    manager.on('crashed', (id) => closeEdgeTab(id));
+    manager.on('crashed', notifyCrashed);
     account = new Account({ fetch: (...a) => net.fetch(...a), store: secretFile(path.join(home(), 'account.bin'), safeStorage) });
     // Same project as the accounts, so a signed-in session is also what the catalog's RLS reads.
     originOwners = new OriginOwners(path.join(home(), 'edge-origins.json'));

@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, Download, ExternalLink, FolderOpen, Loader
 import { confirmDialog, notify } from '@ivoryos/shared-ui';
 import type { DesktopApi, Snapshot, UpdateStatus } from '@/desktop';
 import PythonEnvironment from './PythonEnvironment';
+import NotificationSettings from './NotificationSettings';
 import { Button, cardClass } from './ui';
 
 /**
@@ -33,6 +34,8 @@ export default function SettingsPanel({ api, snap }: {
         </div>
         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Every deck&apos;s page and Cloud use it too. System follows your computer.</p>
       </Section>
+
+      {!snap.cloudOnly && <Section title="Notifications"><NotificationSettings api={api} snap={snap} /></Section>}
 
       {/* A release without Cloud (snap.cloudComingSoon) has nothing to be "Cloud only" for. */}
       {!snap.cloudComingSoon && <Section title="Decks">

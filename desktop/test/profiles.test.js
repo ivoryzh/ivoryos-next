@@ -118,6 +118,21 @@ test('launcher-wide settings survive a restart', () => {
     assert.equal(again.cloudUrl, 'http://localhost:3002');
 });
 
+test('notification choices and a muted deck survive a restart', () => {
+    const { ProfileManager } = require('../src/manager');
+    const home = tmp();
+    const mgr = new ProfileManager({ home, getRuntime: async () => ({}) });
+    assert.equal(mgr.notifications.events.finished, true);
+    mgr.setNotifications({ events: { finished: false }, minRunMinutes: 30 });
+    const [deck] = mgr.list();
+    mgr.update(deck.id, { muteNotifications: true });
+    const again = new ProfileManager({ home, getRuntime: async () => ({}) });
+    assert.equal(again.notifications.events.finished, false);
+    assert.equal(again.notifications.events.input, true);
+    assert.equal(again.notifications.minRunMinutes, 30);
+    assert.equal(again.get(deck.id).muteNotifications, true);
+});
+
 test('a profiles.json saved with a byte-order mark is read, not replaced by defaults', () => {
     const home = tmp();
     const { profiles: [first] } = loadProfiles(home);

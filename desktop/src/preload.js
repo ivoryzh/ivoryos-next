@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     start: (id) => call('launcher:start', id),
     stop: (id) => call('launcher:stop', id),
     restart: (id) => call('launcher:restart', id),
-    open: (id, page) => call('launcher:open', id, page),
+    open: (id, page, opts) => call('launcher:open', id, page, opts),
     openInBrowser: (id) => call('launcher:open-in-browser', id),
     showTab: (id) => call('launcher:show-tab', id),
     closeTab: (id) => call('launcher:close-tab', id),
@@ -114,6 +114,9 @@ contextBridge.exposeInMainWorld('ivoryosDesktop', {
     revealData: () => call('app:reveal-data'),
     setTheme: (theme) => call('app:set-theme', theme),
     setCloudOnly: (on) => call('app:set-cloud-only', on),
+    setNotifications: (patch) => call('app:set-notifications', patch),
+    testNotification: () => call('app:test-notification'),
+    openNotificationSettings: () => call('app:open-notification-settings'),
     reorderProfiles: (ids) => call('launcher:reorder', ids),
     reloadTab: () => call('launcher:reload-tab'),
 });

@@ -1,13 +1,22 @@
 'use strict';
 // Notifications from the decks. Each running deck's queue socket (/api/ws/queue) carries
 // `status.attention`: what needs a person now, decided by the edge (queue.py attention_items) --
-// a User input waiting for an answer, or a failed step waiting for retry, skip or stop. This
-// watches every running deck, with or without a tab open on it, and emits each item once (by its
-// key). main.js turns them into system notifications that open the deck when clicked.
+// a User input waiting for an answer, or a failed step waiting for retry, skip or stop -- and
+// `status.notices`: runs that just ended (queue.py finished_notice). This watches every running
+// deck, with or without a tab open on it, and emits each item once (by its key): 'attention' and
+// 'notice'. main.js decides which become system notifications (notifyPrefs.js).
+//
+// It also keeps what is waiting right now (`waiting()`, for the Dock badge; 'changed' when that
+// changes) and the run each deck was last on (`lastRun()`), which outlives the deck: a deck that
+// crashes is dropped before main.js hears of the crash, and the notification names the run.
 //
 // No Electron here (the WebSocket is passed in), so it is tested on its own (test/attention.test.js).
 
 const { EventEmitter } = require('node:events');
+
+// A notice already in a deck's status when it is first heard from is announced only if it is
+// this recent: the deck just finished a run as the app (re)started watching it.
+const FRESH_S = 60;
 
 class AttentionWatcher extends EventEmitter {
     /**
@@ -19,7 +28,18 @@ class AttentionWatcher extends EventEmitter {
         super();
         this.WebSocket = WebSocket;
         this.retryMs = retryMs;
-        this.decks = new Map(); // id -> {deck, socket, seen: Set<string>, timer}
+        this.decks = new Map(); // id -> {deck, socket, seen, notices, primed, items, timer}
+        this.lastRuns = new Map(); // id -> {id, name} of the run it was on, or absent
+    }
+
+    /** Everything waiting for a person now, across decks, each with its deck. */
+    waiting() {
+        return [...this.decks.values()].flatMap((e) => e.items.map((i) => ({ ...i, deckId: e.deck.id, deckName: e.deck.name })));
+    }
+
+    /** The run a deck was on when last heard from ({id, name}), or null. */
+    lastRun(id) {
+        return this.lastRuns.get(id) || null;
     }
 
     /** Watch exactly these decks ({id, name, url}); close what is no longer among them. */
@@ -40,7 +60,7 @@ class AttentionWatcher extends EventEmitter {
     }
 
     _open(deck) {
-        const entry = { deck, socket: null, seen: new Set(), timer: null };
+        const entry = { deck, socket: null, seen: new Set(), notices: new Set(), primed: false, items: [], timer: null };
         this.decks.set(deck.id, entry);
         this._connect(entry);
     }
@@ -70,6 +90,7 @@ class AttentionWatcher extends EventEmitter {
         this.decks.delete(id);
         clearTimeout(entry.timer);
         try { if (entry.socket) entry.socket.close(); } catch { /* already closed */ }
+        if (entry.items.length) this.emit('changed');
     }
 
     /** One queue message: announce each attention item not announced yet. */
@@ -84,6 +105,27 @@ class AttentionWatcher extends EventEmitter {
         }
         // Only what is still waiting is remembered: once answered it may come back as a new moment.
         entry.seen = new Set(items.map((i) => i && i.key).filter(Boolean));
+        const before = entry.items.map((i) => i.key).join('|');
+        entry.items = items.filter((i) => i && i.key);
+        if (entry.items.map((i) => i.key).join('|') !== before) this.emit('changed');
+
+        // A run that ended. The edge keeps each for a few minutes, so one that ended while this
+        // socket was reconnecting is still announced; on the first message from a deck, only what
+        // just happened is (anything older ended before anyone was listening).
+        const notices = Array.isArray(message.status.notices) ? message.status.notices : [];
+        for (const notice of notices) {
+            if (!notice || !notice.key || entry.notices.has(notice.key)) continue;
+            if (entry.primed || Number(notice.age_s || 0) < FRESH_S) {
+                this.emit('notice', { ...notice, deckId: entry.deck.id, deckName: entry.deck.name });
+            }
+        }
+        // The edge's list only ever drops a key, so what it no longer sends never comes back.
+        entry.notices = new Set(notices.map((n) => n && n.key).filter(Boolean));
+        entry.primed = true;
+
+        const active = message.status.active_workflow_id;
+        if (active) this.lastRuns.set(entry.deck.id, { id: active, name: (message.active_run && message.active_run.name) || null });
+        else this.lastRuns.delete(entry.deck.id);
     }
 }
 

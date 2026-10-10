@@ -273,15 +273,16 @@ class AxOptimizer(OptimizerBase):
 
     def observe(self, results):
         for trial_index, result in zip(self.trial_index_list, results):
-            obj_only_result = {k: v for k, v in result.items() if k in [obj["name"] for obj in self.objective_config]}
-            if not obj_only_result:
-                self.client.mark_trial_failed(trial_index=trial_index, failed_reason="No objective values returned.")
-            elif len(obj_only_result.keys()) != len(self.objective_config):
-                self.client.mark_trial_failed(trial_index=trial_index, failed_reason="Missing one or more objective values.")
+            # A failed experiment has nothing to measure: Ax records the trial as failed and
+            # carries on. None used to reach complete_trial and stop the run, and NaN was
+            # recorded as a completed result.
+            missing = self.missing_objectives(result)
+            if missing:
+                self.client.mark_trial_failed(trial_index=trial_index, failed_reason=f"No value for {', '.join(missing)}.")
             else:
                 self.client.complete_trial(
                     trial_index=trial_index,
-                    raw_data=obj_only_result
+                    raw_data={obj["name"]: result[obj["name"]] for obj in self.objective_config}
                 )
 
     def _get_plot_adapter(self):

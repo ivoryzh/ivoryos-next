@@ -173,7 +173,9 @@ function DialogHost() {
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4"
+      // Above everything else, the run pop-ups (z-10050) included: a dialog is always the question
+      // being asked now.
+      className="fixed inset-0 z-[10100] flex items-center justify-center bg-black/50 p-4"
       onMouseDown={(e) => { if (e.target === e.currentTarget) settle(cancelId); }}
       onKeyDown={onKeyDown}
       role="dialog"

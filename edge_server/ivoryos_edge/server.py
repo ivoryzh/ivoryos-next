@@ -1594,6 +1594,10 @@ def get_run_plots(run_id: int, plot_type: str = "default"):
 async def resolve_run_error(run_id: int, req: Request):
     data = await req.json()
     action = data.get("action")
+    decision = queue_manager.decision
+    if decision and decision.get("run_id") == run_id and action not in decision.get("choices", []):
+        return JSONResponse(status_code=400, content={
+            "error": f"'{action}' is not one of the choices here ({', '.join(decision.get('choices', []))})."})
     if queue_manager.active_run_id == run_id:
         queue_manager.error_action = action
     return {"status": "success"}

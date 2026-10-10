@@ -146,9 +146,11 @@ def step_saved_names(step: dict) -> set:
     return names
 
 
-def attention_items(run: Optional[Dict[str, Any]], awaiting_decision: Optional[int]) -> List[Dict[str, Any]]:
+def attention_items(run: Optional[Dict[str, Any]], awaiting_decision: Optional[int],
+                    decision: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """What in the active run needs a person now, for notifications (the desktop app, a browser):
-    a User input waiting for an answer, or a failed step waiting for retry, skip or stop.
+    a User input waiting for an answer, a failed step waiting for retry, skip or stop, or the
+    optimizer stopped for a decision (`decision`, see WorkflowQueueManager._await_choice).
 
     Each item has a `key` that names that moment, so a listener announces it once: the input step,
     or the failed step and how many times it has failed (a retry that fails again is a new moment).
@@ -169,7 +171,13 @@ def attention_items(run: Optional[Dict[str, Any]], awaiting_decision: Optional[i
                 "title": "Paused for you" if paused else "Input needed",
                 "body": str(outputs.get("prompt") or ("The run waits for you to continue." if paused else "A step is waiting for your answer.")),
             })
-    if awaiting_decision == run.get("id"):
+    if decision and decision.get("kind") != "step" and decision.get("run_id") == run.get("id"):
+        items.append({
+            "key": f"decision:{decision.get('key')}", "kind": "error", "run_id": run["id"], "run_name": name,
+            "title": decision.get("title") or "The run needs a decision",
+            "body": str(decision.get("error") or "").split("\n", 1)[0],
+        })
+    elif awaiting_decision == run.get("id"):
         step = next((s for s in steps if s.get("status") == "error"), None)
         if step:
             failures = len((step.get("outputs") or {}).get("attempts") or []) or 1
@@ -287,6 +295,14 @@ def skip_after_graceful_stop(steps: list, index: int, cleanup: bool) -> int:
             s.status = "skipped"
             left_out += phase == "main"
     return left_out
+
+
+def skip_to_cleanup(steps: list, index: int) -> None:
+    """"Stop and run cleanup" after a failure: every pending prep and main step from `index` on is
+    left out (shown as not run), and the cleanup steps run as usual."""
+    for s in steps[index:]:
+        if s.status == "pending" and step_phase(s) != "cleanup":
+            s.status = "skipped"
 
 
 def unproduced_references(steps: list) -> list:
@@ -463,12 +479,16 @@ def pause_summary(run: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any
     return {}
 
 
-def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
+def run_progress_summary(run: Dict[str, Any], decision: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Where a run is up to, in as few bytes as will say it (~150-250 B of JSON).
 
     Sent to Cloud on the existing task-status topic. It is a *summary*, not the step list: AWS IoT
     meters in 5KB units, and a 60-step run's full state is several of those per update, while this
     is a fraction of one. Absent keys mean "not applicable" (no rows, not an optimization).
+
+    `decision` is the queue's open decision, when it is about this run and not a step (the
+    optimizer failing, a trial without a result): no step reads "error" then, so pause_summary
+    cannot see it, and Cloud is told about it as an error to decide on all the same.
     """
     steps = sorted(run.get("steps") or [], key=lambda s: (s.get("sequence_index") or 0, s.get("id") or 0))
     params = run.get("parameters") or {}
@@ -481,7 +501,10 @@ def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
     if run.get("start_time"):
         summary["started"] = run.get("start_time")
 
-    current = next((s for s in steps if s.get("status") in ("running", "waiting_input", "error")), None) \
+    # A step under way comes before a failed one: after "Stop and run cleanup" the failed step
+    # keeps its error while the cleanup runs.
+    current = next((s for s in steps if s.get("status") in ("running", "waiting_input")), None) \
+        or next((s for s in steps if s.get("status") == "error"), None) \
         or next((s for s in steps if s.get("status") == "pending"), None)
     if current:
         summary["phase"] = phase(current)
@@ -491,6 +514,10 @@ def run_progress_summary(run: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(row, int):
             summary["row"] = row + 1
         summary.update(pause_summary(run, current))
+    if decision and decision.get("kind") != "step" and decision.get("run_id") == run.get("id"):
+        message = str(decision.get("error") or "").strip().split("\n", 1)[0]
+        summary["error"] = f"{decision.get('title')}: {message}"[:PAUSE_TEXT_MAX]
+        summary["pause"] = f"error:{decision.get('key')}"
 
     if params.get("type") == "Optimization":
         # Trial steps are generated an iteration at a time, so the plan comes from the template.
@@ -680,8 +707,12 @@ class WorkflowQueueManager:
         self.cancelled = False
         self.pause_event: Optional[asyncio.Event] = None
         self.error_action: Optional[str] = None
-        # The run whose failed step is waiting for a person (retry, skip or stop), if any.
+        # The run waiting for a person to decide (a failed step, or the optimizer failing), if any.
         self.awaiting_decision: Optional[int] = None
+        # What that decision is about, for the pop-up (see _await_choice): kind, title, error,
+        # the choices that apply, and a key naming this one moment.
+        self.decision: Optional[Dict[str, Any]] = None
+        self._decision_count = 0
         # A graceful stop asked for on the active run: {"cleanup": bool, "continue_queue": bool}.
         self.graceful: Optional[Dict[str, bool]] = None
         # Cloud tasks whose runs a restart abandoned (see cleanup_zombies): reported to Cloud as
@@ -1001,14 +1032,60 @@ class WorkflowQueueManager:
         self.graceful = {"cleanup": bool(cleanup), "continue_queue": bool(continue_queue)}
         self.resume()
 
-    async def _wait_for_error_decision(self, run_id: int, session, run, step, error: BaseException, trace: str) -> str:
+    async def _await_choice(self, run_id: int, kind: str, title: str, error: str, choices: List[str]) -> str:
+        """Pause the run and the queue until a person picks one of `choices`; return it.
+
+        The one wait behind every decision: a failed step (kind "step"), the optimizer failing to
+        suggest or to record a round ("suggest", "observe"), and a trial that gave no result when
+        the run asks about those ("no_result"). The choices are some of:
+          retry    -- the step, or the optimizer call, again
+          skip     -- leave it and carry on
+          cleanup  -- end the run here, but run its cleanup first
+          stop     -- end the run here, without cleanup: the deck stays as it is, for a person
+        Nothing is decided on its own, and the wait has no time limit. A choice that does not
+        apply here is ignored (/resolve refuses it). A Stop from anywhere (or Cloud's "abort")
+        ends it as stop. The caller records the outcome and sets the run's status back.
+        """
+        self.pause()
+        self.error_action = None
+        self._decision_count += 1
+        self.decision = {
+            "run_id": run_id, "kind": kind, "title": title, "error": error, "choices": list(choices),
+            "key": f"{kind}:{run_id}:{self._decision_count}",
+        }
+        self.awaiting_decision = run_id
+        await self.broadcast_updates(run_id)
+        try:
+            while not self.cancelled:
+                action = self.error_action
+                if action in choices or action == "abort":
+                    break
+                if action is not None:
+                    self.error_action = None
+                await asyncio.sleep(0.5)
+        finally:
+            self.awaiting_decision = None
+            self.decision = None
+        action = self.error_action
+        self.error_action = None
+        if self.cancelled or action not in choices:
+            action = "stop"
+        if action != "stop":
+            self.resume()
+        return action
+
+    async def _wait_for_error_decision(self, run_id: int, session, run, step, error: BaseException, trace: str,
+                                       cleanup_after: bool = False) -> str:
         """A step failed: record why, pause the run and the queue, and wait for a person.
 
-        Returns "retry" (the step is pending again), "skip" (it is skipped and the run goes on)
-        or "stop". Nothing is retried or skipped on its own: for a normal run and an optimization
-        alike, a failure waits for a decision. Optimizations used to follow an error_recovery
-        setting that could skip or "retry" a failed trial unattended, which on real hardware is
-        the risky choice.
+        Returns "retry" (the step is pending again), "skip" (it is skipped and the run goes on),
+        "cleanup" (the run ends, after its cleanup; offered when `cleanup_after`, i.e. the step is
+        not itself part of the cleanup and there is one) or "stop" (the run ends without cleanup:
+        a failed instrument may have left the deck in a state cleanup should not walk into).
+        Nothing is retried or skipped on its own: for a normal run and an optimization alike, a
+        failure waits for a decision. Optimizations used to follow an error_recovery setting
+        that could skip or "retry" a failed trial unattended, which on real hardware is the
+        risky choice.
         """
         step.status = "error"
         # A refusal by the safety guard is its own explanation; a traceback into the queue adds nothing.
@@ -1017,25 +1094,14 @@ class WorkflowQueueManager:
         step.outputs = record_failed_attempt(step.outputs, str(error), step.start_time, step.end_time)
         run.status = "error"
         await session.commit()
-        self.pause()
-        self.error_action = None
-        self.awaiting_decision = run_id
-        await self.broadcast_updates(run_id)
-        try:
-            while self.error_action is None and not self.cancelled:
-                await asyncio.sleep(0.5)
-        finally:
-            self.awaiting_decision = None
-        action = "stop" if self.cancelled else self.error_action
-        self.error_action = None
+        choices = ["retry", "skip"] + (["cleanup"] if cleanup_after else []) + ["stop"]
+        action = await self._await_choice(run_id, "step", "A step failed", step.error, choices)
         decided = datetime.utcnow()
         if action == "retry":
             step.status = "pending"
             step.error = None
         elif action == "skip":
             step.status = "skipped"
-        else:
-            action = "stop"
         if action != "retry":
             # The step's story ends when a person ended it, not when it failed. Left at the
             # failure, the wait for a decision belonged to no step: on the timeline the rows either
@@ -1049,6 +1115,26 @@ class WorkflowQueueManager:
         if action != "stop":
             run.status = "running"
             self.resume()
+        await session.commit()
+        await self.broadcast_updates(run_id)
+        return action
+
+    async def _wait_for_run_decision(self, run_id: int, session, run, kind: str, title: str, error: str,
+                                     choices: List[str]) -> str:
+        """A decision about the run rather than one step: the optimizer could not suggest or could
+        not record a round, or a trial gave no result. Waits like a failed step (_await_choice),
+        and keeps what happened on the run (`parameters._decisions`), since no step holds it."""
+        run.status = "error"
+        await session.commit()
+        print(f"[optimizer] {title}: {error}")
+        action = await self._await_choice(run_id, kind, title, error, choices)
+        params = dict(run.parameters or {})
+        params["_decisions"] = [*(params.get("_decisions") or []), {
+            "kind": kind, "error": error, "action": action, "time": datetime.utcnow().isoformat(),
+        }]
+        run.parameters = params
+        if action != "stop":
+            run.status = "running"
         await session.commit()
         await self.broadcast_updates(run_id)
         return action
@@ -1125,11 +1211,14 @@ class WorkflowQueueManager:
         params = (run or {}).get("parameters") or {}
         if not run or params.get("cloud_run_id") != cloud_run_id or params.get("cloud_node_id") != cloud_node_id:
             return "not running here"
-        if not pause or run_progress_summary(run).get("pause") != pause:
+        if not pause or run_progress_summary(run, self.decision).get("pause") != pause:
             await self.report_cloud_progress(run_id, force=True)
             return "stale"
         if action == "input" and pause.startswith("input:"):
             self.submit_input(run_id, value)
+        elif action in ("retry", "skip") and self.decision and action not in self.decision.get("choices", []):
+            # Not every pause offers both: the optimizer failing to suggest cannot be skipped.
+            print(f"[cloud] '{action}' does not apply to this pause ({self.decision.get('kind')}); ignored")
         elif action in ("retry", "skip") and pause.startswith("error:"):
             self.error_action = action
         elif action == "stop" and pause.startswith("error:"):
@@ -1190,6 +1279,7 @@ class WorkflowQueueManager:
                 "active_workflow_id": self.active_run_id,
                 "queue_paused": self.paused,
                 "awaiting_decision": self.awaiting_decision,
+                "decision": self.decision,
                 "graceful_stop": self.graceful,
                 "cloud_queue": self.cloud_queue,
             }
@@ -1197,7 +1287,7 @@ class WorkflowQueueManager:
         
         if self.active_run_id:
             payload["active_run"] = await self.get_run_status(self.active_run_id)
-            payload["status"]["attention"] = attention_items(payload["active_run"], self.awaiting_decision)
+            payload["status"]["attention"] = attention_items(payload["active_run"], self.awaiting_decision, self.decision)
         else:
             # If no active run, send the most recently completed/errored run to show final status
             async with async_session() as session:
@@ -1277,7 +1367,7 @@ class WorkflowQueueManager:
             self._progress_state.pop(run_id, None)
             return
 
-        summary = run_progress_summary(run)
+        summary = run_progress_summary(run, self.decision)
         if summary == state["sent"] and not force:
             return
         loop = asyncio.get_running_loop()
@@ -1500,10 +1590,20 @@ class WorkflowQueueManager:
                             else:
                                 raise
                         except Exception as e:
-                            action = await self._wait_for_error_decision(run_id, session, run, step, e, traceback.format_exc())
+                            cleanup_after = step_phase(step) != "cleanup" and any(
+                                step_phase(s) == "cleanup" and s.status == "pending" for s in steps[index + 1:])
+                            action = await self._wait_for_error_decision(
+                                run_id, session, run, step, e, traceback.format_exc(), cleanup_after)
                             if action == "retry":
                                 continue
                             if action == "skip":
+                                index += 1
+                                continue
+                            if action == "cleanup":
+                                # The failed step keeps its error, so the run still ends as one.
+                                skip_to_cleanup(steps, index + 1)
+                                await session.commit()
+                                await self.broadcast_updates(run_id)
                                 index += 1
                                 continue
                             break
@@ -1818,8 +1918,16 @@ class WorkflowQueueManager:
         # reads it when it runs, as in a normal run (substitute_workflow_vars), so '#absorbance'
         # after a step that saves `absorbance` is that value, not something to optimize or ask for.
         run_context: Dict[str, Any] = {}
+        cleanup_template = parameters.get("cleanup_template", [])
+        # Someone chose "Stop and run cleanup" on a failure: the run ends as an error, after its
+        # cleanup. Plain Stop leaves the deck as it is.
+        cleanup_after_failure = False
+        # What to do with a trial that gave no result: "continue" (leave it out of the
+        # optimizer's model and go on, the default) or "ask" (pause for a person).
+        ask_on_missing = parameters.get("on_missing_result") == "ask"
 
-        async def run_steps(entries, context: Dict[str, Any], objectives: Optional[Dict[str, float]] = None) -> bool:
+        async def run_steps(entries, context: Dict[str, Any], objectives: Optional[Dict[str, float]] = None,
+                            phase: str = "main") -> bool:
             """Run one block of this run's steps in order: prep, one trial, or cleanup.
 
             `entries` are (step, returnVar, returnBindings, aliases). Flow Control goes through
@@ -1827,6 +1935,7 @@ class WorkflowQueueManager:
             where later steps read it as '#name', and its numbers into `objectives` when given.
             False when a step failed (it records why) or the run was cancelled.
             """
+            nonlocal cleanup_after_failure
             steps = [entry[0] for entry in entries]
             index = 0
             while index < len(steps):
@@ -1912,16 +2021,20 @@ class WorkflowQueueManager:
                     # A failure waits for a person, as in a normal run: retry the step, skip it,
                     # or stop the run. (traceback is imported at module level; a local re-import
                     # in here would make the name local to the whole enclosing function.)
-                    action = await self._wait_for_error_decision(run_id, session, run, db_step, e, traceback.format_exc())
+                    action = await self._wait_for_error_decision(
+                        run_id, session, run, db_step, e, traceback.format_exc(),
+                        cleanup_after=phase != "cleanup" and bool(cleanup_template))
                     if action == "retry":
                         continue
                     if action == "skip":
                         index += 1
                         continue
+                    if action == "cleanup":
+                        cleanup_after_failure = True
                     return False
             return True
 
-        async def execute_template_block(template, suggestion_args=None):
+        async def execute_template_block(template, suggestion_args=None, phase: str = "main"):
             nonlocal step_index, run
             iteration_steps = []
             for tmpl_step in template:
@@ -1956,21 +2069,36 @@ class WorkflowQueueManager:
 
             # What it saves goes into the run's context and the block carries on (it used to
             # `return` at the first step that saved anything, skipping the rest).
-            ok = await run_steps(iteration_steps, run_context)
+            ok = await run_steps(iteration_steps, run_context, phase=phase)
             if not ok and not self.cancelled:
                 run.status = "error"
                 await session.commit()
                 await self.broadcast_updates(run_id)
             return ok, run_context
 
+        async def end_run(stopped_early: bool = False, failed: bool = False):
+            """Cleanup, once, then finish. Cleanup is left out when the run was cancelled, when a
+            graceful stop said so, and when the run failed (a step, or the optimizer) unless the
+            person chose "Stop and run cleanup": after a failure it is their call whether the
+            deck is in a state cleanup should walk into."""
+            failed = failed or run.status == "error"
+            wants_cleanup = not self.graceful or self.graceful.get("cleanup", True)
+            if cleanup_template and not self.cancelled and wants_cleanup and (not failed or cleanup_after_failure):
+                run.status = "running"
+                await session.commit()
+                success, _ = await execute_template_block(cleanup_template, phase="cleanup")
+                failed = failed or not success
+            if failed and not self.cancelled:
+                run.status = "error"
+                await session.commit()
+            await finish(stopped_early)
+
         # 1. Execute Prep Phase
         prep_template = parameters.get("prep_template", [])
         if prep_template:
-            success, _ = await execute_template_block(prep_template)
+            success, _ = await execute_template_block(prep_template, phase="prep")
             if not success:
-                run.status = "error"
-                await session.commit()
-                await finish()
+                await end_run(failed=True)
                 return
 
         stopped_early = False
@@ -1980,6 +2108,20 @@ class WorkflowQueueManager:
         # (the default) makes this behave exactly like the original one-at-a-time loop.
         completed = 0
         trials_run = 0  # trials that actually ran, for "stopped early"
+        # The optimizer failing (suggest or observe raising), or a trial giving no result when the
+        # run asks about those, waits for a person like a failed step does: nothing goes on, or
+        # ends, on its own. Ending, they choose whether cleanup runs.
+        optimizer_failed = False
+
+        async def decide(kind: str, title: str, error: str, choices: List[str]) -> str:
+            nonlocal cleanup_after_failure, optimizer_failed
+            choices = choices + (["cleanup"] if cleanup_template else []) + ["stop"]
+            action = await self._wait_for_run_decision(run_id, session, run, kind, title, error, choices)
+            if action in ("cleanup", "stop"):
+                optimizer_failed = True
+                cleanup_after_failure = action == "cleanup"
+            return action
+
         while completed < budget:
             if self.cancelled:
                 break
@@ -1992,14 +2134,18 @@ class WorkflowQueueManager:
             n_this_round = min(batch_size, budget - completed)
 
             # 1. Ask optimizer for this round's suggestions
-            try:
-                loop = asyncio.get_running_loop()
-                suggestions = await loop.run_in_executor(None, lambda: optimizer.suggest(n=n_this_round))
-                if not isinstance(suggestions, list):
-                    suggestions = [suggestions]
-            except Exception as e:
-                print(f"Optimizer suggest error: {e}")
-                run.status = "error"
+            suggestions = None
+            while suggestions is None and not self.cancelled:
+                try:
+                    loop = asyncio.get_running_loop()
+                    suggestions = await loop.run_in_executor(None, lambda: optimizer.suggest(n=n_this_round))
+                    if not isinstance(suggestions, list):
+                        suggestions = [suggestions]
+                except Exception as e:
+                    if await decide("suggest", "The optimizer could not suggest the next trials",
+                                    f"{type(e).__name__}: {e}", ["retry"]) != "retry":
+                        break
+            if suggestions is None:
                 break
 
             round_results = []
@@ -2082,21 +2228,44 @@ class WorkflowQueueManager:
                 observations.append({**(suggestion if isinstance(suggestion, dict) else {}), **objective_values})
                 round_results.append(objective_values)
                 trials_run += 1
+                # A trial with no value for an objective failed to measure anything. By default it
+                # goes to observe() like that and each optimizer leaves it out of its model; a run
+                # that asks about those pauses here instead, while the deck is as the trial left it.
+                missing = optimizer.missing_objectives(objective_values)
+                if missing and ask_on_missing:
+                    point = {p["name"]: suggestion.get(p["name"]) for p in param_space} if isinstance(suggestion, dict) else {}
+                    action = await decide(
+                        "no_result", "A trial gave no result",
+                        f"Trial {global_iteration + 1} ({', '.join(f'{k}={v}' for k, v in point.items())}) "
+                        f"has no value for {', '.join(missing)}.", ["skip"])
+                    if action != "skip":
+                        break
                 # Graceful stop: this trial is done; the rest of the round is not started.
                 if self.graceful:
                     break
 
-            if self.cancelled or run.status == "error":
+            if self.cancelled or run.status == "error" or optimizer_failed:
                 break
 
             # 5. Tell the optimizer about however many trials in this round actually succeeded,
             # then check early-stop against each of them.
             if observations:
-                try:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, lambda: optimizer.observe(observations))
-                except Exception as e:
-                    print(f"Optimizer observe error: {e}")
+                # A refused round waits for a person. Printing and carrying on (as this used to)
+                # left the optimizer suggesting without the round it refused, and nobody was told.
+                # Skip is that same carrying on, but chosen.
+                observed = False
+                while not observed and not self.cancelled:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, lambda: optimizer.observe(observations))
+                        observed = True
+                    except Exception as e:
+                        action = await decide("observe", "The optimizer could not record this round's results",
+                                              f"{type(e).__name__}: {e}", ["retry", "skip"])
+                        if action != "retry":
+                            break
+                if optimizer_failed or self.cancelled:
+                    break
 
                 # Early stop: each objective can carry its own target threshold (direction is
                 # derived from that objective's own minimize/maximize goal). With multiple
@@ -2137,16 +2306,7 @@ class WorkflowQueueManager:
                 stopped_early = trials_run < budget
                 break
 
-        # 2. Execute Cleanup Phase — runs once after the budget loop, mirroring Prep. This was
-        # previously never executed at all for Optimization runs even though the Optimize page
-        # already lets you configure one. Skipped on cancellation: execute_template_block bails
-        # out immediately once self.cancelled is set, so cleanup can't run through a cancel yet —
-        # that would need its own bypass, left for later if it turns out to matter.
-        cleanup_template = parameters.get("cleanup_template", [])
-        wants_cleanup = not self.graceful or self.graceful.get("cleanup", True)
-        if cleanup_template and not self.cancelled and run.status != "error" and wants_cleanup:
-            success, _ = await execute_template_block(cleanup_template)
-            if not success:
-                run.status = "error"
-
-        await finish(stopped_early)
+        # 2. Cleanup, once after the budget loop, mirroring Prep (end_run says when it is left
+        # out). Skipped on cancellation: execute_template_block bails out immediately once
+        # self.cancelled is set, so cleanup can't run through a cancel yet.
+        await end_run(stopped_early, failed=optimizer_failed)

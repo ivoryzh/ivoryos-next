@@ -273,7 +273,8 @@ export default function Sidebar() {
     <RunNotifier />
     {pluginMenu && <PluginMenu at={pluginMenu} onClose={closePluginMenu} />}
     {waitingRun && !promptMinimized && (
-      <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      // Above the floating run card and the queue drawer, as RunDecision is; dimmed, not blurred.
+      <div className="fixed inset-0 z-[10050] flex items-center justify-center bg-black/25 p-4">
         <div className="w-full max-w-md bg-white dark:bg-[#1a1a1a] border border-pink-200 dark:border-pink-500/30 rounded-2xl shadow-2xl p-6">
           <div className="flex items-center gap-3 mb-4">
             <div className="w-9 h-9 rounded-lg bg-pink-50 dark:bg-pink-500/10 flex items-center justify-center shrink-0">

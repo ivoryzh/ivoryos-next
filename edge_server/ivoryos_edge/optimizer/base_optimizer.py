@@ -1,5 +1,7 @@
 ### ivoryos/optimizers/base.py
 
+import math
+import numbers
 from abc import ABC, abstractmethod
 
 
@@ -48,7 +50,17 @@ class OptimizerBase(ABC):
         observe
         :param results: one dict of {"objective_name": "value"} per trial, matching the batch
             suggest(n) returned — even for n=1 this is a list of a single dict, not a bare dict.
+            A trial with an objective missing failed (see missing_objectives).
         """
+
+    def missing_objectives(self, result: dict) -> list:
+        """The objectives a trial has no value for: absent, None or NaN. This is how a failed
+        experiment reaches observe() (nothing there to measure), and each backend has to say
+        what it does with one: Ax marks the trial failed, NIMO leaves the candidate unmeasured,
+        BayBE leaves it out of the model and says so."""
+        def no_value(v):
+            return v is None or (isinstance(v, numbers.Real) and math.isnan(v))
+        return [o["name"] for o in self.objective_config if no_value(result.get(o["name"]))]
 
     @abstractmethod
     def append_existing_data(self, existing_data, file_path: str = None):

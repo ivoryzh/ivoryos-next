@@ -61,6 +61,11 @@ export interface OptimizeConfig {
   constraints?: string[];
   /** Stop once no objective has improved for this many iterations after the random start (0: off). */
   stopAfterNoImprovement?: number;
+  /**
+   * A trial that gave no result (an objective missing): left out of the optimizer's model and
+   * the run goes on (false, the default), or the run pauses for a person (true).
+   */
+  askOnMissingResult?: boolean;
 }
 
 export const emptyOptimizeConfig = (): OptimizeConfig => ({
@@ -271,6 +276,7 @@ export function buildOptimizationParameters(opts: BuildOptimizationOptions): Rec
       ? { parameter_constraints: (config.constraints || []).filter((c) => c.trim()) }
       : {}),
     ...((config.stopAfterNoImprovement || 0) > 0 ? { stop_after_no_improvement: config.stopAfterNoImprovement } : {}),
+    ...(config.askOnMissingResult ? { on_missing_result: 'ask' } : {}),
     sequence_template: sequenceTemplate,
   };
 }

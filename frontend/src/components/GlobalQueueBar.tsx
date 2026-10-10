@@ -2,8 +2,8 @@
 import { API_BASE, WS_BASE } from '@/config';
 import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
-import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Copy, CircleDot, ListTodo, HandHelping, Flag } from 'lucide-react';
-import { decideFailure, stopGracefully } from '@/runControl';
+import { Play, Pause, XCircle, Activity, ChevronUp, ChevronDown, RefreshCcw, FastForward, Eraser, Copy, CircleDot, ListTodo, HandHelping, Flag } from 'lucide-react';
+import { choicesFor, choiceWords, decideFailure, stopGracefully } from '@/runControl';
 import { setPromptMinimized } from '@/inputPrompt';
 import { openQueue } from './QueueDrawer';
 import { notify } from '@ivoryos/shared-ui';
@@ -94,6 +94,12 @@ export default function GlobalQueueBar() {
 
   // Retry, skip and stop answer a failed step only while it waits (runControl.ts).
   const waitingDecision = !!activeRun && activeRun.status === 'error' && status?.awaiting_decision === activeRun.id;
+  const choices = activeRun ? choicesFor(status?.decision, activeRun.id) : [];
+  // A decision about the run, not a step (the optimizer failing, a trial without a result), has
+  // no failed step to read the error from.
+  const runDecision = activeRun && status?.decision?.run_id === activeRun.id && status.decision.kind !== 'step' ? status.decision : null;
+  const runError: string = runDecision ? `${runDecision.title}: ${runDecision.error}`
+    : activeRun?.steps?.find((s: any) => s.status === 'error')?.error || 'Unknown error occurred.';
   const graceful = !!status?.graceful_stop;
 
   // Legacy IvoryOS kept a status chip on screen at all times — the operator could glance at any
@@ -173,7 +179,7 @@ export default function GlobalQueueBar() {
                 <div className="flex flex-col min-w-0">
                     <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeRun.name}</span>
                     <span className="text-[11px] text-gray-500 font-medium truncate">
-                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : waitingDecision ? 'a step failed: decide' : graceful ? 'stopping after this iteration' : activeRun.status} · <span title={`${startedSteps} of ${totalSteps} steps`}>{positionText(buildProgress(activeRun))}</span>
+                       {activeRun.status === 'cancelling' ? 'cancelling…' : activeRun.status === 'pausing' ? 'pausing…' : activeRun.status === 'waiting_input' ? 'waiting for input' : waitingDecision ? `${status?.decision?.title?.toLowerCase() || 'a step failed'}: decide` : graceful ? 'stopping after this iteration' : activeRun.status} · <span title={`${startedSteps} of ${totalSteps} steps`}>{positionText(buildProgress(activeRun))}</span>
                     </span>
                 </div>
             </div>
@@ -205,10 +211,10 @@ export default function GlobalQueueBar() {
             <div className="px-4 pb-4 pt-1 border-t border-gray-100 dark:border-white/5">
                 {activeRun.status === 'error' ? (
                     <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-500/30 text-xs font-mono text-red-700 dark:text-red-400 overflow-y-auto max-h-32 whitespace-pre-wrap relative group">
-                        {activeRun.steps?.find((s:any) => s.status === 'error')?.error || 'Unknown error occurred.'}
+                        {runError}
                         <button
                             onClick={() => {
-                                const errorText = activeRun.steps?.find((s:any) => s.status === 'error')?.error || 'Unknown error occurred.';
+                                const errorText = runError;
                                 navigator.clipboard.writeText(errorText);
                             }}
                             className="absolute top-2 right-2 p-1.5 bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-200 dark:hover:bg-red-900/60"
@@ -243,12 +249,15 @@ export default function GlobalQueueBar() {
                             </button>
                         ) : waitingDecision ? (
                             <>
-                            <button onClick={() => decideFailure(activeRun.id, 'retry')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 rounded transition-colors text-xs font-bold">
+                            {choices.includes('retry') && <button onClick={() => decideFailure(activeRun.id, 'retry')} title={choiceWords(status?.decision?.kind, 'retry')[1]} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-accent-soft text-accent-fg border border-accent-tint/60 hover:bg-accent-tint/30 rounded transition-colors text-xs font-bold">
                                 <RefreshCcw className="w-3.5 h-3.5" /> <span>Retry</span>
-                            </button>
-                            <button onClick={() => decideFailure(activeRun.id, 'skip')} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 rounded transition-colors text-xs font-bold dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">
+                            </button>}
+                            {choices.includes('skip') && <button onClick={() => decideFailure(activeRun.id, 'skip')} title={choiceWords(status?.decision?.kind, 'skip')[1]} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 rounded transition-colors text-xs font-bold dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-500/30">
                                 <FastForward className="w-3.5 h-3.5" /> <span>Skip</span>
-                            </button>
+                            </button>}
+                            {choices.includes('cleanup') && <button onClick={() => decideFailure(activeRun.id, 'cleanup')} title={choiceWords(status?.decision?.kind, 'cleanup')[1]} className="flex-1 flex items-center justify-center space-x-1.5 px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 rounded transition-colors text-xs font-bold dark:bg-red-900/30 dark:text-red-300 dark:border-red-500/30">
+                                <Eraser className="w-3.5 h-3.5" /> <span>Cleanup</span>
+                            </button>}
                             </>
                         ) : ['completed', 'cancelled', 'error'].includes(activeRun.status) ? (
                              null

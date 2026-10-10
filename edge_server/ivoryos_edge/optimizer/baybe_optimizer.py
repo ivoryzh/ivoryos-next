@@ -75,7 +75,7 @@ class BaybeOptimizer(OptimizerBase):
         """
         targets = [o["name"] for o in self.objective_config]
         params = [p["name"] for p in self.parameter_space]
-        rows = [r for r in results if all(r.get(t) is not None for t in targets)]
+        rows = [r for r in results if not self.missing_objectives(r)]
         for r in results:
             if r not in rows:
                 point = {p: r.get(p) for p in params}

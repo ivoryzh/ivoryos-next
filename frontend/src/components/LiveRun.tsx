@@ -1,8 +1,8 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronUp, CircleDot, FastForward, Flag, HandHelping, ListTodo, Pause, Play, RefreshCcw, Square, X } from 'lucide-react';
-import { decideFailure, stopGracefully } from '@/runControl';
+import { ChevronUp, CircleDot, Eraser, FastForward, Flag, HandHelping, ListTodo, Pause, Play, RefreshCcw, Square, X } from 'lucide-react';
+import { choicesFor, choiceWords, decideFailure, stopGracefully, type PendingDecision } from '@/runControl';
 import { setPromptMinimized } from '@/inputPrompt';
 import RunProgress, { buildProgress, parseServerTime, positionText, type RunLike } from './RunProgress';
 import { openQueue } from './QueueDrawer';
@@ -15,8 +15,13 @@ const MIN_HEIGHT = 120;
 const maxHeight = () => (typeof window === 'undefined' ? 600 : Math.round(window.innerHeight * 0.7));
 /** After the person scrolls the steps themselves, leave their place alone for this long. */
 const HANDS_OFF_MS = 5000;
-/** A finished run stays on the page this long, so its result is seen without opening Data History. */
-const LINGER_MS = 15 * 60 * 1000;
+/**
+ * A finished run stays as the run bar this long, long enough to see how it ended, then the bar
+ * shrinks back to the idle chip. Counted by a timer: after a run ends the edge sends nothing more,
+ * so waiting for the next message to notice kept the bar wide indefinitely. (It used to linger 15
+ * minutes on purpose; the result is in Data History.)
+ */
+const LINGER_MS = 5000;
 
 /**
  * The run in progress, on the page that started it (Once, Iterate, Optimize), at the bottom of
@@ -42,6 +47,8 @@ export default function LiveRun() {
   const [queued, setQueued] = useState(0);
   // The run whose failed step waits for a decision, and whether a graceful stop is on its way.
   const [awaiting, setAwaiting] = useState<number | null>(null);
+  // What it waits on and which choices apply (the edge's status.decision).
+  const [decision, setDecision] = useState<PendingDecision | null>(null);
   const [graceful, setGraceful] = useState(false);
   // Held after a stop or a stopped failure, for the idle chip.
   const [paused, setPaused] = useState(false);
@@ -92,6 +99,7 @@ export default function LiveRun() {
       if (data.runs) setQueued(data.runs.filter((r: RunLike) => r.status === 'pending').length);
       if (data.status) {
         setAwaiting(data.status.awaiting_decision ?? null);
+        setDecision(data.status.decision ?? null);
         setGraceful(!!data.status.graceful_stop);
         setPaused(!!data.status.queue_paused);
       }
@@ -108,6 +116,17 @@ export default function LiveRun() {
     ws.onmessage = e => { try { apply(JSON.parse(e.data)); } catch { /* a malformed frame */ } };
     return () => { gone = true; ws.close(); };
   }, []);
+
+  // A finished run (not one waiting for a decision) goes back to the idle chip after LINGER_MS.
+  const runId = run?.id;
+  const over = !!run && FINISHED.includes(run.status) && run.id !== awaiting;
+  useEffect(() => {
+    if (!over || runId === undefined) return;
+    if (!finishedAt.current.has(runId)) finishedAt.current.set(runId, Date.now());
+    const wait = Math.max(0, finishedAt.current.get(runId)! + LINGER_MS - Date.now());
+    const timer = setTimeout(() => { setRun(r => (r && r.id === runId ? null : r)); setOpen(false); }, wait);
+    return () => clearTimeout(timer);
+  }, [over, runId]);
 
   // Keep the running step in view inside the step box: only that box scrolls, never the page.
   const runningId = (run?.steps || []).find(st => st.status === 'running' || st.status === 'waiting_input')?.id ?? null;
@@ -167,6 +186,7 @@ export default function LiveRun() {
   // Retry, skip and stop answer a failure only while it is waiting; a run that ended on an error
   // and still shows here has nothing left to answer.
   const waitingDecision = run.status === 'error' && awaiting === run.id;
+  const choices = choicesFor(decision, run.id);
 
   const s = run.status;
   const kind = s === 'waiting_input' ? 'ask' : ['paused', 'pausing'].includes(s) ? 'hold' : ['error', 'cancelling', 'cancelled'].includes(s) ? 'bad' : s === 'completed' ? 'done' : 'go';
@@ -179,7 +199,7 @@ export default function LiveRun() {
   const state = s === 'cancelling' ? 'stopping after this step'
     : s === 'pausing' ? 'pausing after this step'
     : s === 'waiting_input' ? 'waiting for your input'
-    : waitingDecision ? 'a step failed: retry, skip or stop'
+    : waitingDecision ? `${decision?.title?.toLowerCase() || 'a step failed'}: decide`
     : s === 'error' ? 'stopped on an error'
     : graceful && !finished ? 'finishing this iteration, then stopping'
     : s.replace(/_/g, ' ');
@@ -239,8 +259,9 @@ export default function LiveRun() {
           )}
           {waitingDecision && (
             <>
-              <button onClick={() => decideFailure(run.id, 'retry')} title="Run the failed step again" className={`${word} bg-accent-soft text-accent-fg border-accent-tint/60 hover:bg-accent-tint/30`}><RefreshCcw className="w-3.5 h-3.5" /> Retry</button>
-              <button onClick={() => decideFailure(run.id, 'skip')} title="Leave the failed step and carry on" className={`${word} bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-white/5 dark:text-gray-200 dark:border-white/10`}><FastForward className="w-3.5 h-3.5" /> Skip</button>
+              {choices.includes('retry') && <button onClick={() => decideFailure(run.id, 'retry')} title={choiceWords(decision?.kind, 'retry')[1]} className={`${word} bg-accent-soft text-accent-fg border-accent-tint/60 hover:bg-accent-tint/30`}><RefreshCcw className="w-3.5 h-3.5" /> Retry</button>}
+              {choices.includes('skip') && <button onClick={() => decideFailure(run.id, 'skip')} title={choiceWords(decision?.kind, 'skip')[1]} className={`${word} bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-white/5 dark:text-gray-200 dark:border-white/10`}><FastForward className="w-3.5 h-3.5" /> Skip</button>}
+              {choices.includes('cleanup') && <button onClick={() => decideFailure(run.id, 'cleanup')} title={choiceWords(decision?.kind, 'cleanup')[1]} className={`${word} bg-red-50 text-red-700 border-red-200 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-300 dark:border-red-500/30`}><Eraser className="w-3.5 h-3.5" /> Cleanup</button>}
             </>
           )}
           {s === 'paused' && <button onClick={() => control('resume')} title="Resume" className={`${icon} !text-green-600 dark:!text-green-400`}><Play className="w-4 h-4" /></button>}
@@ -249,7 +270,7 @@ export default function LiveRun() {
             <button onClick={() => stopGracefully(run, queued)} title="Stop after this iteration (a row, a batch or an optimization trial), with or without cleanup" className={icon}><Flag className="w-4 h-4" /></button>
           )}
           {waitingDecision ? (
-            <button onClick={() => decideFailure(run.id, 'stop')} title="Stop this run (the queue stays held)" className={`${icon} !text-red-500 hover:!bg-red-50 dark:hover:!bg-red-900/20`}><Square className="w-4 h-4" /></button>
+            <button onClick={() => decideFailure(run.id, 'stop')} title={choiceWords(decision?.kind, 'stop')[1]} className={`${icon} !text-red-500 hover:!bg-red-50 dark:hover:!bg-red-900/20`}><Square className="w-4 h-4" /></button>
           ) : !finished && s !== 'cancelling' && s !== 'error' && (
             <button onClick={() => control('cancel')} title="Stop now (the queue stays held until you resume it)" className={`${icon} !text-red-500 hover:!bg-red-50 dark:hover:!bg-red-900/20`}><Square className="w-4 h-4" /></button>
           )}

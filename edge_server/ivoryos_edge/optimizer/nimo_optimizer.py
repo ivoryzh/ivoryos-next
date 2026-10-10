@@ -152,8 +152,13 @@ class NIMOOptimizer(OptimizerBase):
         if self.n_candidates > self.MAX_PHASE_DIAGRAM_CANDIDATES:
             return {"error": f"Phase diagram skipped: the search space has {self.n_candidates} candidates, "
                              f"more than the {self.MAX_PHASE_DIAGRAM_CANDIDATES} it can plot in reasonable time."}
-        nimo.visualization.plot_phase_diagram.plot(input_file=self.candidates,
-                                                   fig_folder=os.path.join(self.datapath, "nimo_data"))
+        try:
+            nimo.visualization.plot_phase_diagram.plot(input_file=self.candidates,
+                                                       fig_folder=os.path.join(self.datapath, "nimo_data"))
+        except Exception as e:
+            # nimo 2.1.5's plot calls int() on a one-element array, which NumPy 2.4+ refuses; and
+            # returning the newest file anyway could show an earlier run's diagram
+            return {"error": f"NIMO could not draw the phase diagram: {type(e).__name__}: {e}"}
         files = sorted(glob.glob(os.path.join(os.path.join(self.datapath, "nimo_data"), "phase_diagram_*.png")))
         if not files:
             return None

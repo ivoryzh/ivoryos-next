@@ -626,11 +626,14 @@ parts worth knowing before touching any of it:
 - **One tool layer, two surfaces.** `/api/agent/*` (`agent/routes.py`) is the whole contract.
   `agent/mcp_server.py` is a *thin stdio process that calls those endpoints over HTTP* — it
   holds no logic, so a tool's behaviour is never implemented twice. The assistant panel
-  (`AssistantPanel.tsx`) calls the same endpoints. Adding a surface, or switching model, must not
+  (`AssistantPanel.tsx`) calls the same endpoints. `.mcp.json` at the repo root registers it for
+  Claude Code (relative `--project edge_server`, deck at `${IVORYOS_URL:-http://localhost:8080}`),
+  so a session in this repo can read a running deck's history and file proposals with no model or
+  key of the lab's own. Adding a surface, or switching model, must not
   mean reimplementing what a tool does.
 - **One assistant, on every page** (`frontend/src/components/AssistantPanel.tsx`, mounted once in
-  the root layout; state in `frontend/src/assistant.ts`). Opened from the nav (both placements,
-  with the count of proposals waiting) or the Designer's toolbox button; it overlays the page on
+  the root layout; state in `frontend/src/assistant.ts`). Opened from the nav only (both
+  placements, with the count of proposals waiting; the Designer's toolbox button is gone); it overlays the page on
   the right below the nav (`usePageArea`) and never pushes it aside, and sets
   `--ivoryos-dock-right` so the queue chip moves out of its way. Three modes, each a `mode` of
   `/api/agent/chat`: **ask** (agent/ask.py: questions answered from the records; the model replies

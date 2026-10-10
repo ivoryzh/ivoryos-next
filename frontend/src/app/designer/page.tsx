@@ -5,8 +5,7 @@ import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Trash2, Settings2, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import { closeAssistant, openAssistant, useAssistant, useAssistantPage, type SavedBody } from '@/assistant';
-import AgentToolboxButton from '@/components/AgentToolboxButton';
+import { useAssistantPage, type SavedBody } from '@/assistant';
 import { useQueueBusy } from '@/queueBusy';
 import {
   WorkflowEditor,
@@ -56,7 +55,6 @@ export default function DesignerPage() {
   const theme = useDocumentTheme();
   // The assistant panel is opt-in and remembered: a lab with no model configured should
   // never see it, and one that uses it every day should not reopen it every visit.
-  const { open: assistantOpen } = useAssistant();
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   // Something queued or under way: Run becomes "Add to queue" and asks first.
   const hasPendingRuns = useQueueBusy();
@@ -282,10 +280,9 @@ export default function DesignerPage() {
     localStorage.setItem('ivoryos_is_unsaved', String(dirty));
   }, [hasLoaded, sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
-  // The toolbox's Assistant button opens the one assistant (components/AssistantPanel.tsx), in
-  // Workflow mode. The canvas is lent to it below, so it drafts onto this canvas.
-  const toggleAgent = () => (assistantOpen ? closeAssistant() : openAssistant('workflow'));
-
+  // The assistant (components/AssistantPanel.tsx, opened from the nav) opens here in Workflow
+  // mode and drafts onto this canvas, which is lent to it below.
+  //
   // What the assistant sees of this page and may do to it. Read through a ref so the bridge
   // always sees the canvas as it is now, not as it was when the page was last registered.
   const canvasRef = useRef({ prepSequence, sequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription, statusData });
@@ -757,7 +754,6 @@ export default function DesignerPage() {
         {/* Main Designer Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
           <WorkflowEditor
-            toolboxFooter={<AgentToolboxButton open={assistantOpen} onToggle={toggleAgent} />}
             statusData={statusData}
             prepSequence={prepSequence}
             setPrepSequence={setPrepSequence}

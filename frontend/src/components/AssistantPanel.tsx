@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * The assistant, on every page: one panel along the right, opened from the top bar (or the
- * sidebar) and mounted once in the root layout, so a conversation follows the person around.
+ * The assistant, on every page: one panel along the right, opened from the nav (the top bar or
+ * the sidebar) and mounted once in the root layout, so a conversation follows the person around.
  *
  * Three modes, each one of the edge's chat modes (agent/routes.py `_run_mode`):
  *   Ask       questions answered from the records (runs, their tables, comparisons). Read-only.

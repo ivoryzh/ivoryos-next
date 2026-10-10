@@ -118,10 +118,16 @@ messages name the field and list the legal alternatives.
    }
    ```
 4. Restart Claude Desktop. Ask it to read the deck and draft a protocol; its proposal appears in
-   the Designer's assistant panel under "waiting for you".
+   the assistant panel (the Assistant button in the nav) under "waiting for you".
+
+**Claude Code** needs no setup in this repository: `.mcp.json` at its root starts the same server
+(relative paths, so it works from any clone) against `IVORYOS_URL`, default
+`http://localhost:8080`; set `IVORYOS_URL` before starting Claude Code for a deck on another
+port. Claude Code asks once to approve the project's server.
 
 Tools exposed: `list_deck`, `describe_instrument`, `describe_method`, `list_workflows`,
-`get_workflow`, `validate_workflow`, `propose_workflow`, `request_run`, `list_proposals`.
+`get_workflow`, `validate_workflow`, `propose_workflow`, `request_run`, `search_runs`,
+`get_run_data`, `compare_runs`, `get_safety`, `propose_safety`, `list_proposals`.
 
 ## Setting up the in-app panel (Ollama)
 

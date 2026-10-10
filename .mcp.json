@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ivoryos": {
+      "command": "uv",
+      "args": ["run", "--project", "edge_server", "--extra", "mcp", "python", "-m", "ivoryos_edge.agent.mcp_server"],
+      "env": {
+        "IVORYOS_URL": "${IVORYOS_URL:-http://localhost:8080}",
+        "IVORYOS_AGENT_SOURCE": "mcp:claude-code"
+      }
+    }
+  }
+}

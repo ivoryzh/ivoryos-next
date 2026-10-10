@@ -1,5 +1,6 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
+import { HOME_HREF, HOME_PAGE_SHOWN } from '@/homePage';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PictureInPicture2, Gauge, Menu, HandHelping, Minimize2, ShieldCheck } from 'lucide-react';
@@ -211,7 +212,7 @@ export default function Sidebar() {
   const cloudOffered = !edgeStatus?.cloud_coming_soon;
   const topBar = (
     <TopNavBar
-      brand={!desktop && <TopNavBrand link={Link} href="/" />}
+      brand={!desktop && <TopNavBrand link={Link} href={HOME_HREF} />}
       end={
         <>
           {cloudOffered && <Link
@@ -230,8 +231,11 @@ export default function Sidebar() {
     >
       {/* Labelled from `sm` up, not the shared default `md`: a deck beside the launcher's sidebar is
           often under 768px wide, and six bare icons there read as a puzzle. */}
-      <TopNavItem link={Link} href="/" label="Home" icon={<LayoutDashboard className="w-4 h-4 shrink-0" />} active={isOn('/')} labelFrom="sm" />
-      <TopNavDivider />
+      {/* Home is hidden for now (homePage.ts); its page is kept. */}
+      {HOME_PAGE_SHOWN && <>
+        <TopNavItem link={Link} href="/" label="Home" icon={<LayoutDashboard className="w-4 h-4 shrink-0" />} active={isOn('/')} labelFrom="sm" />
+        <TopNavDivider />
+      </>}
       <TopNavItem link={Link} href="/library" label="Library" icon={<Library className="w-4 h-4 shrink-0" />} active={isOn('/library')} labelFrom="sm" />
       <TopNavItem link={Link} href="/designer" label="Designer" icon={<Workflow className="w-4 h-4 shrink-0" />} active={isOn('/designer')} labelFrom="sm" />
       <TopNavItem link={Link} href={runEntryHref} label="Run" icon={<Play className="w-4 h-4 shrink-0" />} active={isOn(runEntryHref, ['/once', '/execution', '/optimize', '/stages', '/campaign'])} labelFrom="sm" />
@@ -345,7 +349,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-2 text-sm font-medium text-gray-600 dark:text-gray-400 overflow-y-auto w-full">
-        {navItem('/', 'Dashboard', <LayoutDashboard className="w-5 h-5 shrink-0" />)}
+        {HOME_PAGE_SHOWN && navItem('/', 'Dashboard', <LayoutDashboard className="w-5 h-5 shrink-0" />)}
         {navItem('/library', 'Library', <Library className="w-5 h-5 shrink-0" />)}
         {navItem('/designer', 'Designer', <Workflow className="w-5 h-5 shrink-0" />)}
         {/* One entry for two routes. Both are "fill in this workflow's open parameters"; the tab

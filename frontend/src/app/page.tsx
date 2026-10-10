@@ -3,6 +3,8 @@ import { API_BASE } from '@/config';
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { HOME_PAGE_SHOWN, LANDING_PAGE } from '@/homePage';
 import {
   Download, Workflow, Library, Gauge, ListTodo, ArrowRight,
 } from 'lucide-react';
@@ -38,7 +40,17 @@ const timeAgo = (iso?: string) => {
   return serverDate(iso).toLocaleDateString();
 };
 
+/**
+ * `/`. The Home page is hidden for now (homePage.ts): `/` goes to the landing page instead, and the
+ * dashboard below is kept for when it comes back.
+ */
 export default function Home() {
+  const router = useRouter();
+  useEffect(() => { if (!HOME_PAGE_SHOWN) router.replace(LANDING_PAGE); }, [router]);
+  return HOME_PAGE_SHOWN ? <HomeDashboard /> : null;
+}
+
+function HomeDashboard() {
   const [edgeStatus, setEdgeStatus] = useState<any>(null);
   const [runs, setRuns] = useState<any[] | null>(null);
   const [workflows, setWorkflows] = useState<any[] | null>(null);

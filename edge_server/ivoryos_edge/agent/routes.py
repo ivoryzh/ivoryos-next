@@ -11,11 +11,17 @@ so it is worth being blunt about which is which:
     POST /api/agent/validate            check a body against the live deck — no side effects
     POST /api/agent/propose             file a proposed workflow body for review
     POST /api/agent/request-run         ask for a workflow to be queued, for review
+    GET  /api/agent/runs                find runs in the history (agent/history.py)
+    GET  /api/agent/runs/{id}           one run as its table, with per-column numbers
+    POST /api/agent/runs/compare        several runs side by side, numbers computed here
+    GET  /api/agent/safety              the safety configuration and what the deck offers to it
+    POST /api/agent/propose-safety      file safety additions (states, limits, rules) for review
     GET  /api/agent/proposals           the review queue
     POST /api/agent/proposals/{id}/accept   a *person* applies it
     POST /api/agent/proposals/{id}/reject
 
-Nothing an agent posts reaches hardware, or even the workflow library, without an accept.
+Nothing an agent posts reaches hardware, the workflow library or the safety configuration
+without an accept.
 """
 
 import asyncio
@@ -28,7 +34,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 
 from ivoryos_edge import workflows as wf
+from ivoryos_edge.agent import history
+from ivoryos_edge.agent.ask import answer as ask_records
 from ivoryos_edge.agent.chat import translate
+from ivoryos_edge.agent.safety_draft import deck_brief, draft_safety, merge as merge_safety
 from ivoryos_edge.agent.deck import describe_deck, describe_method
 from ivoryos_edge.agent.providers import ProviderError, build_provider, provider_catalogue
 from ivoryos_edge.agent.validate import summarise, unbound_variables, validate_body
@@ -150,6 +159,115 @@ async def agent_validate(request: Request):
         "summary": summarise(issues),
         "issues": issues,
     }
+
+
+def _queue():
+    from ivoryos_edge.server import queue_manager
+    return queue_manager
+
+
+@router.get("/runs")
+async def agent_runs(q: str = "", status: str = "all", limit: int = 20, offset: int = 0, sort: str = "newest"):
+    """Find runs: each word of `q` must match the name, the parameters or an instrument used."""
+    return await history.search(_queue(), q=q, status=status, limit=limit, offset=offset, sort=sort)
+
+
+@router.get("/runs/{run_id}")
+async def agent_run(run_id: int, max_rows: int = history.MAX_ROWS):
+    """One run as its datasheet (the table Data History shows), with each column's numbers."""
+    table = await history.read(_queue(), run_id, max_rows=max(0, min(max_rows, 2000)))
+    if table is None:
+        return JSONResponse(status_code=404, content={"error": f"No run #{run_id}."})
+    return table
+
+
+@router.post("/runs/compare")
+async def agent_compare(request: Request):
+    """Runs side by side: `{run_ids: [...], columns?: [...]}`. Statistics are computed here, so
+    an assistant reports them rather than working them out."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    ids = data.get("run_ids")
+    if not isinstance(ids, list) or not ids:
+        return JSONResponse(status_code=400, content={"error": "Give 'run_ids', a list of run numbers."})
+    columns = data.get("columns")
+    return await history.compare(_queue(), ids, [str(c) for c in columns] if isinstance(columns, list) and columns else None)
+
+
+@router.get("/safety")
+def agent_safety_config():
+    """What a safety proposal is written against: the configuration in force (trays, states,
+    limits, rules) and the deck as that task needs it (methods, arguments, readings)."""
+    config = safety.guard.config
+    return {
+        "config": {k: config.get(k) for k in ("trays", "states", "limits", "rules")},
+        "deck": deck_brief(safety.guard.deck()),
+        "load_error": safety.guard.load_error,
+    }
+
+
+def _safety_issues(problems):
+    """safety.validate's problems in the shape proposals carry ({severity, where, message})."""
+    return [{"severity": p.get("level", "error"), "where": p.get("where") or "safety", "message": p.get("message", "")}
+            for p in problems]
+
+
+def _safety_name(add, summary):
+    named = [str(r.get("name")) for r in add.get("rules") or [] if isinstance(r, dict) and r.get("name")]
+    named += [f"{l.get('target')}.{l.get('method')}.{l.get('param')}" for l in add.get("limits") or [] if isinstance(l, dict)]
+    named += sorted((add.get("states") or {}).keys()) if isinstance(add.get("states"), dict) else []
+    label = ", ".join(named) or (summary or "safety additions")
+    return _clip(f"Safety: {label}", 200)
+
+
+async def _file_safety_proposal(add, summary, source, questions=None):
+    """Validate additions against the configuration in force and file them. Returns
+    (proposal dict, problems)."""
+    merged, problems = safety.validate(merge_safety(safety.guard.config, add), safety.guard.deck())
+    async with async_session() as session:
+        proposal = AgentProposal(
+            kind="safety",
+            name=_safety_name(add, summary),
+            payload={"add": add, "questions": [str(q) for q in (questions or [])][:10]},
+            summary=_clip(summary, MAX_SUMMARY),
+            source=_clip(source, 128),
+            issues=_safety_issues(problems),
+            status="pending",
+        )
+        session.add(proposal)
+        await session.commit()
+        await session.refresh(proposal)
+        return _as_dict(proposal), problems
+
+
+@router.post("/propose-safety")
+async def agent_propose_safety(request: Request):
+    """File additions to the safety configuration: `{add: {states?, limits?, rules?}, summary}`.
+    Checked against the deck as a workflow is, refused when it does not validate unless
+    `allow_invalid`, and applied only when a person accepts it (on the Safety page)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    add = data.get("add")
+    if not isinstance(add, dict) or not any(add.get(k) for k in ("states", "limits", "rules", "trays")):
+        return JSONResponse(status_code=400, content={"error": "Give 'add' with states, limits or rules to add."})
+    if len(json.dumps(add)) > MAX_BODY_BYTES:
+        return JSONResponse(status_code=413, content={"error": "Proposed safety additions are too large."})
+    _, problems = safety.validate(merge_safety(safety.guard.config, add), safety.guard.deck())
+    errors = [p for p in problems if p["level"] == "error"]
+    if errors and not data.get("allow_invalid"):
+        return JSONResponse(status_code=422, content={
+            "error": " ".join(p["message"] for p in errors),
+            "issues": _safety_issues(problems),
+            "hint": "Fix these and propose again (GET /api/agent/safety shows what the deck offers).",
+            "filed": False,
+        })
+    proposal, _ = await _file_safety_proposal(add, data.get("summary"), data.get("source") or "agent", data.get("questions"))
+    proposal["note"] = "Filed for review. Nothing is enforced until a person accepts it on the Safety page."
+    return proposal
 
 
 @router.post("/propose")
@@ -323,6 +441,19 @@ async def agent_proposal(proposal_id: int):
         return _as_dict(row)
 
 
+@router.get("/proposals/{proposal_id}/safety-draft")
+async def agent_safety_draft(proposal_id: int):
+    """A safety proposal laid over the configuration in force *now* (which may have changed since
+    it was filed), for the Safety page to show unsaved."""
+    async with async_session() as session:
+        row = await session.get(AgentProposal, proposal_id)
+    if row is None or row.kind != "safety":
+        return JSONResponse(status_code=404, content={"error": "No such safety proposal."})
+    add = (row.payload or {}).get("add") or {}
+    merged, problems = safety.validate(merge_safety(safety.guard.config, add), safety.guard.deck())
+    return {"proposal": _as_dict(row), "config": merged, "problems": problems}
+
+
 @router.post("/proposals/{proposal_id}/accept")
 async def agent_accept(proposal_id: int, request: Request):
     """Apply a proposal. This is the human end of the loop and the only thing here with an
@@ -426,6 +557,31 @@ async def agent_accept(proposal_id: int, request: Request):
             row.decided_at = datetime.utcnow()
             await session.commit()
             return {"ok": True, "kind": "run", "name": row.name, "run_id": run_id}
+
+        if row.kind == "safety":
+            # The Safety page saved it itself, maybe after edits: record the decision only.
+            if data.get("save") is False:
+                row.status = "accepted"
+                row.decided_note = data.get("note") or "Saved from the Safety page"
+                row.decided_at = datetime.utcnow()
+                await session.commit()
+                return {"ok": True, "kind": "safety", "saved": False}
+            # Laid over the configuration in force now, not the one it was written against.
+            add = (row.payload or {}).get("add") or {}
+            try:
+                safety.guard.replace(merge_safety(safety.guard.config, add))
+            except safety.SafetyConfigError as e:
+                return JSONResponse(status_code=400, content={
+                    "error": "This no longer fits the deck or the safety configuration: " + str(e),
+                    "issues": _safety_issues(e.problems),
+                })
+            except OSError as e:
+                return JSONResponse(status_code=500, content={"error": f"Could not save the safety configuration: {e}"})
+            row.status = "accepted"
+            row.decided_note = data.get("note")
+            row.decided_at = datetime.utcnow()
+            await session.commit()
+            return {"ok": True, "kind": "safety", "saved": True}
 
         return JSONResponse(status_code=400, content={"error": f"Unknown proposal kind '{row.kind}'."})
 
@@ -595,6 +751,59 @@ async def _run_translation(request, data, on_progress=None):
     }
 
 
+async def _run_safety_chat(request, data, on_progress=None):
+    """Plain words to safety additions, filed as a proposal (the Safety page shows it unsaved)."""
+    message = _clip(data.get("message"), 4000).strip()
+    if not message:
+        raise ValueError("Say what should be prevented.")
+    provider = build_provider(_read_settings(request))
+    result, transcript = await draft_safety(provider, safety.guard.deck(), safety.guard.config, message,
+                                            on_progress=on_progress)
+    model_id = f"{provider.name}/{provider.model}"
+    proposal = None
+    if any(result["add"].get(k) for k in ("states", "limits", "rules", "trays")):
+        proposal, _ = await _file_safety_proposal(result["add"], result["summary"], f"panel:{model_id}", result["questions"])
+    return {
+        "proposal": proposal,
+        "summary": result["summary"],
+        "ok": result["ok"],
+        "questions": result["questions"],
+        "added": result["added"],
+        "attempts": result["attempts"],
+        "model": model_id,
+        "raw": None if result["ok"] else (transcript[-1]["raw"][:4000] if transcript else None),
+    }
+
+
+async def _run_ask(request, data, on_progress=None):
+    """A question answered from the records (agent/ask.py). Read-only: files nothing."""
+    message = _clip(data.get("message"), 4000).strip()
+    if not message:
+        raise ValueError("Ask a question.")
+    provider = build_provider(_read_settings(request))
+    result, _ = await ask_records(provider, _queue(), message, history_turns=data.get("history") or [],
+                                  page_context=_clip(data.get("page_context"), 2000),
+                                  deck_names=sorted(_schema(request)), on_progress=on_progress)
+    return {**result, "model": f"{provider.name}/{provider.model}"}
+
+
+MODES = ("workflow", "safety", "ask")
+
+
+async def _run_mode(request, data, on_progress=None):
+    """One chat request, by mode: `workflow` drafts a workflow (the default, and what the Designer
+    always sent), `safety` drafts safety additions, `ask` answers from the records. Returns the
+    final event's phase and body."""
+    mode = str(data.get("mode") or "workflow")
+    if mode not in MODES:
+        raise ValueError(f"Unknown mode '{mode}'. Use one of: {', '.join(MODES)}.")
+    if mode == "ask":
+        return "answered", {"mode": mode, **await _run_ask(request, data, on_progress)}
+    if mode == "safety":
+        return "filed", {"mode": mode, **await _run_safety_chat(request, data, on_progress)}
+    return "filed", {"mode": mode, **await _run_translation(request, data, on_progress)}
+
+
 @router.post("/safety")
 async def agent_safety(request: Request):
     """Plain words to a draft of the safety configuration (agent/safety_draft.py).
@@ -603,7 +812,6 @@ async def agent_safety(request: Request):
     workflow, what a model writes takes effect only when a person accepts it, here by pressing
     Save on a page that shows exactly what was added.
     """
-    from ivoryos_edge.agent.safety_draft import draft_safety
     try:
         data = await request.json()
     except Exception:
@@ -625,7 +833,8 @@ async def agent_safety(request: Request):
 
 @router.post("/chat")
 async def agent_chat(request: Request):
-    """Translate prose into a workflow and file it for review.
+    """Translate prose into a workflow and file it for review (or, with `mode`, draft safety
+    additions or answer a question from the records: see _run_mode).
 
     One call does the whole loop — generate, validate against the live deck, correct — and
     always ends at a proposal, including when the model could not get it fully valid: the
@@ -636,7 +845,8 @@ async def agent_chat(request: Request):
     except Exception:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
     try:
-        return await _run_translation(request, data)
+        _, result = await _run_mode(request, data)
+        return result
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except ProviderError as e:
@@ -666,8 +876,8 @@ async def agent_chat_stream(request: Request):
 
         async def run():
             try:
-                result = await _run_translation(request, data, on_progress=on_progress)
-                await queue.put({"phase": "filed", **result})
+                phase, result = await _run_mode(request, data, on_progress=on_progress)
+                await queue.put({"phase": phase, **result})
             except ValueError as e:
                 await queue.put({"phase": "error", "error": str(e)})
             except ProviderError as e:

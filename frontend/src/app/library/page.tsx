@@ -1,5 +1,6 @@
 "use client";
 import { API_BASE, withBase } from '@/config';
+import { canvasHasUnsavedWork, canvasWorkflowName, handOffToDesigner } from '@/designerHandoff';
 
 import { useState, useEffect } from 'react';
 import { Book, Download, Search, Calendar, Clock, Filter, ArrowUpDown, AlertTriangle, Trash2, Link2, History, X, Tag, Plus } from 'lucide-react';
@@ -282,17 +283,8 @@ export default function LibraryPage() {
   });
 
   const requestLoad = (name: string, version?: number) => {
-    const unsaved = localStorage.getItem('ivoryos_is_unsaved') === 'true';
-    const hasBlocks = ['ivoryos_sequence', 'ivoryos_prep_sequence', 'ivoryos_cleanup_sequence'].some(key => {
-      try {
-        const raw = localStorage.getItem(key);
-        return !!raw && JSON.parse(raw).length > 0;
-      } catch {
-        return false;
-      }
-    });
-    const draftName = localStorage.getItem('ivoryos_editing_workflow') || '';
-    if (unsaved && hasBlocks && draftName !== name) {
+    const draftName = canvasWorkflowName();
+    if (canvasHasUnsavedWork() && draftName !== name) {
       setPendingLoad({ name, draftName, version });
       return;
     }
@@ -362,21 +354,16 @@ export default function LibraryPage() {
       const newSequence = toSequenceBlocks(legacyData.script, instruments);
       const prepSequence = toSequenceBlocks(legacyData.prep, instruments);
       const cleanupSequence = toSequenceBlocks(legacyData.cleanup, instruments);
-      localStorage.setItem('ivoryos_sequence', JSON.stringify(newSequence));
-      localStorage.setItem('ivoryos_prep_sequence', JSON.stringify(prepSequence));
-      localStorage.setItem('ivoryos_cleanup_sequence', JSON.stringify(cleanupSequence));
-      localStorage.setItem('ivoryos_editing_workflow', name);
-      localStorage.setItem('ivoryos_editing_workflow_desc', legacyData.description || '');
       // A freshly loaded head version matches what's on disk, so it starts clean — otherwise the
       // designer would show "Unsaved" (and this page would warn) before a single edit. Loading an
       // older version is deliberately marked unsaved instead: saving from there creates the next
       // version rather than silently rolling back, so it should read the same as any other edit.
-      localStorage.setItem(
-        'ivoryos_saved_signature',
-        workflowSignature(prepSequence, newSequence, cleanupSequence, name, legacyData.description || '')
-      );
-      localStorage.setItem('ivoryos_is_unsaved', version ? 'true' : 'false');
-      window.location.href = withBase('/designer');
+      handOffToDesigner({
+        prep: prepSequence, script: newSequence, cleanup: cleanupSequence,
+        name, description: legacyData.description || '',
+        savedSignature: workflowSignature(prepSequence, newSequence, cleanupSequence, name, legacyData.description || ''),
+        unsaved: !!version,
+      });
     } catch (e: any) {
       await notify(e.message, { title: 'Could not load workflow', tone: 'error' });
     }

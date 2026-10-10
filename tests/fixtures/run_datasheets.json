@@ -1,0 +1,813 @@
+{
+ "about": "Run records and the datasheet each one reads as. The expected tables are produced by the TypeScript (packages/shared-ui/src/runRecord.ts formatRun, via packages/shared-ui/test/write-datasheet-fixtures.mjs) and checked by both packages/shared-ui/test/runRecord.test.mjs and tests/automated/test_datasheet.py, so the edge's Python reading (ivoryos_edge/datasheet.py) cannot drift from Data History's.",
+ "cases": [
+  {
+   "name": "sequence with a typed-in answer, field bindings and prep/cleanup",
+   "record": {
+    "id": 1,
+    "name": "One pass",
+    "status": "completed",
+    "start_time": "2026-10-01T10:00:00",
+    "parameters": {
+     "type": "Sequence",
+     "deck_version": 3
+    },
+    "steps": [
+     {
+      "instrument": "reactor",
+      "method": "heat",
+      "parameters": {
+       "temp": 60,
+       "_phase": "prep"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "Flow_Control",
+      "method": "User_Input",
+      "parameters": {
+       "variable_name": "vial",
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": "A1"
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "hplc",
+      "method": "analyze",
+      "parameters": {
+       "_return_bindings": [
+        {
+         "path": "composition.yield_percent",
+         "var": "yield"
+        },
+        {
+         "path": "method",
+         "var": "method_name"
+        }
+       ],
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": {
+        "composition": {
+         "yield_percent": 71.2
+        },
+        "method": "fast"
+       }
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "balance",
+      "method": "weigh",
+      "parameters": {
+       "_return_var": "mass",
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": 1.25
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "reactor",
+      "method": "cool",
+      "parameters": {
+       "_phase": "cleanup"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     }
+    ]
+   },
+   "expected": {
+    "type": "Sequence",
+    "variables": [
+     "vial",
+     "yield",
+     "method_name",
+     "mass"
+    ],
+    "rows": [
+     {
+      "row": 1,
+      "status": "completed",
+      "values": [
+       "A1",
+       71.2,
+       "fast",
+       1.25
+      ]
+     }
+    ],
+    "deck_version": 3,
+    "batch_size": null,
+    "prep": [
+     "completed"
+    ],
+    "cleanup": [
+     "completed"
+    ]
+   }
+  },
+  {
+   "name": "iterate with a batch step that reads per row, and a failed step skipped",
+   "record": {
+    "id": 2,
+    "name": "Plate",
+    "status": "completed",
+    "start_time": "2026-10-02T10:00:00",
+    "parameters": {
+     "type": "Spreadsheet",
+     "variables": [
+      "temp",
+      "well"
+     ],
+     "batch_size": 2,
+     "rows": [
+      {
+       "temp": 60,
+       "well": "A1"
+      },
+      {
+       "temp": 70,
+       "well": "A2"
+      },
+      {
+       "temp": 80,
+       "well": "A3"
+      }
+     ],
+     "sequence_template": [
+      {
+       "instrument": "pump",
+       "method": "dispense",
+       "returnVar": null
+      },
+      {
+       "instrument": "reader",
+       "method": "read_plate",
+       "returnVar": "absorbance"
+      },
+      {
+       "instrument": "balance",
+       "method": "weigh",
+       "returnVar": "mass"
+      }
+     ],
+     "_issues": {
+      "skipped": 1
+     }
+    },
+    "steps": [
+     {
+      "instrument": "pump",
+      "method": "dispense",
+      "parameters": {
+       "well": "A1",
+       "_row": 0,
+       "_block": 0,
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "pump",
+      "method": "dispense",
+      "parameters": {
+       "well": "A2",
+       "_row": 1,
+       "_block": 0,
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "reader",
+      "method": "read_plate",
+      "parameters": {
+       "wells": [
+        "A1",
+        "A2"
+       ],
+       "_row": 0,
+       "_block": 1,
+       "_return_var": "absorbance",
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": {
+        "A1": 0.5,
+        "A2": 0.7
+       },
+       "by_row": {
+        "0": {
+         "absorbance": 0.5
+        },
+        "1": {
+         "absorbance": 0.7
+        }
+       }
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "balance",
+      "method": "weigh",
+      "parameters": {
+       "_row": 0,
+       "_block": 2,
+       "_return_var": "mass",
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": 1.1
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "balance",
+      "method": "weigh",
+      "parameters": {
+       "_row": 1,
+       "_block": 2,
+       "_return_var": "mass",
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": 1.2
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "pump",
+      "method": "dispense",
+      "parameters": {
+       "well": "A3",
+       "_row": 2,
+       "_block": 0,
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "reader",
+      "method": "read_plate",
+      "parameters": {
+       "wells": [
+        "A3"
+       ],
+       "_row": 2,
+       "_block": 1,
+       "_return_var": "absorbance",
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": {
+        "A3": 0.9
+       },
+       "by_row": {
+        "2": {
+         "absorbance": 0.9
+        }
+       }
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "balance",
+      "method": "weigh",
+      "parameters": {
+       "_row": 2,
+       "_block": 2,
+       "_return_var": "mass",
+       "_phase": "main"
+      },
+      "outputs": null,
+      "status": "skipped",
+      "error": "Port busy"
+     }
+    ]
+   },
+   "expected": {
+    "type": "Spreadsheet",
+    "variables": [
+     "temp",
+     "well",
+     "absorbance",
+     "mass"
+    ],
+    "rows": [
+     {
+      "row": 1,
+      "status": "completed",
+      "values": [
+       60,
+       "A1",
+       0.5,
+       1.1
+      ]
+     },
+     {
+      "row": 2,
+      "status": "completed",
+      "values": [
+       70,
+       "A2",
+       0.7,
+       1.2
+      ]
+     },
+     {
+      "row": 3,
+      "status": "failed",
+      "values": [
+       80,
+       "A3",
+       0.9,
+       ""
+      ]
+     }
+    ],
+    "deck_version": null,
+    "batch_size": 2,
+    "prep": [],
+    "cleanup": []
+   }
+  },
+  {
+   "name": "iterate from before rows were tagged: sliced in equal chunks",
+   "record": {
+    "id": 3,
+    "name": "Old screen",
+    "status": "completed",
+    "start_time": "2026-09-01T10:00:00",
+    "parameters": {
+     "type": "Spreadsheet",
+     "variables": [
+      "volume"
+     ],
+     "rows": [
+      {
+       "volume": 1
+      },
+      {
+       "volume": 2
+      }
+     ],
+     "sequence_template": [
+      {
+       "instrument": "pump",
+       "method": "dispense",
+       "returnVar": null
+      },
+      {
+       "instrument": "uv",
+       "method": "measure",
+       "returnVar": "abs"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "instrument": "pump",
+      "method": "dispense",
+      "parameters": {
+       "volume": 1
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "uv",
+      "method": "measure",
+      "parameters": {},
+      "outputs": {
+       "result": 0.31
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "pump",
+      "method": "dispense",
+      "parameters": {
+       "volume": 2
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "uv",
+      "method": "measure",
+      "parameters": {},
+      "outputs": {
+       "result": 0.62
+      },
+      "status": "running"
+     }
+    ]
+   },
+   "expected": {
+    "type": "Spreadsheet",
+    "variables": [
+     "volume",
+     "abs"
+    ],
+    "rows": [
+     {
+      "row": 1,
+      "status": "completed",
+      "values": [
+       1,
+       0.31
+      ]
+     },
+     {
+      "row": 2,
+      "status": "running",
+      "values": [
+       2,
+       0.62
+      ]
+     }
+    ],
+    "deck_version": null,
+    "batch_size": null,
+    "prep": [],
+    "cleanup": []
+   }
+  },
+  {
+   "name": "optimization: suggested values, objectives, a failed trial and one not started",
+   "record": {
+    "id": 4,
+    "name": "Campaign",
+    "status": "running",
+    "start_time": "2026-10-03T10:00:00",
+    "parameters": {
+     "type": "Optimization",
+     "optimizer": "ax",
+     "budget": 3,
+     "parameter_space": [
+      {
+       "name": "temp",
+       "type": "range",
+       "bounds": [
+        40,
+        90
+       ]
+      },
+      {
+       "name": "cat",
+       "type": "range",
+       "bounds": [
+        0.5,
+        5
+       ]
+      }
+     ],
+     "objective_config": [
+      {
+       "name": "yield",
+       "minimize": false
+      }
+     ],
+     "sequence_template": [
+      {
+       "instrument": "reactor",
+       "method": "run",
+       "returnVar": null
+      },
+      {
+       "instrument": "hplc",
+       "method": "analyze",
+       "returnBindings": [
+        {
+         "path": "yield_percent",
+         "var": "yield"
+        }
+       ]
+      }
+     ]
+    },
+    "steps": [
+     {
+      "instrument": "reactor",
+      "method": "charge",
+      "parameters": {
+       "_phase": "prep"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "reactor",
+      "method": "run",
+      "parameters": {
+       "temp": 60,
+       "cat": 1,
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "hplc",
+      "method": "analyze",
+      "parameters": {
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": {
+        "yield_percent": 40.5
+       }
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "reactor",
+      "method": "run",
+      "parameters": {
+       "temp": 70,
+       "cat": 2.5,
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "hplc",
+      "method": "analyze",
+      "parameters": {
+       "_phase": "main"
+      },
+      "outputs": null,
+      "status": "skipped",
+      "error": "No peak found"
+     },
+     {
+      "instrument": "reactor",
+      "method": "run",
+      "parameters": {
+       "temp": 65,
+       "cat": 3,
+       "_phase": "main"
+      },
+      "outputs": null,
+      "status": "pending"
+     },
+     {
+      "instrument": "hplc",
+      "method": "analyze",
+      "parameters": {
+       "_phase": "main"
+      },
+      "outputs": null,
+      "status": "pending"
+     }
+    ]
+   },
+   "expected": {
+    "type": "Optimization",
+    "variables": [
+     "temp",
+     "cat",
+     "yield (objective)"
+    ],
+    "rows": [
+     {
+      "row": 1,
+      "status": "completed",
+      "values": [
+       60,
+       1,
+       40.5
+      ]
+     },
+     {
+      "row": 2,
+      "status": "failed",
+      "values": [
+       70,
+       2.5,
+       ""
+      ]
+     },
+     {
+      "row": 3,
+      "status": "pending",
+      "values": [
+       65,
+       3,
+       ""
+      ]
+     }
+    ],
+    "deck_version": null,
+    "batch_size": null,
+    "prep": [
+     "completed"
+    ],
+    "cleanup": []
+   }
+  },
+  {
+   "name": "iterate stopped early: the rows it never reached are not run",
+   "record": {
+    "id": 5,
+    "name": "Stopped",
+    "status": "completed",
+    "start_time": "2026-10-04T10:00:00",
+    "parameters": {
+     "type": "Spreadsheet",
+     "variables": [
+      "rate"
+     ],
+     "rows": [
+      {
+       "rate": 1
+      },
+      {
+       "rate": 2
+      }
+     ],
+     "sequence_template": [
+      {
+       "instrument": "pump",
+       "method": "flow",
+       "returnVar": "pressure"
+      }
+     ],
+     "_issues": {
+      "stopped_early": 1
+     }
+    },
+    "steps": [
+     {
+      "instrument": "pump",
+      "method": "flow",
+      "parameters": {
+       "rate": 1,
+       "_row": 0,
+       "_block": 0,
+       "_phase": "main"
+      },
+      "outputs": {
+       "result": 2.2
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "pump",
+      "method": "flow",
+      "parameters": {
+       "rate": 2,
+       "_row": 1,
+       "_block": 0,
+       "_phase": "main"
+      },
+      "outputs": null,
+      "status": "skipped"
+     }
+    ]
+   },
+   "expected": {
+    "type": "Spreadsheet",
+    "variables": [
+     "rate",
+     "pressure"
+    ],
+    "rows": [
+     {
+      "row": 1,
+      "status": "completed",
+      "values": [
+       1,
+       2.2
+      ]
+     },
+     {
+      "row": 2,
+      "status": "not_run",
+      "values": [
+       2,
+       ""
+      ]
+     }
+    ],
+    "deck_version": null,
+    "batch_size": null,
+    "prep": [],
+    "cleanup": []
+   }
+  },
+  {
+   "name": "untyped run with one step saving two names by position, list and object",
+   "record": {
+    "id": 6,
+    "name": null,
+    "status": "error",
+    "start_time": "2026-10-05T10:00:00",
+    "parameters": {},
+    "steps": [
+     {
+      "instrument": "probe",
+      "method": "pair",
+      "parameters": {
+       "_return_var": "low, high"
+      },
+      "outputs": {
+       "result": [
+        3,
+        9
+       ]
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "probe",
+      "method": "stats",
+      "parameters": {
+       "_return_var": "mean, sd, n"
+      },
+      "outputs": {
+       "result": {
+        "mean": 5.5,
+        "sd": 0.4
+       }
+      },
+      "status": "completed"
+     },
+     {
+      "instrument": "probe",
+      "method": "read",
+      "parameters": {
+       "_return_var": "last"
+      },
+      "outputs": {
+       "result": null
+      },
+      "status": "error",
+      "error": "Timed out"
+     }
+    ]
+   },
+   "expected": {
+    "type": "Sequence",
+    "variables": [
+     "low",
+     "high",
+     "mean",
+     "sd",
+     "n",
+     "last"
+    ],
+    "rows": [
+     {
+      "row": 1,
+      "status": "error",
+      "values": [
+       3,
+       9,
+       5.5,
+       0.4,
+       "",
+       null
+      ]
+     }
+    ],
+    "deck_version": null,
+    "batch_size": null,
+    "prep": [],
+    "cleanup": []
+   }
+  }
+ ]
+}

@@ -1,7 +1,9 @@
 # Agent in the loop
 
-Describe a protocol in prose; get a workflow the scientist reviews, edits and saves. Works
-from the Designer's own panel or from Claude Desktop, against the same tools either way.
+Describe a protocol in prose and get a workflow the scientist reviews, edits and saves; ask about
+past runs and get answers from the records; say what should never happen and get safety rules to
+review. Works from the assistant panel on every page or from Claude Desktop (MCP), against the
+same tools either way.
 
 ## The shape of it
 
@@ -12,11 +14,12 @@ from the Designer's own panel or from Claude Desktop, against the same tools eit
                       └─────────────────────────────┘  │   ┌──────────────────────┐
                                                        ├──▶│  /api/agent/*        │
                       ┌─────────────────────────────┐  │   │  agent/routes.py     │
-  Designer panel ────▶│  chat loop + provider       │──┘   └──────────┬───────────┘
-  (AgentPanel.tsx)    │  agent/chat.py, providers.py│                 │
+  Assistant panel ───▶│  chat loops + provider      │──┘   └──────────┬───────────┘
+  (AssistantPanel.tsx)│  chat / ask / safety_draft  │                 │
                       └─────────────────────────────┘                 ▼
                                                           ┌──────────────────────┐
                                                           │ deck.py   describe   │
+                                                          │ history.py  runs     │
                                                           │ validate.py  check   │
                                                           │ AgentProposal  queue │
                                                           └──────────┬───────────┘
@@ -37,9 +40,33 @@ suggested it" to "it happened", and a person stands in it.
 | The agent can | The agent cannot |
 | --- | --- |
 | Read the deck, read saved workflows | Save a workflow |
-| Validate a draft against the live deck | Queue or start a run |
-| File a proposed workflow (reviewed as a diff) | Edit the canvas |
+| Read run history: find runs, read one as its table, compare runs | Queue or start a run |
+| Validate a draft against the live deck | Edit the canvas |
+| File a proposed workflow (reviewed as a diff) | Change the safety configuration |
 | Ask for a run (reviewed as "start this?") | Change settings, delete anything |
+| File safety additions (reviewed on the Safety page) | |
+
+## One assistant, three modes
+
+The panel (`frontend/src/components/AssistantPanel.tsx`) is mounted once in the root layout and
+opened from the nav on any page. Each mode is one of `/api/agent/chat`'s `mode`s:
+
+| Mode | What it does | Ends in |
+| --- | --- | --- |
+| Ask | answers from the records: it may look up runs (`search_runs`, `run_table`, `compare_runs`, agent/ask.py) and must quote the numbers those return | an answer with the runs it used, linked to Data History; nothing filed |
+| Workflow | prose to a workflow (agent/chat.py); on the Designer it edits the canvas | a workflow proposal: put on the canvas, opened in the Designer, or saved to the library |
+| Safety | words to states, limits and rules (agent/safety_draft.py) | a safety proposal, opened on the Safety page unsaved; Save accepts it |
+
+A page sets the default mode and says where the person is (`useAssistantPage` in
+`frontend/src/assistant.ts`); that sentence goes to the model with each request, so "this run"
+means the run selected on Data History.
+
+**History is read through the same table Data History shows.** `ivoryos_edge/datasheet.py` is a
+Python port of `packages/shared-ui/src/runRecord.ts`, and both are held to
+`tests/fixtures/run_datasheets.json` (expected tables written by the TypeScript), so the assistant
+and the page cannot disagree about which value belongs to which sample. Statistics (count, min,
+max, mean, the best run by an objective's direction) are computed in `agent/history.py`, never
+left to the model.
 
 A `run` request is refused outright when the workflow leaves values open (`#variables`) and
 none are supplied — otherwise a person would be approving a run guaranteed to stop partway
@@ -91,10 +118,16 @@ messages name the field and list the legal alternatives.
    }
    ```
 4. Restart Claude Desktop. Ask it to read the deck and draft a protocol; its proposal appears in
-   the Designer's assistant panel under "waiting for you".
+   the assistant panel (the Assistant button in the nav) under "waiting for you".
+
+**Claude Code** needs no setup in this repository: `.mcp.json` at its root starts the same server
+(relative paths, so it works from any clone) against `IVORYOS_URL`, default
+`http://localhost:8080`; set `IVORYOS_URL` before starting Claude Code for a deck on another
+port. Claude Code asks once to approve the project's server.
 
 Tools exposed: `list_deck`, `describe_instrument`, `describe_method`, `list_workflows`,
-`get_workflow`, `validate_workflow`, `propose_workflow`, `request_run`, `list_proposals`.
+`get_workflow`, `validate_workflow`, `propose_workflow`, `request_run`, `search_runs`,
+`get_run_data`, `compare_runs`, `get_safety`, `propose_safety`, `list_proposals`.
 
 ## Setting up the in-app panel (Ollama)
 

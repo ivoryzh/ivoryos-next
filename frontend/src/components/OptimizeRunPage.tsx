@@ -135,7 +135,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
       optimizer_config: saved.optimizer_config || {},
       earlyStopMode: saved.earlyStopMode || 'any',
       constraints: saved.constraints || [],
-      stopAfterNoImprovement: saved.stopAfterNoImprovement || 0
+      stopAfterNoImprovement: saved.stopAfterNoImprovement || 0,
+      askOnMissingResult: !!saved.askOnMissingResult
     };
   });
 
@@ -150,7 +151,8 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
       optimizer_config: optConfig.optimizer_config,
       earlyStopMode: optConfig.earlyStopMode,
       constraints: optConfig.constraints,
-      stopAfterNoImprovement: optConfig.stopAfterNoImprovement
+      stopAfterNoImprovement: optConfig.stopAfterNoImprovement,
+      askOnMissingResult: optConfig.askOnMissingResult
     }));
   }, [optConfig]);
 
@@ -1152,6 +1154,22 @@ export default function OptimizeRunPage({ stage }: { stage?: EmbeddedStage } = {
                       className={`${compactInput} w-14 disabled:opacity-50`}
                     />
                     <span>iterations in a row</span>
+                  </label>
+                )}
+                {returns.length > 0 && (
+                  // A trial with an objective missing (nothing measured, or NaN): by default each
+                  // optimizer leaves it out and the run goes on (queue.py on_missing_result).
+                  <label
+                    title="Off: a trial that gives no value for an objective is left out of the optimizer's model, it still counts towards the budget, and the run goes on. On: the run pauses there, with the deck as the trial left it, and you choose to go on, stop and run cleanup, or stop."
+                    className="mt-2 flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!optConfig.askOnMissingResult}
+                      onChange={e => setOptConfig({ ...optConfig, askOnMissingResult: e.target.checked })}
+                      className="w-3.5 h-3.5 accent-gray-900 dark:accent-white"
+                    />
+                    <span>Pause and ask me when a trial gives no result</span>
                   </label>
                 )}
               </div>

@@ -127,6 +127,7 @@ elsewhere in the lab.
 | [Plugins](docs/plugins.md) | Adding your own pages and panels |
 | [AI agents and MCP](docs/agent_in_the_loop.md) | Letting Claude or another agent propose workflows for review |
 | [Workflow reuse and versioning](docs/workflow_reuse_and_versioning.md) | Copies, links, versions and tags in the library |
+| [How the optimizers behave](docs/optimizer_behavior.md) | Ax, BayBE and NIMO: rounds, the random start, failed experiments, existing data and plots |
 | [Developing IvoryOS](docs/development.md) | Running from source, the demo deck, Cloud, tests and releases |
 
 ## Community and help

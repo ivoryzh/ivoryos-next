@@ -11,9 +11,57 @@ import { chooseDialog, confirmDialog, notify } from '@ivoryos/shared-ui';
  * graceful stop told to, hold the queue until Resume queue.
  */
 
-export type Decision = 'retry' | 'skip' | 'stop';
+export type Decision = 'retry' | 'skip' | 'cleanup' | 'stop';
 
-/** Answer a failed step that is waiting: run it again, leave it and go on, or end the run. */
+/**
+ * What the run stopped for, as the edge publishes it in the queue status (`status.decision`,
+ * queue.py _await_choice): a failed step, the optimizer failing to suggest or to record a round,
+ * or a trial that gave no result (when the run asks about those). `choices` are the ones that
+ * apply: there is nothing to skip when the optimizer cannot suggest, and "cleanup" (end the run
+ * after its cleanup) only when there is a cleanup still to run. Plain stop leaves cleanup out.
+ */
+export type PendingDecision = {
+  run_id: number;
+  kind: 'step' | 'suggest' | 'observe' | 'no_result';
+  title: string;
+  error: string;
+  choices: Decision[];
+  key: string;
+};
+
+/** The choices for this run's decision; a failed step's three when the edge says nothing more. */
+export function choicesFor(decision: PendingDecision | null | undefined, runId: number): Decision[] {
+  return decision && decision.run_id === runId ? decision.choices : ['retry', 'skip', 'stop'];
+}
+
+/** How each choice reads, for each kind of decision: [button label, what it does]. */
+export function choiceWords(kind: PendingDecision['kind'] | undefined, choice: Decision): [string, string] {
+  const words: Record<string, Partial<Record<Decision, [string, string]>>> = {
+    step: {
+      retry: ['Retry step', 'Run the failed step again'],
+      skip: ['Skip step', 'Leave the failed step and carry on with the run'],
+    },
+    suggest: {
+      retry: ['Ask again', 'Ask the optimizer for the next trials again'],
+    },
+    observe: {
+      retry: ['Record again', "Give the optimizer this round's results again"],
+      skip: ['Go on without it', 'Carry on; the optimizer does not learn from this round'],
+    },
+    no_result: {
+      skip: ['Leave it out', 'Carry on; the optimizer leaves this trial out of its model'],
+    },
+  };
+  const common: Record<Decision, [string, string]> = {
+    retry: ['Retry', 'Try again'],
+    skip: ['Skip', 'Carry on'],
+    cleanup: ['Stop, run cleanup', 'End the run here, after its cleanup steps; the queue stays paused'],
+    stop: ['Stop run', 'End the run here without cleanup: the deck stays as it is, and the queue stays paused'],
+  };
+  return words[kind || 'step']?.[choice] || common[choice];
+}
+
+/** Answer a run waiting for a decision (see PendingDecision). */
 export async function decideFailure(runId: number, action: Decision): Promise<void> {
   try {
     const res = await fetch(`${API_BASE}/api/queue/runs/${runId}/resolve`, {

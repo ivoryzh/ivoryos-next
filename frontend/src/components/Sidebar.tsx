@@ -1,9 +1,11 @@
 "use client";
 import { API_BASE, WS_BASE } from '@/config';
 import { HOME_HREF, HOME_PAGE_SHOWN } from '@/homePage';
+import { toggleAssistant, useAssistant } from '@/assistant';
+import { useWaitingProposals } from '@/components/useWaitingProposals';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PictureInPicture2, Gauge, Menu, HandHelping, Minimize2, ShieldCheck } from 'lucide-react';
+import { Settings, LayoutDashboard, Library, Workflow, Play, Table2, Settings2, Plug, PictureInPicture2, Gauge, Menu, HandHelping, Minimize2, ShieldCheck, Sparkles } from 'lucide-react';
 import { INPUT_PROMPT_EVENT, isPromptMinimized, promptKey, setPromptMinimized } from '@/inputPrompt';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
@@ -205,6 +207,13 @@ export default function Sidebar() {
   // The top bar (shared-ui TopNav.tsx, the same bar Cloud draws): home, the pages you work
   // through in order, the deck, then plugins. No Queue entry in either placement: the queue is a
   // drawer (openQueue), opened from the run panel, the run card and the status chip.
+  // The assistant opens over any page (components/AssistantPanel.tsx). The count is what agents
+  // elsewhere (Claude Desktop, over MCP) filed and nobody has looked at yet.
+  const { open: assistantOpen } = useAssistant();
+  const waitingProposals = useWaitingProposals(!assistantOpen);
+  const assistantLabel = waitingProposals ? `Assistant (${waitingProposals})` : 'Assistant';
+  const assistantTitle = assistantOpen ? 'Close the assistant'
+    : `Ask about your runs, draft a workflow or safety rules${waitingProposals ? `. ${waitingProposals} suggestion${waitingProposals === 1 ? '' : 's'} waiting for you` : ''}`;
   const isOn = (href: string, alsoActiveOn: string[] = []) =>
     samePath(href, pathname) || alsoActiveOn.some(p => samePath(p, pathname));
   const cloudOn = !!edgeStatus?.cloud_connected;
@@ -215,6 +224,8 @@ export default function Sidebar() {
       brand={!desktop && <TopNavBrand link={Link} href={HOME_HREF} />}
       end={
         <>
+          <TopNavButton onClick={toggleAssistant} title={assistantTitle} label={assistantLabel}
+            icon={<Sparkles className="w-4 h-4 shrink-0" />} active={assistantOpen} labelFrom="sm" />
           {cloudOffered && <Link
             href="/cloud"
             title={`Cloud Connect: ${cloudOn ? 'Connected' : 'Offline'} (open settings)`}
@@ -405,7 +416,14 @@ export default function Sidebar() {
           </Link>
         </div>}
 
-        <div className="text-sm font-medium text-gray-600 dark:text-gray-400">{navItem('/settings', 'Settings', <Settings className="w-5 h-5 shrink-0" />)}</div>
+        <div className="text-sm font-medium text-gray-600 dark:text-gray-400">
+          <button type="button" onClick={toggleAssistant} title={!isExpanded ? assistantTitle : undefined} aria-pressed={assistantOpen}
+            className={`w-[calc(100%-1.5rem)] flex items-center py-3 rounded-lg overflow-hidden mx-3 ${assistantOpen ? 'bg-accent-soft text-accent-fg' : 'hover:bg-gray-100 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white'}`}>
+            <div className="w-5 h-5 flex justify-center shrink-0 ml-3"><Sparkles className="w-5 h-5 shrink-0" /></div>
+            {isExpanded && <span className="ml-4 whitespace-nowrap">{assistantLabel}</span>}
+          </button>
+          {navItem('/settings', 'Settings', <Settings className="w-5 h-5 shrink-0" />)}
+        </div>
       </div>
     </aside>
     )}

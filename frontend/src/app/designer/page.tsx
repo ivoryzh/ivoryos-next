@@ -5,7 +5,7 @@ import { unmodifiedSavedWorkflowName } from '@/savedWorkflow';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Trash2, Settings2, Save, Code, Download, Upload, LayoutTemplate, X, Zap, AlertTriangle, Menu, FilePlus2 } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
-import AgentPanel from '@/components/AgentPanel';
+import { closeAssistant, openAssistant, useAssistant, useAssistantPage, type SavedBody } from '@/assistant';
 import AgentToolboxButton from '@/components/AgentToolboxButton';
 import { useQueueBusy } from '@/queueBusy';
 import {
@@ -20,6 +20,7 @@ import {
   scanDynamicParams,
   scanLiveInputVars,
   toSequenceBlocks,
+  toSavedBlocks,
   chooseDialog,
   confirmDialog,
   notify,
@@ -55,7 +56,7 @@ export default function DesignerPage() {
   const theme = useDocumentTheme();
   // The assistant panel is opt-in and remembered: a lab with no model configured should
   // never see it, and one that uses it every day should not reopen it every visit.
-  const [agentOpen, setAgentOpen] = useState(false);
+  const { open: assistantOpen } = useAssistant();
   const [viewMode, setViewMode] = useState<'canvas' | 'code'>('canvas');
   // Something queued or under way: Run becomes "Add to queue" and asks first.
   const hasPendingRuns = useQueueBusy();
@@ -134,7 +135,6 @@ export default function DesignerPage() {
   // Fetch status on mount
   useEffect(() => {
     // Load saved sequence if exists
-    setAgentOpen(localStorage.getItem('ivoryos_agent_panel') === 'true');
     const savedSeq = localStorage.getItem('ivoryos_sequence');
     if (savedSeq) {
       try {
@@ -282,12 +282,55 @@ export default function DesignerPage() {
     localStorage.setItem('ivoryos_is_unsaved', String(dirty));
   }, [hasLoaded, sequence, prepSequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription]);
 
-  // One toggle, reached from either the toolbox or the right-edge tab.
-  const toggleAgent = () => {
-    const next = !agentOpen;
-    setAgentOpen(next);
-    localStorage.setItem('ivoryos_agent_panel', String(next));
-  };
+  // The toolbox's Assistant button opens the one assistant (components/AssistantPanel.tsx), in
+  // Workflow mode. The canvas is lent to it below, so it drafts onto this canvas.
+  const toggleAgent = () => (assistantOpen ? closeAssistant() : openAssistant('workflow'));
+
+  // What the assistant sees of this page and may do to it. Read through a ref so the bridge
+  // always sees the canvas as it is now, not as it was when the page was last registered.
+  const canvasRef = useRef({ prepSequence, sequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription, statusData });
+  canvasRef.current = { prepSequence, sequence, cleanupSequence, currentWorkflowName, currentWorkflowDescription, statusData };
+  const stepTotal = prepSequence.length + sequence.length + cleanupSequence.length;
+  useAssistantPage({
+    page: 'designer',
+    defaultMode: 'workflow',
+    describe: `The Designer, editing ${currentWorkflowName ? `the workflow "${currentWorkflowName}"` : 'an unnamed workflow'} (${stepTotal} step${stepTotal === 1 ? '' : 's'} on the canvas).`,
+    designer: {
+      hasSteps: () => {
+        const c = canvasRef.current;
+        return c.prepSequence.length + c.sequence.length + c.cleanupSequence.length > 0;
+      },
+      getBody: () => {
+        const c = canvasRef.current;
+        return {
+          name: c.currentWorkflowName || 'Untitled protocol',
+          description: c.currentWorkflowDescription || '',
+          prep: toSavedBlocks(c.prepSequence),
+          script: toSavedBlocks(c.sequence),
+          cleanup: toSavedBlocks(c.cleanupSequence),
+        };
+      },
+      // Replaces the canvas wholesale, which is why it is only reachable from an explicit accept
+      // (with a diff offered first): a proposal is always a complete body.
+      apply: (body: SavedBody) => {
+        const c = canvasRef.current;
+        const instruments = c.statusData?.instruments || {};
+        setPrepSequence(toSequenceBlocks(body.prep, instruments));
+        setSequence(toSequenceBlocks(body.script || (body as any).sequence, instruments));
+        setCleanupSequence(toSequenceBlocks(body.cleanup, instruments));
+        // The steps persist themselves on change, but the name and description are only written
+        // when a workflow is saved or loaded; doing the same here keeps them through a reload.
+        if (body.name && !c.currentWorkflowName) {
+          setCurrentWorkflowName(body.name);
+          localStorage.setItem('ivoryos_editing_workflow', body.name);
+        }
+        if (body.description && !c.currentWorkflowDescription) {
+          setCurrentWorkflowDescription(body.description);
+          localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
+        }
+      },
+    },
+  }, [currentWorkflowName, stepTotal]);
 
 
   const startNewWorkflow = async () => {
@@ -710,41 +753,11 @@ export default function DesignerPage() {
             column (globals.css), and as direct children the two would stack: the assistant took
             the full height and the whole editor sat below the fold. */}
         <div className="flex flex-1 min-h-0 min-w-0">
-        {agentOpen && (
-          <AgentPanel
-            prepSequence={prepSequence}
-            sequence={sequence}
-            cleanupSequence={cleanupSequence}
-            workflowName={currentWorkflowName}
-            instruments={instruments}
-            onApply={(body) => {
-              // Replaces the canvas wholesale, which is why it is only reachable from an explicit
-              // accept and why the diff is offered first: the proposal is always a complete body.
-              setPrepSequence(body.prep);
-              setSequence(body.script);
-              setCleanupSequence(body.cleanup);
-              // The steps persist themselves on change, but the name and description do not —
-              // they are only written when a workflow is saved or loaded from the Library. Doing
-              // the same here keeps them through a reload, rather than leaving the canvas full
-              // and the header blank.
-              if (body.name && !currentWorkflowName) {
-                setCurrentWorkflowName(body.name);
-                localStorage.setItem('ivoryos_editing_workflow', body.name);
-              }
-              if (body.description && !currentWorkflowDescription) {
-                setCurrentWorkflowDescription(body.description);
-                localStorage.setItem('ivoryos_editing_workflow_desc', body.description);
-              }
-            }}
-            onClose={toggleAgent}
-          />
-        )}
 
         {/* Main Designer Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
           <WorkflowEditor
-            toolboxFooter={<AgentToolboxButton open={agentOpen} onToggle={toggleAgent} />}
-            hideToolbox={agentOpen}
+            toolboxFooter={<AgentToolboxButton open={assistantOpen} onToggle={toggleAgent} />}
             statusData={statusData}
             prepSequence={prepSequence}
             setPrepSequence={setPrepSequence}

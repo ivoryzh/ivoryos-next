@@ -4,6 +4,7 @@ import { Inter } from 'next/font/google';
 import GlobalQueueBar from '@/components/GlobalQueueBar';
 import QueueDrawer from '@/components/QueueDrawer';
 import PluginPanelHost from '@/components/PluginPanel';
+import AssistantPanel from '@/components/AssistantPanel';
 import { ThemeSync } from '@ivoryos/shared-ui';
 import "./globals.css";
 
@@ -37,6 +38,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <PluginPanelHost>{children}</PluginPanelHost>
         <GlobalQueueBar />
         <QueueDrawer />
+        {/* The one assistant, over whichever page is open (src/assistant.ts). */}
+        <AssistantPanel />
       </body>
     </html>
   );

@@ -2,7 +2,7 @@
 import { API_BASE } from '@/config';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ShieldCheck, ShieldOff, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ShieldCheck, ShieldOff, Sparkles } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import { confirmDialog, notify, useDocumentTheme, type SafetyView } from '@ivoryos/shared-ui';
 import LimitsEditor from '@/components/safety/LimitsEditor';
@@ -10,24 +10,29 @@ import TraysEditor from '@/components/safety/TraysEditor';
 import RulesEditor from '@/components/safety/RulesEditor';
 import StatesEditor from '@/components/safety/StatesEditor';
 import { emptyConfig, type Problem, type SafetyConfig, type SafetyInfo, type Schema } from '@/components/safety/model';
+import { clearRequestParam, useAssistantPage, usePageRequest } from '@/assistant';
 
 type Tab = 'limits' | 'trays' | 'states' | 'rules' | 'blocked';
 
 /**
- * Drafting states, limits and rules from a sentence (POST /api/agent/safety, edge
- * agent/safety_draft.py). Off the page for now, until there is a better way to offer it: the box
- * below, `describe` and the edge route are all kept, and turning this back on brings it back.
+ * A safety proposal from the assistant (components/AssistantPanel.tsx, or an agent over MCP),
+ * opened here to be read before anything is enforced: it is laid over the configuration in force
+ * now (GET /api/agent/proposals/{id}/safety-draft) and put in the draft, unsaved. Saving the page
+ * accepts it, as edited; discarding rejects it.
  */
-const DRAFT_FROM_WORDS = false;
-
-/** What the assistant drafted from a sentence (POST /api/agent/safety). */
-type Drafted = {
-  ok: boolean;
+type Suggestion = {
+  id: number;
   summary: string;
+  source: string;
   questions: string[];
-  problems: Problem[];
-  added: { states: string[]; limits: string[]; rules: string[] };
+  added: string[];
 };
+
+const addedLines = (add: any): string[] => [
+  ...Object.keys(add?.states || {}).map((n) => `state ${n}`),
+  ...(add?.limits || []).map((l: any) => `limit ${l.target}.${l.method}.${l.param}`),
+  ...(add?.rules || []).map((r: any) => `rule "${r.name || 'unnamed'}"`),
+];
 
 /**
  * The safety guard: what this bench allows its instruments to do, kept outside the drivers
@@ -49,11 +54,10 @@ export default function SafetyPage() {
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const checkSeq = useRef(0);
-  // Plain words to a draft: the sentence, whether a model is working on it, and what it wrote.
-  const [request, setRequest] = useState('');
-  const [drafting, setDrafting] = useState(false);
-  const [drafted, setDrafted] = useState<Drafted | null>(null);
-  const [draftError, setDraftError] = useState<string | null>(null);
+  // An assistant proposal being reviewed, and one asked for before the page had loaded.
+  const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
+  const [pendingReview, setPendingReview] = useState<number | null>(null);
+  usePageRequest('review-safety', setPendingReview);
 
   const adopt = useCallback((data: SafetyInfo) => {
     setInfo(data);
@@ -112,6 +116,14 @@ export default function SafetyPage() {
         return;
       }
       adopt(data);
+      if (suggestion) {
+        // Saved as a person left it after reading: the proposal is recorded as accepted, nothing
+        // more is written (the configuration just saved is the decision).
+        await fetch(`${API_BASE}/api/agent/proposals/${suggestion.id}/accept`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ save: false }),
+        }).catch(() => {});
+        setSuggestion(null);
+      }
     } catch {
       await notify('Could not reach the edge.', { title: 'Not saved', tone: 'error' });
     } finally {
@@ -119,35 +131,51 @@ export default function SafetyPage() {
     }
   };
 
-  // A sentence becomes states, limits and rules *in the draft*: shown in the tabs, unsaved, for a
-  // person to read and Save. The edge checks what the model wrote against the deck and has it
-  // correct its own mistakes first (agent/safety_draft.py).
-  const describe = async () => {
-    if (!draft || !request.trim() || drafting) return;
-    setDrafting(true);
-    setDraftError(null);
-    setDrafted(null);
-    try {
-      const res = await fetch(`${API_BASE}/api/agent/safety`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: request, config: draft }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setDraftError(res.status === 503
-          ? `${String(data.error || 'No model answered').replace(/\.?$/, '.')} Choose a model under Designer, Assistant.`
-          : data.error || 'The assistant could not draft that.');
-        return;
-      }
-      setDraft(data.config);
-      setDrafted(data);
-      const first = data.added.rules.length ? 'rules' : data.added.states.length ? 'states' : data.added.limits.length ? 'limits' : null;
-      if (first) setTab(first);
-    } catch {
-      setDraftError('Could not reach the edge.');
-    } finally {
-      setDrafting(false);
+  const discard = async () => {
+    if (suggestion) {
+      await fetch(`${API_BASE}/api/agent/proposals/${suggestion.id}/reject`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: 'Discarded on the Safety page' }),
+      }).catch(() => {});
+      setSuggestion(null);
     }
+    if (info) adopt(info);
   };
+
+  // Open an assistant proposal in the draft, once the page has the configuration to lay it over.
+  useEffect(() => {
+    if (pendingReview === null || !info || !draft) return;
+    const id = pendingReview;
+    setPendingReview(null);
+    clearRequestParam('review-safety');
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/agent/proposals/${id}/safety-draft`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'That suggestion could not be read.');
+        const proposal = data.proposal;
+        if (proposal.status !== 'pending') {
+          await notify(`This suggestion was already ${proposal.status}.`, { title: 'Nothing to review' });
+          return;
+        }
+        if (dirty && !(await confirmDialog('The page has changes you have not saved. Reviewing this suggestion replaces them.', { title: 'Replace your changes?', confirmLabel: 'Replace', tone: 'danger' }))) return;
+        const add = proposal.payload?.add || {};
+        setDraft(data.config);
+        setProblems(data.problems || []);
+        setSuggestion({ id, summary: proposal.summary, source: proposal.source, questions: proposal.payload?.questions || [], added: addedLines(add) });
+        setTab(add.rules?.length ? 'rules' : Object.keys(add.states || {}).length ? 'states' : 'limits');
+      } catch (e: any) {
+        await notify(e.message, { title: 'Could not open the suggestion', tone: 'error' });
+      }
+    })();
+  }, [pendingReview, info, draft, dirty]);
+
+  useAssistantPage({
+    page: 'safety',
+    defaultMode: 'safety',
+    describe: draft
+      ? `The Safety page: ${draft.limits.length} limits, ${Object.keys(draft.states || {}).length} states and ${draft.rules.length} rules${dirty ? ', with unsaved changes' : ''}. The guard is ${draft.enabled ? 'on' : 'off'}.`
+      : 'The Safety page.',
+  }, [draft?.limits.length, draft?.rules.length, Object.keys(draft?.states || {}).length, draft?.enabled, dirty]);
 
   const toggleGuard = async () => {
     if (!draft) return;
@@ -201,7 +229,7 @@ export default function SafetyPage() {
               <div className="ml-auto flex items-center gap-2">
                 {dirty && <span className="text-xs text-gray-500 dark:text-gray-400">{errors.length ? `${errors.length} to fix before saving` : 'Not saved yet'}</span>}
                 {dirty && (
-                  <button type="button" onClick={() => info && adopt(info)} className="rounded-lg px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10">Discard</button>
+                  <button type="button" onClick={discard} className="rounded-lg px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10">Discard</button>
                 )}
                 <button
                   type="button"
@@ -253,43 +281,22 @@ export default function SafetyPage() {
                 </p>
               </div>
 
-              {/* Say it in words. What comes back lands in the tabs, unsaved. */}
-              {DRAFT_FROM_WORDS && <div className="shrink-0 space-y-2">
-                <div className="flex items-center gap-2">
-                  <div className="relative min-w-0 flex-1">
-                    <Sparkles className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
-                    <input
-                      value={request}
-                      onChange={(e) => setRequest(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') describe(); }}
-                      disabled={drafting}
-                      placeholder="Or say it in words: the pumps may only dispense once a vial is loaded in the reactor"
-                      aria-label="Describe a rule in words"
-                      className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm focus:border-accent focus:outline-none disabled:opacity-60 dark:border-white/10 dark:bg-black/40"
-                    />
+              {/* An assistant proposal under review: in the tabs, unsaved, until Save or Discard. */}
+              {suggestion && (
+                <div className="flex shrink-0 items-start gap-3 rounded-xl border border-accent-tint bg-accent-soft/50 px-4 py-2.5 text-xs">
+                  <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <p className="text-gray-800 dark:text-gray-100">
+                      <span className="font-semibold">Suggested by the assistant</span>{suggestion.source ? ` (${suggestion.source})` : ''}: {suggestion.summary || 'safety additions.'}
+                    </p>
+                    {suggestion.added.length > 0 && (
+                      <p className="text-gray-600 dark:text-gray-300">Added, not saved yet: {suggestion.added.join(', ')}. Read it in the tabs, change anything you like, then Save to accept it.</p>
+                    )}
+                    {suggestion.questions.map((q, i) => <p key={i} className="text-amber-700 dark:text-amber-300">To decide: {q}</p>)}
                   </div>
-                  <button type="button" onClick={describe} disabled={drafting || !request.trim()}
-                    className="shrink-0 rounded-lg border border-accent-tint bg-accent-soft px-3 py-2 text-sm font-semibold text-accent-fg hover:bg-accent hover:text-on-accent disabled:opacity-40">
-                    {drafting ? 'Drafting…' : 'Draft it'}
-                  </button>
+                  <button type="button" onClick={discard} className="shrink-0 rounded-lg px-2 py-1 font-medium text-gray-600 hover:bg-white/60 dark:text-gray-300 dark:hover:bg-white/10">Discard suggestion</button>
                 </div>
-                {draftError && <p className="text-xs text-red-600 dark:text-red-400">{draftError}</p>}
-                {drafted && (
-                  <div className={`flex items-start gap-3 rounded-xl border px-4 py-2.5 text-xs ${drafted.ok ? 'border-gray-200 bg-white dark:border-white/10 dark:bg-white/5' : 'border-amber-200 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10'}`}>
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <p className="text-gray-800 dark:text-gray-100">{drafted.summary || 'Nothing was added.'}</p>
-                      {[...drafted.added.states.map((n) => `state ${n}`), ...drafted.added.limits.map((n) => `limit ${n}`), ...drafted.added.rules.map((n) => `rule "${n}"`)].length > 0 && (
-                        <p className="text-gray-500 dark:text-gray-400">
-                          Added, not saved yet: {[...drafted.added.states.map((n) => `state ${n}`), ...drafted.added.limits.map((n) => `limit ${n}`), ...drafted.added.rules.map((n) => `rule "${n}"`)].join(', ')}. Read it in the tabs, then Save.
-                        </p>
-                      )}
-                      {drafted.questions.map((q, i) => <p key={i} className="text-amber-700 dark:text-amber-300">To decide: {q}</p>)}
-                      {!drafted.ok && drafted.problems.filter((p) => p.level === 'error').map((p, i) => <p key={i} className="text-red-700 dark:text-red-300">Left out, it was not valid: {p.message}</p>)}
-                    </div>
-                    <button type="button" onClick={() => setDrafted(null)} aria-label="Dismiss" className="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10"><X className="h-3.5 w-3.5" /></button>
-                  </div>
-                )}
-              </div>}
+              )}
 
               {(errors.length > 0 || warnings.length > 0) && (
                 <ul className="max-h-32 shrink-0 space-y-1 overflow-y-auto rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-xs dark:border-white/10 dark:bg-white/5">

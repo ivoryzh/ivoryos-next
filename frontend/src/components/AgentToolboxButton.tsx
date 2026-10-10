@@ -18,17 +18,17 @@ export default function AgentToolboxButton({ open, onToggle }: { open: boolean; 
   return (
     <button
       onClick={onToggle}
-      title={open ? 'Hide the protocol assistant' : 'Describe a protocol in words and have it drafted against this deck'}
+      title={open ? 'Close the assistant' : 'Describe a protocol in words and have it drafted onto this canvas'}
       className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-colors ${
         open
-          ? 'bg-purple-50 border-purple-200 text-purple-700 dark:bg-purple-900/30 dark:border-purple-500/30 dark:text-purple-300'
+          ? 'bg-accent-soft border-accent-tint text-accent-fg'
           : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-800 dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10'
       }`}
     >
-      <Sparkles className="w-4 h-4 shrink-0 text-purple-500" />
+      <Sparkles className="w-4 h-4 shrink-0 text-accent" />
       <span className="flex-1 text-left">Assistant</span>
       {waiting > 0 && (
-        <span className="min-w-[1.25rem] px-1.5 py-0.5 rounded-full bg-purple-600 text-white text-[10px] font-bold leading-none">
+        <span className="min-w-[1.25rem] px-1.5 py-0.5 rounded-full bg-accent text-on-accent text-[10px] font-bold leading-none">
           {waiting}
         </span>
       )}

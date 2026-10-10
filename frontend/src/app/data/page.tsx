@@ -4,6 +4,7 @@ import { API_BASE, WS_BASE } from '@/config';
 import React, { useState, useEffect, useRef } from 'react';
 import { Table2, Download, Trash2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
+import { clearRequestParam, useAssistantPage, usePageRequest } from '@/assistant';
 import {
   ResultView, RunDataTable, readNamedOutput, SectionTitle, parseServerTime, serverDate, formatRun, datasheetCsv, cellText, isFlowStep, aggregateStatus, toDetail, phaseOf, issuesLabel, failedThenSkipped, useDocumentTheme, confirmDialog, notify } from '@ivoryos/shared-ui';
 
@@ -698,6 +699,17 @@ export default function DataPage() {
   const [selectedRun, setSelectedRun] = useState<any>(null);
   const [plots, setPlots] = useState<Record<string, string> | null>(null);
   const [plotsError, setPlotsError] = useState<string | null>(null);
+
+  // The assistant links runs it talks about here (`?run=` or, with the page open, a request), and
+  // is told which run is selected so "this run" means the one on screen.
+  usePageRequest('open-run', (id) => { setSelectedId(id); clearRequestParam('open-run'); });
+  useAssistantPage({
+    page: 'data',
+    defaultMode: 'ask',
+    describe: selectedRun
+      ? `Data History, with run #${selectedRun.id} "${selectedRun.name}" selected (${selectedRun.type}, ${selectedRun.rows?.length ?? 0} rows).`
+      : 'Data History, no run selected.',
+  }, [selectedRun?.id, selectedRun?.rows?.length]);
   const [plotsLoading, setPlotsLoading] = useState(false);
   // Deleting many: "Select" puts a checkbox on every card until "Done". Off, a card has only its
   // trash icon (one run). The checkboxes used to appear on hover, pushing the name aside as the

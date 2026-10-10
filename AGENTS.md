@@ -625,11 +625,37 @@ parts worth knowing before touching any of it:
 
 - **One tool layer, two surfaces.** `/api/agent/*` (`agent/routes.py`) is the whole contract.
   `agent/mcp_server.py` is a *thin stdio process that calls those endpoints over HTTP* — it
-  holds no logic, so a tool's behaviour is never implemented twice. The Designer's
-  `AgentPanel.tsx` calls the same endpoints. Adding a surface, or switching model, must not
+  holds no logic, so a tool's behaviour is never implemented twice. The assistant panel
+  (`AssistantPanel.tsx`) calls the same endpoints. Adding a surface, or switching model, must not
   mean reimplementing what a tool does.
+- **One assistant, on every page** (`frontend/src/components/AssistantPanel.tsx`, mounted once in
+  the root layout; state in `frontend/src/assistant.ts`). Opened from the nav (both placements,
+  with the count of proposals waiting) or the Designer's toolbox button; it overlays the page on
+  the right below the nav (`usePageArea`) and never pushes it aside, and sets
+  `--ivoryos-dock-right` so the queue chip moves out of its way. Three modes, each a `mode` of
+  `/api/agent/chat`: **ask** (agent/ask.py: questions answered from the records; the model replies
+  one JSON object, a lookup among `search_runs`/`run_table`/`compare_runs` or the answer, up to 5
+  lookups; read-only), **workflow** (agent/chat.py, as before), **safety**
+  (agent/safety_draft.py, filed as a proposal). A page sets the default mode and describes where
+  the person is through `useAssistantPage` (the Designer also lends its canvas: `getBody`/`apply`),
+  and the panel asks a page to act through `sendPageRequest` (`open-run` on Data History,
+  `review-safety` on Safety), which travels as `?run=`/`?proposal=` when that page is not open.
+  It used to be the Designer's own left-docked `AgentPanel`.
+- **History tools read the datasheet Data History reads** (`agent/history.py`, `/api/agent/runs`,
+  `/runs/{id}`, `POST /runs/compare`; MCP `search_runs`, `get_run_data`, `compare_runs`).
+  `ivoryos_edge/datasheet.py` ports `runRecord.ts formatRun` literally (absent vs null included),
+  and both are checked against `tests/fixtures/run_datasheets.json`, whose expected tables the
+  TypeScript writes (`node packages/shared-ui/test/write-datasheet-fixtures.mjs`;
+  `packages/shared-ui` `npm test` and `tests/automated/test_datasheet.py`). Change one reading,
+  regenerate, make the other pass. Statistics are computed there, never by the model.
+- **Safety additions are proposals** (kind `safety`: `POST /api/agent/propose-safety`, MCP
+  `get_safety`/`propose_safety`, and the chat's safety mode). They are refused when they do not
+  validate, opened on the Safety page laid over the configuration in force *now*
+  (`GET /proposals/{id}/safety-draft`) as an unsaved draft with a banner, and accepted by that
+  page's Save (`accept {save: false}`: the page saved what the person left) or rejected by its
+  Discard. A direct accept re-merges the additions onto the configuration in force.
 - **Nothing an agent posts takes effect.** Every write files an `AgentProposal` (kind
-  `workflow` or `run`) and stops; a person accepts it. Do not add an endpoint that lets an
+  `workflow`, `run` or `safety`) and stops; a person accepts it. Do not add an endpoint that lets an
   agent save or dispatch directly — the single human gate is the entire safety argument for
   letting a model near a deck that moves liquid. Accepting re-validates, because the deck can
   change between a model writing something and a person reading it.
@@ -811,7 +837,7 @@ What is load-bearing:
 - **The pages never name a tray's positions or evaluate a rule.** `/api/status` carries `safety` (each field's resolved limit, each tray as a ready-made `grid`), beside the schema and not in it: the schema is fingerprinted for deck versions and sent to Cloud. `packages/shared-ui/src/safety.ts` (`guardProblem`, `guardHint`) only marks a value as it is typed, in the Designer's step warnings, the Instruments page, Once/Iterate and Optimize; a check added to `check_value` belongs there too. **A field's limit can also be set from beside it on the Instruments page** (the shield at the end of each field, `components/safety/FieldGuardDialog.tsx`): the same `LimitControls` the Safety page's rows use, on a fresh `GET /api/safety`, saved whole with `PUT /api/safety`, and the page takes `resolved` as its new `safety`. The Safety page has the edge check its draft (`POST /api/safety/check`) rather than validating a second time.
 - **`TrayPicker` is portalled to `<body>`.** A page's content area is its own stacking context (`relative z-0`), so drawn in place it sat under the sidebar. On Iterate, picking positions fills the column, one row each, in visiting order (`onFillColumn`); a repeated position is marked amber, not refused.
 - The agent's validator takes `check_fields` (a model that writes 200 C is told the limit); the Library's compatibility verdict deliberately does not, since it is cached on the deck's shape.
-- **Defining a state should cost a click.** `suggest_states` offers the ones the deck's method names imply (`open_door` beside `close_door`; `_STATE_PAIRS`), as chips on the States tab. Drafting from a sentence exists and is **off the page for now** (`DRAFT_FROM_WORDS` in `app/safety/page.tsx`), until there is a better way to offer it: `POST /api/agent/safety` (`agent/safety_draft.py`) turns a sentence into states, limits and rules with the assistant's configured model, in the same draft, validate with `safety.validate`, feed the errors back loop as `chat.py`. It **saves nothing**: the result is put in the page's draft, shown in the tabs, and takes effect only when a person presses Save. Keep it that way when it comes back, for the reason an agent never saves a workflow.
+- **Defining a state should cost a click.** `suggest_states` offers the ones the deck's method names imply (`open_door` beside `close_door`; `_STATE_PAIRS`), as chips on the States tab. Drafting from a sentence is the assistant's **safety mode** (section 14): `agent/safety_draft.py` turns a sentence into states, limits and rules with the configured model (draft, validate with `safety.validate`, feed the errors back, as `chat.py`), files them as a safety proposal, and the Safety page shows it in its draft, unsaved, with a banner; it takes effect only when a person presses Save. The page's own sentence box (`DRAFT_FROM_WORDS`) is gone; `POST /api/agent/safety` still returns a draft without filing anything.
 
 Not done: Cloud does not show limits (a refused run reports the refusal as the task's error); a tray declared in driver code for anything but labware (section 17b does it for an instrument with a worktable); checking rules against a whole run before it starts (declared `set_by` effects are what would make that possible); locking a low-level method so it can only be called inside a named workflow; per-position state on a tray (which wells are used); running totals ("no more than 20 mL into one vial"). Tests: `tests/automated/test_safety_guard.py`.
 

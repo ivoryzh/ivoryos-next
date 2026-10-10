@@ -2375,12 +2375,15 @@ def _script_instruments(module, exclude_names=()) -> tuple:
     above. Builtin values are not reported, being every script's settings.
     """
     import enum
+    import types
     found, skipped = {}, {}
     excluded = set(exclude_names or ())
     for var_name, var_value in vars(module).items():
         if var_name.startswith("_"):
             continue
-        if inspect.isclass(var_value) or inspect.isfunction(var_value) or inspect.ismodule(var_value):
+        # Python 3.10 calls `list[float]` a class (fixed in 3.11); it is a typing value, said below.
+        is_class = inspect.isclass(var_value) and not isinstance(var_value, types.GenericAlias)
+        if is_class or inspect.isfunction(var_value) or inspect.ismodule(var_value):
             continue
         if isinstance(var_value, Plugin):
             continue

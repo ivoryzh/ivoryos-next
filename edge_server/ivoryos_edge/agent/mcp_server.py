@@ -169,6 +169,61 @@ def request_run(name: str, summary: str, variables: dict | None = None) -> dict:
 
 
 @server.tool()
+def search_runs(q: str = "", status: str = "all", limit: int = 20, offset: int = 0, sort: str = "newest") -> dict:
+    """Find runs in this deck's history. Each word of `q` must match the run's name, its
+    parameters (column names, values) or an instrument it used. `status` is completed, error,
+    cancelled, active or all; `sort` is newest, oldest, name or duration."""
+    return _get("/api/agent/runs", q=q, status=status, limit=limit, offset=offset, sort=sort)
+
+
+@server.tool()
+def get_run_data(run_id: int, max_rows: int = 200) -> dict:
+    """One run as its datasheet, the table Data History shows: one row per sample or
+    optimization trial, columns = inputs, typed-in answers and named outputs, each row's status
+    (completed, failed, not_run, ...), plus each numeric column's count, min, max and mean (and
+    the best trial for an optimization objective). Quote those numbers rather than recomputing."""
+    return _get(f"/api/agent/runs/{run_id}", max_rows=max_rows)
+
+
+@server.tool()
+def compare_runs(run_ids: list[int], columns: list[str] | None = None) -> dict:
+    """Several runs side by side: for each column they share (or the ones named), each run's
+    count, min, max and mean, and which run did best when the column is an optimization
+    objective. Up to 10 runs."""
+    payload = {"run_ids": run_ids}
+    if columns:
+        payload["columns"] = columns
+    return _post("/api/agent/runs/compare", payload)
+
+
+@server.tool()
+def get_safety() -> dict:
+    """The deck's safety configuration (trays, states, limits, rules) and what the deck offers
+    to it (each instrument's methods, arguments and readings). Read before proposing safety."""
+    return _get("/api/agent/safety")
+
+
+@server.tool()
+def propose_safety(add: dict, summary: str, questions: list[str] | None = None, allow_invalid: bool = False) -> dict:
+    """Put safety additions in front of the scientist. Nothing is enforced until a person
+    accepts them on the Safety page.
+
+    `add` is {"states": {...}, "limits": [...], "rules": [...]} in the configuration's own
+    format (see get_safety for what exists): a limit is {target, method, param, min?, max?,
+    allowed?, unit?}; a rule is {name, when: {target, method}, if?: [clause], require: [clause],
+    message}; a clause is {left, op, right} with operands {"arg": ...}, {"read": "inst.reading"},
+    {"state": ...} or {"value": ...}. A target is an instrument name or "class:<Driver>".
+
+    Additions that do not validate are REFUSED with the problems; fix them and propose again.
+    Say in `summary` what the additions will block, in plain words.
+    """
+    payload = {"add": add, "summary": summary, "source": SOURCE, "questions": questions or []}
+    if allow_invalid:
+        payload["allow_invalid"] = True
+    return _post("/api/agent/propose-safety", payload)
+
+
+@server.tool()
 def list_proposals(status: str = "pending") -> dict:
     """Check what you have already put forward and whether it was accepted or rejected.
 

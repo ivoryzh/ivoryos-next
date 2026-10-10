@@ -121,13 +121,19 @@ def _added(add: dict) -> dict:
     }
 
 
-async def draft_safety(provider, deck: safety.Deck, config: dict, message: str, max_attempts: int = MAX_ATTEMPTS):
+async def draft_safety(provider, deck: safety.Deck, config: dict, message: str, max_attempts: int = MAX_ATTEMPTS,
+                       on_progress=None):
     """Run the draft-validate-correct loop. Returns (result, transcript).
 
-    `result` is {ok, summary, questions, config, problems, added, attempts}. `config` is the whole
+    `result` is {ok, summary, questions, add, config, problems, added, attempts}. `add` is what the
+    model added, as merge() takes it (what a safety proposal stores). `config` is the whole
     configuration with the additions in it, normalized by the guard, for the page to show unsaved;
     when the model never got it valid it is still returned, with `problems` saying what is wrong,
     because a nearly-right rule a person can fix beats an apology."""
+    async def report(**event):
+        if on_progress is not None:
+            await on_progress(event)
+
     base, base_problems = safety.validate(config, deck)
     if any(p["level"] == "error" for p in base_problems):
         raise ValueError("Fix what the page already marks before asking for more.")
@@ -143,9 +149,11 @@ async def draft_safety(provider, deck: safety.Deck, config: dict, message: str, 
     }, {"role": "user", "content": message}]
 
     transcript = []
-    result = {"ok": False, "summary": "", "questions": [], "config": base, "problems": [],
+    await report(phase="reading_deck", instruments=len(deck.names()))
+    result = {"ok": False, "summary": "", "questions": [], "add": {}, "config": base, "problems": [],
               "added": {"states": [], "limits": [], "rules": []}, "attempts": 0}
     for attempt in range(1, max_attempts + 1):
+        await report(phase="drafting", attempt=attempt, max_attempts=max_attempts)
         raw = await provider.complete(SYSTEM_PROMPT, messages, json_mode=True)
         transcript.append({"attempt": attempt, "raw": raw})
         result["attempts"] = attempt
@@ -163,10 +171,12 @@ async def draft_safety(provider, deck: safety.Deck, config: dict, message: str, 
         result.update({
             "ok": not errors, "summary": str(parsed.get("summary") or "").strip(),
             "questions": [str(q) for q in (parsed.get("questions") or []) if str(q).strip()],
-            "config": merged, "problems": problems, "added": _added(add),
+            "add": add, "config": merged, "problems": problems, "added": _added(add),
         })
         if not errors:
+            await report(phase="valid", attempt=attempt)
             break
+        await report(phase="found_problems", attempt=attempt, errors=[p["message"] for p in errors])
         messages.append({"role": "assistant", "content": raw[:4000]})
         messages.append({"role": "user", "content": (
             "That does not validate against the deck. Fix exactly these problems and return the "

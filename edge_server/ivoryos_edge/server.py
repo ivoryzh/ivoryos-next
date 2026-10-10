@@ -2334,6 +2334,73 @@ def _alias_main_script(module_name):
         sys.modules.setdefault(stem, main)
 
 
+def _from_standard_library(module_name: str) -> bool:
+    """Whether a module is Python's own, judged by where it was loaded from, not only its name.
+
+    The name alone is not enough: a driver file called `test.py` or `platform.py` beside the script
+    shadows the standard module of that name, and its classes are the instruments. Built-in modules
+    (`builtins`, `_thread`) have no file. `typing_extensions` is not standard but is only typing.
+    """
+    import sysconfig
+    top = module_name.partition(".")[0]
+    if top == "typing_extensions":
+        return True
+    if top not in sys.stdlib_module_names:
+        return False
+    mod = sys.modules.get(module_name) or sys.modules.get(top)
+    path = getattr(mod, "__file__", None)
+    if not path:
+        return True
+    path = os.path.normcase(os.path.realpath(path))
+    if "site-packages" in path or "dist-packages" in path:
+        return False
+    # Not sysconfig's `platstdlib`: under a venv that is the venv's own Lib, site-packages included.
+    roots = [sysconfig.get_paths()["stdlib"], os.path.join(sys.base_prefix, "DLLs")]
+    return any(path.startswith(os.path.normcase(os.path.realpath(r)) + os.sep) for r in roots)
+
+
+def _script_instruments(module, exclude_names=()) -> tuple:
+    """The objects in a script that run(__name__) puts on the deck: ({name: object}, {name: why not}).
+
+    Skipped without comment, as every deck has them: names starting with `_`, modules, classes and
+    functions (what the script imports and defines), and Plugin objects (run() takes those itself).
+    Skipped and said, since a wrong guess here hides an instrument:
+      * a value whose type is Python's own -- `from typing import List, Union, Optional`,
+        `DATA_DIR = Path(...)`, `LOCK = threading.Lock()`, a timedelta, a logger, a plain str/int;
+      * an enum member (`MODE = Mode.FAST`): its type is the script's, but it is a value;
+      * a name in `exclude_names`, for the script's own objects that are not instruments
+        (`CONFIG = LabConfig()`), the one case no type check can tell.
+    IvoryOS Classic also skipped every name starting with a capital. NextGen does not, so
+    `HPLC = HPLC()` is an instrument; the capitalised constants that rule caught are of the kinds
+    above. Builtin values are not reported, being every script's settings.
+    """
+    import enum
+    import types
+    found, skipped = {}, {}
+    excluded = set(exclude_names or ())
+    for var_name, var_value in vars(module).items():
+        if var_name.startswith("_"):
+            continue
+        # Python 3.10 calls `list[float]` a class (fixed in 3.11); it is a typing value, said below.
+        is_class = inspect.isclass(var_value) and not isinstance(var_value, types.GenericAlias)
+        if is_class or inspect.isfunction(var_value) or inspect.ismodule(var_value):
+            continue
+        if isinstance(var_value, Plugin):
+            continue
+        value_type = type(var_value)
+        if var_name in excluded:
+            skipped[var_name] = "exclude_names"
+        elif isinstance(var_value, enum.Enum):
+            skipped[var_name] = f"a {value_type.__name__} value"
+        elif value_type.__module__ == "builtins":
+            continue
+        elif _from_standard_library(value_type.__module__):
+            skipped[var_name] = f"{value_type.__module__}.{value_type.__qualname__}, from Python itself"
+        else:
+            found[var_name] = var_value
+    return found, skipped
+
+
 def _echo_loggers(names):
     """Send these loggers' records to stdout (run's `logger`), once each, at INFO unless set."""
     import logging
@@ -2351,7 +2418,7 @@ def _echo_loggers(names):
 def run(module_name: str = None, port: int = None, plugins: list = None, *,
         instruments: dict = None, instrument_errors: list = None, deck_path: str = None,
         host: str = None, frontend_dir: str = None, plugins_dir: str = None, plugin_errors: list = None,
-        logger=None):
+        logger=None, exclude_names: list = None):
     """
     Entry point to start the Edge Server.
 
@@ -2361,7 +2428,10 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
 
     Two ways to say what is on the deck:
       run(__name__)                 every instrument object defined in the calling script
-                                    (the original, script-based deck -- example/demo.py)
+                                    (the original, script-based deck -- example/demo.py);
+                                    `exclude_names` leaves out the script's own objects that
+                                    are not instruments (_script_instruments says which are
+                                    left out without it)
       run(instruments={...})        an explicit mapping, which is what `python -m ivoryos_edge
                                     --deck deck.json` passes after loading the file
                                     (deck_config.py), together with `instrument_errors` for
@@ -2386,19 +2456,12 @@ def run(module_name: str = None, port: int = None, plugins: list = None, *,
         host = os.environ.get("IVORYOS_HOST", "0.0.0.0")
 
     if instruments is None:
-        instruments = {}
+        skipped = {}
         if module_name in sys.modules:
-            caller_mod = sys.modules[module_name]
-            # Inspect for objects that look like custom classes/instruments
-            for var_name, var_value in vars(caller_mod).items():
-                if var_name.startswith("_"):
-                    continue
-                # Basic filter: must be an object instance (not a primitive, function, or class itself)
-                if not inspect.isclass(var_value) and not inspect.isfunction(var_value) and not inspect.ismodule(var_value):
-                    # Ignore basic types
-                    if type(var_value).__module__ != "builtins" and not isinstance(var_value, Plugin):
-                        instruments[var_name] = var_value
+            instruments, skipped = _script_instruments(sys.modules[module_name], exclude_names)
         print(f"Found instruments in {module_name}: {list(instruments.keys())}")
+        if skipped:
+            print("Not instruments: " + ", ".join(f"{name} ({why})" for name, why in skipped.items()))
         _alias_main_script(module_name)
     else:
         print(f"Instruments from deck: {list(instruments.keys())}")

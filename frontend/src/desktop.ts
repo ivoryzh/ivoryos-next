@@ -24,6 +24,8 @@ export type Profile = {
   port: number;
   listenOnNetwork: boolean;
   autoStart: boolean;
+  /** No notifications from this deck at all (launcher Settings -> Notifications). */
+  muteNotifications?: boolean;
   env: Record<string, string>;
   // deck
   deck?: string;
@@ -95,6 +97,19 @@ export type Snapshot = {
   cloudComingSoon?: boolean;
   /** A build with no Cloud at all (the browser tour, src/tour/): no Cloud row, no sign-up for it. */
   noCloud?: boolean;
+  /** What the person is notified about (desktop/src/notifyPrefs.js). */
+  notifications?: NotificationPrefs;
+  /** Whether the system shows the app's notifications: null until one was tried. */
+  notifyHealth?: { ok: true } | { ok: false; error: string; at: number } | null;
+};
+
+export type NotificationEvent = 'input' | 'failed' | 'crashed' | 'finished' | 'stopped' | 'ready' | 'installed';
+export type NotificationPrefs = {
+  events: Record<NotificationEvent, boolean>;
+  /** A finished run shorter than this is not announced. */
+  minRunMinutes: number;
+  /** Sound for what needs a person; everything else is silent. */
+  sound: boolean;
 };
 
 /** An edge's `GET /api/cloud-settings`: whether it is paired with Cloud, and how its link is doing. */
@@ -260,7 +275,8 @@ export interface DesktopApi {
   stop(id: string): Promise<void>;
   restart(id: string): Promise<ProfileStatus>;
   /** `page` opens that page of the edge in its tab, e.g. '/cloud/'. */
-  open(id: string, page?: string): Promise<void>;
+  /** `raise: false` switches to the deck's tab without bringing the window forward. */
+  open(id: string, page?: string, opts?: { raise?: boolean }): Promise<void>;
   openInBrowser(id: string): Promise<void>;
   showTab(id: string | null): Promise<void>;
   closeTab(id: string): Promise<void>;
@@ -390,6 +406,10 @@ export interface DesktopApi {
   revealData(): Promise<void>;
   setTheme(theme: 'system' | 'light' | 'dark'): Promise<void>;
   setCloudOnly(on: boolean): Promise<void>;
+  setNotifications(patch: { events?: Partial<Record<NotificationEvent, boolean>>; minRunMinutes?: number; sound?: boolean }): Promise<void>;
+  /** shown: true when the system showed it, false when it refused (error says why), null when it never answered. */
+  testNotification(): Promise<{ shown: boolean | null; error?: string }>;
+  openNotificationSettings(): Promise<void>;
   /** The sidebar's order, dragged; ids not listed keep their place after these. */
   reorderProfiles(ids: string[]): Promise<void>;
   /** Reload the active deck or Cloud tab. */

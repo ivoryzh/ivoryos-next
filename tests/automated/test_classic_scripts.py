@@ -111,3 +111,12 @@ def test_run_logger_sends_those_loggers_to_the_output_once(capsys):
     finally:
         logging.disable(muted)
     assert "classic.test.pump INFO: dispensed 2 mL" in capsys.readouterr().out
+
+
+def test_exclude_names_carries_over():
+    # NextGen's run() takes it: the script's own objects that are not instruments stay off the deck.
+    source = ("import ivoryos\nfrom ivoryos.config import DemoConfig\n"
+              "ivoryos.run(__name__, config=DemoConfig(), exclude_names=[\"settings\"])\n")
+    result = convert(source)
+    assert 'ivoryos.run(__name__, exclude_names=["settings"])  # IvoryOS NextGen\n' in result["converted"]
+    assert not any("exclude_names" in note for note in result["notes"])

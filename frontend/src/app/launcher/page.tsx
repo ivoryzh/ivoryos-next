@@ -688,6 +688,38 @@ function UpdateChip({ update, onClick }: { update: UpdateStatus; onClick: () => 
   );
 }
 
+/**
+ * Start (or restart) a deck, then open its page once it is ready: what someone who pressed Start
+ * is waiting for. Not when they did anything else meanwhile (a click or a key anywhere in the
+ * launcher, or another tab opened): they have moved on and are not pulled back. Opened without
+ * bringing the window forward, so someone who went to another app stays there (the app tells
+ * them the deck is ready). A deck with instruments that did not load shows those instead
+ * (`showLoadErrors`), since its page would only look as if they were missing. A failed start
+ * rejects as before, and the Log it is watched on stays.
+ */
+async function startThenOpen(api: DesktopApi, id: string, start: () => Promise<unknown>, showLoadErrors: () => void) {
+  let movedOn = false;
+  const moved = () => { movedOn = true; };
+  document.addEventListener('pointerdown', moved, true);
+  document.addEventListener('keydown', moved, true);
+  const offTabs = api.onTabs(t => { if (t.active) movedOn = true; });
+  try {
+    await start();
+    if (movedOn) return;
+    const status = (await api.snapshot()).profiles.find(p => p.id === id)?.status;
+    if (!status || status.state !== 'running' || !status.url) return;
+    const notLoaded = await fetch(`${status.url}/api/status`).then(r => r.json())
+      .then(s => (s.instrument_errors || []).length > 0).catch(() => false);
+    if (movedOn) return;
+    if (notLoaded) showLoadErrors();
+    else await api.open(id, undefined, { raise: false });
+  } finally {
+    document.removeEventListener('pointerdown', moved, true);
+    document.removeEventListener('keydown', moved, true);
+    offTabs();
+  }
+}
+
 function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, tab, setTab, log, run, onRemoved, onOpenProfile, hubOpen, setHubOpen, hubKind, hubLink, seed, onSeedTaken, cloudComingSoon }: {
   api: DesktopApi;
   profile: Profile;
@@ -743,7 +775,11 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
       }
     }
     setTab('log');
-    run(() => api.start(profile.id));
+    run(() => startThenOpen(api, profile.id, () => api.start(profile.id), () => setTab('main')));
+  };
+  const restartProfile = () => {
+    setTab('log');
+    run(() => startThenOpen(api, profile.id, () => api.restart(profile.id), () => setTab('main')));
   };
   const tabs: { id: ProfileTab; label: string }[] = [
     { id: 'main', label: profile.kind === 'deck' ? 'Instruments' : 'Overview' },
@@ -775,7 +811,7 @@ function ProfileView({ api, profile, hubUrl, pro, onUpgrade, link, sharedWith, t
             // Starting shows the Log: it is where a start is seen to happen (or to fail), line by line.
             <Button tone="go" disabled={profile.problems.length > 0} title={profile.problems.join(' ')} onClick={startProfile}><Play className="w-4 h-4" /> Start</Button>
           )}
-          <Button disabled={!running} onClick={() => { setTab('log'); run(() => api.restart(profile.id)); }} title="Stop and start again: reloads the deck or script"><RotateCw className="w-4 h-4" /> Restart</Button>
+          <Button disabled={!running} onClick={restartProfile} title="Stop and start again: reloads the deck or script"><RotateCw className="w-4 h-4" /> Restart</Button>
           <Button tone={running ? 'primary' : 'default'} disabled={!running} title="Open this edge in a tab of this window" onClick={() => run(() => api.open(profile.id))}><LayoutGrid className="w-4 h-4" /> Open</Button>
           <Button disabled={!running} title="Open this edge in your web browser instead" onClick={() => run(() => api.openInBrowser(profile.id))}><ExternalLink className="w-4 h-4" /></Button>
         </div>
@@ -1005,7 +1041,8 @@ function CodePanel({ api, profile, run }: { api: DesktopApi; profile: Profile; r
   };
   const saveAndRestart = async () => {
     await save();
-    run(() => (running ? api.restart(profile.id) : api.start(profile.id)));
+    // Opens the deck's page when it is back, unless the person went on editing meanwhile.
+    run(() => startThenOpen(api, profile.id, () => (running ? api.restart(profile.id) : api.start(profile.id)), () => {}));
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); save(); }

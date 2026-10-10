@@ -14,9 +14,9 @@ one so going back is uncommenting:
 What does not carry over is said in `notes`, not guessed at:
   * `run()` arguments NextGen has no use for are left out of the new call: `config`, `debug`,
     `llm_server`/`model` (the assistant is set up on the Designer page), `enable_design`,
-    `exclude_names`, `notification_handler`, `optimizer_registry`, `templates_dir`,
-    `logger_output_name`, and `blueprint_plugins`, Classic's Flask pages (docs/plugins.md says how
-    to port one). `port`, `host` and `logger` are kept: NextGen's run() takes them.
+    `notification_handler`, `optimizer_registry`, `templates_dir`, `logger_output_name`, and
+    `blueprint_plugins`, Classic's Flask pages (docs/plugins.md says how to port one). `port`,
+    `host`, `logger` and `exclude_names` are kept: NextGen's run() takes them.
   * An import only those arguments used (`from ivoryos.config import DemoConfig`, a Flask plugin's
     blueprint) is commented out too, so the script does not stop on a package it no longer needs.
   * Anything else taken from `ivoryos` (`ivoryos.block`, `from ivoryos.utils import ...`) is
@@ -30,7 +30,7 @@ import json
 import sys
 from typing import Dict, List, Optional, Set
 
-KEPT_RUN_ARGUMENTS = {"port", "host", "logger"}
+KEPT_RUN_ARGUMENTS = {"port", "host", "logger", "exclude_names"}
 WHY_LEFT_OUT = {
     "blueprint_plugins": "Classic's Flask pages; port one as a NextGen plugin (docs/plugins.md)",
     "config": "Classic's Flask settings",
@@ -38,7 +38,6 @@ WHY_LEFT_OUT = {
     "llm_server": "the assistant is set up on the Designer page",
     "model": "the assistant is set up on the Designer page",
     "enable_design": "the Designer is always there",
-    "exclude_names": "every instrument object in the script is used",
     "notification_handler": "NextGen notifies through the desktop app and the browser",
     "optimizer_registry": "optimizers are chosen in the deck's Settings",
     "templates_dir": "workflows live in the Library",

@@ -42,6 +42,8 @@ function withDefaults(home, profile) {
         port: Number(profile.port) || DEFAULT_PORT,
         listenOnNetwork: !!profile.listenOnNetwork,
         autoStart: !!profile.autoStart,
+        // No notifications from this deck at all (a demo, or one being developed).
+        muteNotifications: !!profile.muteNotifications,
         env: profile.env && typeof profile.env === 'object' ? profile.env : {},
     };
     if (base.kind === 'deck') {
@@ -117,6 +119,8 @@ function loadProfiles(home) {
             cloudOnly: !!stored.cloudOnly,
             // Automation Hub items starred for quick access, per account: {accountId: ['module:12', ...]}.
             starred: stored.starred && typeof stored.starred === 'object' ? stored.starred : {},
+            // What the person is notified about (notifyPrefs.js normalizes it where it is read).
+            notifications: stored.notifications && typeof stored.notifications === 'object' ? stored.notifications : undefined,
             profiles: stored.profiles.map((p) => withDefaults(home, p)),
         };
     }

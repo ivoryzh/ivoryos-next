@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -188,6 +189,64 @@ def attention_items(run: Optional[Dict[str, Any]], awaiting_decision: Optional[i
                 "body": f"{step.get('instrument')}.{step.get('method')}: {first_line}".strip(": "),
             })
     return items
+
+
+def duration_text(seconds: float) -> str:
+    """'45 s', '12 min', '1 h 5 min': how long a run took, for a notification."""
+    total = int(round(seconds or 0))
+    if total < 60:
+        return f"{total} s"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def finished_notice(run_id: int, name: Optional[str], status: str, parameters: Optional[Dict[str, Any]],
+                    duration_s: float, set_duration_s: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """A run reaching its final status, as a one-off notice for `status.notices`.
+
+    attention_items is what needs a person, and it stays until someone answers it. A notice is a
+    moment that has already passed: listeners (the desktop app) announce each key once, and each
+    person chooses which kinds they hear about and from what run length. `kind` is "finished"
+    (completed, possibly with issues) or "stopped" (Stop, or ended on an error).
+
+    A stage of a set (parameters.group) that completed is not announced unless it is the last one.
+    The set is the experiment, so the last stage speaks for it, with the set's name and duration.
+    """
+    params = parameters or {}
+    group = params.get("group") or {}
+    issues = params.get("_issues") or {}
+    label = name or f"Run {run_id}"
+    duration = duration_s
+    if status == "completed":
+        if group.get("id"):
+            if int(group.get("index") or 0) < int(group.get("total") or 0):
+                return None
+            label = group.get("name") or label
+            duration = set_duration_s if set_duration_s is not None else duration_s
+        notes = []
+        if issues.get("skipped"):
+            notes.append(f"{issues['skipped']} failed step{'s' if issues['skipped'] != 1 else ''} skipped")
+        if issues.get("retried"):
+            notes.append(f"{issues['retried']} retr{'ies' if issues['retried'] != 1 else 'y'}")
+        if issues.get("stopped_early"):
+            notes.append("stopped early")
+        what = f"All {group.get('total')} stages completed" if group.get("id") else "Completed"
+        body = f"{what} in {duration_text(duration)}" + (f" ({', '.join(notes)})" if notes else "")
+        title = ("Stages finished" if group.get("id") else "Run finished") + (" with issues" if notes else "")
+        kind = "finished"
+    elif status in ("cancelled", "error"):
+        title = "Run stopped" if status == "cancelled" else "Run ended with an error"
+        body = f"After {duration_text(duration)}"
+        if group.get("id") and int(group.get("index") or 0) < int(group.get("total") or 0):
+            body += "; the stages after it will not run"
+        kind = "stopped"
+    else:
+        return None
+    return {"key": f"finished:{run_id}", "kind": kind, "status": status, "run_id": run_id, "run_name": label,
+            "title": title, "body": body, "duration_s": round(duration or 0, 1)}
 
 
 def step_phase(step) -> str:
@@ -725,6 +784,9 @@ class WorkflowQueueManager:
         # the Queue page only -- nothing here acts on it.
         self.cloud_queue: Optional[Dict[str, Any]] = None
         self._progress_state: Dict[int, Dict[str, Any]] = {}
+        # Runs that just ended, for notifications (finished_notice): kept for NOTICE_KEEP_S and sent
+        # in every queue status, so a listener that reconnects in that window still hears of them.
+        self.notices: List[Dict[str, Any]] = []
         
         self.current_task: Optional[asyncio.Task] = None
         self.current_step_task: Optional[asyncio.Future] = None
@@ -1168,6 +1230,35 @@ class WorkflowQueueManager:
         )
         await session.commit()
 
+    NOTICE_KEEP_S = 600
+
+    async def _note_finished(self, session, run) -> None:
+        """Record that `run` ended, for notifications (finished_notice). Never fails the run."""
+        try:
+            params = run.parameters or {}
+            duration = (run.end_time - run.start_time).total_seconds() if run.start_time and run.end_time else 0
+            group = params.get("group") or {}
+            set_duration = None
+            if run.status == "completed" and group.get("id") and int(group.get("index") or 0) >= int(group.get("total") or 0):
+                # The set's own length: from its first stage's start to now.
+                found = await session.execute(
+                    select(WorkflowRun.start_time, WorkflowRun.parameters)
+                    .where(cast(WorkflowRun.parameters, String).like(f'%{group["id"]}%')))
+                starts = [s for s, p in found.all() if s and ((p or {}).get("group") or {}).get("id") == group["id"]]
+                if starts and run.end_time:
+                    set_duration = (run.end_time - min(starts)).total_seconds()
+            notice = finished_notice(run.id, run.name, run.status, params, duration, set_duration)
+            if notice:
+                self.notices = [*self.notices, {**notice, "_t": time.monotonic()}][-20:]
+        except Exception as e:
+            print(f"[Run {getattr(run, 'id', '?')}] Could not record a notice: {e}")
+
+    def recent_notices(self) -> List[Dict[str, Any]]:
+        """The notices of the last NOTICE_KEEP_S, each with how long ago it happened (`age_s`)."""
+        now = time.monotonic()
+        self.notices = [n for n in self.notices if now - n["_t"] < self.NOTICE_KEEP_S]
+        return [{**{k: v for k, v in n.items() if k != "_t"}, "age_s": round(now - n["_t"], 1)} for n in self.notices]
+
     def _hold_queue_after(self, run) -> None:
         """After a run, hold the queue (nothing else starts until Resume queue) when it ended
         by Stop, on an error, or by a graceful stop told not to go on. Stop used to let the next
@@ -1282,6 +1373,7 @@ class WorkflowQueueManager:
                 "decision": self.decision,
                 "graceful_stop": self.graceful,
                 "cloud_queue": self.cloud_queue,
+                "notices": self.recent_notices(),
             }
         }
         
@@ -1625,6 +1717,7 @@ class WorkflowQueueManager:
                     await session.commit()
                     await self.publish_cloud_result(run.id)
                     report_run_finished(run, issues)
+                    await self._note_finished(session, run)
                     await self._end_group_after(session, run)
                     self._hold_queue_after(run)
                     self.active_run_id = None
@@ -1894,6 +1987,7 @@ class WorkflowQueueManager:
             await session.commit()
             await self.publish_cloud_result(run.id)
             report_run_finished(run, issues)
+            await self._note_finished(session, run)
             await self._end_group_after(session, run)
             self._hold_queue_after(run)
             self.active_run_id = None

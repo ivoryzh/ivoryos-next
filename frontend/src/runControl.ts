@@ -61,6 +61,22 @@ export function choiceWords(kind: PendingDecision['kind'] | undefined, choice: D
   return words[kind || 'step']?.[choice] || common[choice];
 }
 
+/**
+ * Whether the person put the decision pop-up aside ("Decide later"). Remembered per decision in
+ * sessionStorage, as the User input prompt is (inputPrompt.ts): every page renders the Sidebar,
+ * and with it the pop-up, afresh, so component state brought it back on every navigation. A new
+ * decision (another failure, a retry failing again) has a new key and opens by itself.
+ */
+const DECISION_LATER_KEY = 'ivoryos_decision_minimized';
+
+export function isDecisionMinimized(key: string): boolean {
+  try { return sessionStorage.getItem(DECISION_LATER_KEY) === key; } catch { return false; }
+}
+
+export function setDecisionMinimized(key: string) {
+  try { sessionStorage.setItem(DECISION_LATER_KEY, key); } catch { /* storage blocked: it stays put away on this page only */ }
+}
+
 /** Answer a run waiting for a decision (see PendingDecision). */
 export async function decideFailure(runId: number, action: Decision): Promise<void> {
   try {

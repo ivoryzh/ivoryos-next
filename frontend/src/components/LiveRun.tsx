@@ -15,8 +15,13 @@ const MIN_HEIGHT = 120;
 const maxHeight = () => (typeof window === 'undefined' ? 600 : Math.round(window.innerHeight * 0.7));
 /** After the person scrolls the steps themselves, leave their place alone for this long. */
 const HANDS_OFF_MS = 5000;
-/** A finished run stays on the page this long, so its result is seen without opening Data History. */
-const LINGER_MS = 15 * 60 * 1000;
+/**
+ * A finished run stays as the run bar this long, long enough to see how it ended, then the bar
+ * shrinks back to the idle chip. Counted by a timer: after a run ends the edge sends nothing more,
+ * so waiting for the next message to notice kept the bar wide indefinitely. (It used to linger 15
+ * minutes on purpose; the result is in Data History.)
+ */
+const LINGER_MS = 5000;
 
 /**
  * The run in progress, on the page that started it (Once, Iterate, Optimize), at the bottom of
@@ -111,6 +116,17 @@ export default function LiveRun() {
     ws.onmessage = e => { try { apply(JSON.parse(e.data)); } catch { /* a malformed frame */ } };
     return () => { gone = true; ws.close(); };
   }, []);
+
+  // A finished run (not one waiting for a decision) goes back to the idle chip after LINGER_MS.
+  const runId = run?.id;
+  const over = !!run && FINISHED.includes(run.status) && run.id !== awaiting;
+  useEffect(() => {
+    if (!over || runId === undefined) return;
+    if (!finishedAt.current.has(runId)) finishedAt.current.set(runId, Date.now());
+    const wait = Math.max(0, finishedAt.current.get(runId)! + LINGER_MS - Date.now());
+    const timer = setTimeout(() => { setRun(r => (r && r.id === runId ? null : r)); setOpen(false); }, wait);
+    return () => clearTimeout(timer);
+  }, [over, runId]);
 
   // Keep the running step in view inside the step box: only that box scrolls, never the page.
   const runningId = (run?.steps || []).find(st => st.status === 'running' || st.status === 'waiting_input')?.id ?? null;

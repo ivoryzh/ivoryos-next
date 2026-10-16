@@ -74,6 +74,11 @@ past a limit): the same reason `unproduced_references` exists.
 page. Starting unguarded because of a stray comma would be the wrong way to fail.
 
 The pages never compute a tray's position names themselves: `view()` hands them the grid.
+
+**Contents** (contents.py): a tray can also say what it holds (vessels with a capacity, or a stock)
+and who keeps the numbers (this edge, or the deck's own record, read in place), and `transfers` say
+which calls move how much liquid, or a whole vessel, from where to where. A call that would overflow
+a vessel, draw more than one holds, or pour where there is no vessel is refused, with the rest.
 """
 
 import asyncio
@@ -85,6 +90,7 @@ import uuid
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import contents as contents_mod
 from . import paths
 from .labware import declared_trays, expand_references, layout_of
 from .introspection import has_member, resolve_callable, resolve_output_path, serialize_result, _MISSING
@@ -132,7 +138,8 @@ class SafetyConfigError(Exception):
 
 
 def empty_config() -> dict:
-    return {"format": SAFETY_FORMAT, "enabled": True, "trays": {}, "states": {}, "limits": [], "rules": []}
+    return {"format": SAFETY_FORMAT, "enabled": True, "trays": {}, "states": {}, "limits": [], "rules": [],
+            "transfers": []}
 
 
 # --- Values -----------------------------------------------------------------------------------
@@ -437,6 +444,9 @@ def validate(raw, deck: Optional[Deck] = None) -> Tuple[dict, List[dict]]:
                 err(where, f"Tray '{name}' blocks '{position}', which is not one of its positions.")
             elif position not in tray["blocked"]:
                 tray["blocked"].append(position)
+        held = contents_mod.normalize_tray_contents(name, entry.get("contents"), tray, f"{where}.contents", deck, err, warn)
+        if held:
+            tray["contents"] = held
         config["trays"][name] = tray
 
     states = raw.get("states") or {}
@@ -548,6 +558,20 @@ def validate(raw, deck: Optional[Deck] = None) -> Tuple[dict, List[dict]]:
             elif method != ANY and not any(method in (deck.schemas.get(n) or {}) for n in matched):
                 warn(where, f"'{name}': '{method}' is not a method of {target}.")
         config["rules"].append(entry)
+
+    transfers = raw.get("transfers") or []
+    if not isinstance(transfers, list):
+        err("transfers", "'transfers' must be a list.")
+        transfers = []
+    transfer_ids: set = set()
+
+    def clause_check(clause, where, name, method):
+        return _validate_clause(clause, where, name, method, deck, err, warn, state_names)
+
+    for index, transfer in enumerate(transfers):
+        checked = contents_mod.normalize_transfer(transfer, index, config, deck, err, warn, clause_check, transfer_ids)
+        if checked:
+            config["transfers"].append(checked)
 
     return config, problems
 
@@ -792,9 +816,11 @@ def _flatten(args: dict, prefix: str = "") -> Dict[str, Any]:
 class Guard:
     """One per edge process: the configuration, what was last sent, and what was blocked."""
 
-    def __init__(self, path: Optional[str] = None, state_path: Optional[str] = None):
+    def __init__(self, path: Optional[str] = None, state_path: Optional[str] = None,
+                 contents_path: Optional[str] = None):
         self.path = path or paths.SAFETY_PATH
         self.state_path = state_path or paths.SAFETY_STATE_PATH
+        self.contents_path = contents_path or paths.SAFETY_CONTENTS_PATH
         self.app = None  # set by server.py; where the live deck is read from
         self.config = empty_config()
         self.load_error: Optional[str] = None
@@ -804,8 +830,11 @@ class Guard:
         self.blocked: deque = deque(maxlen=50)
         # Each tracked state's {value, ts, by}, or {unknown: why, ts, by}. On disk: see _save_state.
         self.state: Dict[str, dict] = {}
+        # What this edge keeps of the trays it keeps (contents.py): {tray: {position: entry}}.
+        self.contents: Dict[str, Dict[str, dict]] = {}
         self.load()
         self._load_state()
+        self._load_contents()
 
     # -- configuration --
 
@@ -850,6 +879,11 @@ class Guard:
         if set(self.state) - tracked:
             self.state = {name: entry for name, entry in self.state.items() if name in tracked}
             self._save_state()
+        # Likewise a tray that is gone, or that no longer holds vessels.
+        kept = {name for name, tray in config["trays"].items() if (tray.get("contents") or {}).get("role") == "vessels"}
+        if set(self.contents) - kept:
+            self.contents = {name: entry for name, entry in self.contents.items() if name in kept}
+            self._save_contents()
         return problems
 
     # -- deck states --
@@ -873,6 +907,114 @@ class Guard:
             os.replace(scratch, self.state_path)
         except OSError as e:
             print(f"Could not save the deck state ({self.state_path}): {e}")
+
+    # -- what the trays this edge keeps hold (contents.py) --
+
+    def _load_contents(self) -> None:
+        """A file that cannot be read is an empty record: every position then holds what a tray
+        says an unrecorded one holds (an empty vessel, or nothing)."""
+        try:
+            with open(self.contents_path, "r", encoding="utf-8") as handle:
+                stored = json.load(handle)
+            self.contents = {str(k): v for k, v in stored.items() if isinstance(v, dict)} if isinstance(stored, dict) else {}
+        except (OSError, ValueError):
+            self.contents = {}
+
+    def _save_contents(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.contents_path)), exist_ok=True)
+            scratch = f"{self.contents_path}.{os.getpid()}.tmp"
+            with open(scratch, "w", encoding="utf-8") as handle:
+                json.dump(self.contents, handle, indent=2)
+            os.replace(scratch, self.contents_path)
+        except OSError as e:
+            print(f"Could not save the tray contents ({self.contents_path}): {e}")
+
+    def current_contents(self) -> Dict[str, dict]:
+        """Every tray with contents as it stands, for the Safety page. The deck's own records are
+        read now."""
+        deck = self.deck()
+        return {name: contents_mod.describe_tray(self.config, self.contents, deck, name)
+                for name, tray in self.config["trays"].items() if tray.get("contents")}
+
+    def set_contents_by_hand(self, tray: str, position: Optional[str], entry: dict) -> None:
+        """A person says what a position holds, or resets a tray (contents.set_by_hand)."""
+        self.contents = contents_mod.set_by_hand(self.config, self.contents, tray, position, entry or {})
+        self._save_contents()
+
+    def _matching_transfers(self, instrument: str, method: str, deck: Deck) -> List[dict]:
+        if instrument in _NOT_INSTRUMENTS:
+            return []
+        return [t for t in self.config.get("transfers") or []
+                if t["enabled"] and t["when"]["method"] == method and deck.matches(instrument, t["when"]["target"])]
+
+    async def _plan_call(self, instrument: str, method: str, args: dict):
+        """What this call's transfers do to the trays: (the plan, why it may not be sent)."""
+        deck = self.deck()
+        transfers = self._matching_transfers(instrument, method, deck)
+        if not transfers:
+            return None, []
+        schema = (deck.schemas.get(instrument) or {}).get(method) or {}
+        context = {"instrument": instrument, "method": method, "args": args or {}, "deck": deck,
+                   "schema": schema, "reads": {}}
+        plan = contents_mod.Plan(self.config, self.contents, deck)
+        problems: List[str] = []
+        for transfer in transfers:
+            applies = True
+            for clause in transfer["if"]:
+                holds, _ = await self._clause(clause, context)
+                if holds is False:  # unknown counts as applying: the cautious reading
+                    applies = False
+                    break
+            if applies:
+                problems += [f"{instrument}.{method}: {p}" for p in plan.apply(transfer, args or {}, schema)]
+        return plan, problems
+
+    def _finish_contents(self, sent: dict, failed: bool) -> None:
+        """The positions a finished call changed take their new contents; a call that did not
+        finish leaves them unknown, since liquid may have moved anyway."""
+        call = f"{sent['instrument']}.{sent['method']}"
+        stamp = {"ts": time.time(), "by": call}
+        if failed:
+            for tray, key in sent.get("touched") or []:
+                self.contents.setdefault(tray, {})[key] = {"unknown": f"{call} did not finish", **stamp}
+        else:
+            for tray, entries in (sent.get("contents") or {}).items():
+                for key, entry in entries.items():
+                    if entry is None:  # nothing left to keep: a vessel back in its own place
+                        (self.contents.get(tray) or {}).pop(key, None)
+                    else:
+                        self.contents.setdefault(tray, {})[key] = {**entry, **stamp}
+                if tray in self.contents and not self.contents[tray]:
+                    del self.contents[tray]
+        self._save_contents()
+
+    def _walk_contents(self, prep: list, sequence: list, cleanup: list, deck: Deck) -> List[str]:
+        """A whole run's transfers, in order, from the trays as they are now: what would overflow
+        or run dry, before anything moves (contents.py)."""
+        if not self.config.get("transfers"):
+            return []
+        plan = contents_mod.Plan(self.config, self.contents, deck)
+        out: List[str] = []
+        for phase, steps in (("prep", prep), ("main", sequence), ("cleanup", cleanup)):
+            for index, step in enumerate(steps or []):
+                if not isinstance(step, dict):
+                    continue
+                instrument, method = _step_instrument(step), _step_method(step)
+                transfers = self._matching_transfers(instrument, method, deck)
+                if not transfers:
+                    continue
+                params = _step_params(step)
+                schema = (deck.schemas.get(instrument) or {}).get(method) or {}
+                where = f"{'Step' if phase == 'main' else phase.capitalize() + ' step'} {index + 1}"
+                if isinstance(params.get("_row"), int):
+                    where += f" (row {params['_row'] + 1})"
+                for transfer in transfers:
+                    if _static_holds(transfer["if"], params, schema) is False:
+                        continue
+                    for problem in plan.apply(transfer, params, schema, walking=True):
+                        out.append(f"{where}, {instrument}.{method}: {problem}")
+        return out
 
     def _set_state(self, name: str, by: str, value=_MISSING, unknown: Optional[str] = None) -> None:
         entry: Dict[str, Any] = {"ts": time.time(), "by": by}
@@ -973,7 +1115,11 @@ class Guard:
     def finish(self, sent: Optional[dict], result=_MISSING, failed: bool = False) -> None:
         """A call `enforce` let through has ended: apply what it sets. One that did not finish
         (it raised, or was stopped) leaves those states unknown: the door may be half open."""
-        if not sent or not sent.get("effects"):
+        if not sent:
+            return
+        if sent.get("touched"):
+            self._finish_contents(sent, failed)
+        if not sent.get("effects"):
             return
         call = f"{sent['instrument']}.{sent['method']}"
         for name, value in sent["effects"]:
@@ -1014,6 +1160,7 @@ class Guard:
             "classes": {name: deck.classes(name) for name in deck.names()},
             "blocked": list(self.blocked),
             "suggested_states": suggest_states(deck, self.config),
+            "suggested_transfers": contents_mod.suggest_transfers(deck, self.config),
         }
 
     # -- checks that need no hardware --
@@ -1096,6 +1243,7 @@ class Guard:
         literal(prep)
         literal(sequence)
         literal(cleanup)
+        add(self._walk_contents(prep, sequence, cleanup, deck))
         if (parameters or {}).get("type") == "Optimization":
             template = parameters.get("sequence_template") or []
             literal(template)
@@ -1250,11 +1398,19 @@ class Guard:
         Returns what was sent. The caller hands it to `finish()` when the call ends, either way:
         that is when the states it sets take their new value (or become unknown)."""
         problems = await self.check_call(instrument, method, args)
+        plan = None
+        if self.enabled and not self.load_error:
+            plan, more = await self._plan_call(instrument, method, args)
+            problems += more
         if problems:
             self.note_blocked(problems, source, instrument, method, args)
             raise SafetyViolation(problems)
         self.note_call(instrument, method, args)
-        return {"instrument": instrument, "method": method, "effects": await self._effects(instrument, method, args)}
+        sent = {"instrument": instrument, "method": method, "effects": await self._effects(instrument, method, args)}
+        if plan is not None and plan.touched:
+            sent["contents"] = plan.writes()
+            sent["touched"] = sorted(plan.touched)
+        return sent
 
     def note_blocked(self, problems: List[str], source: str, instrument: str = "", method: str = "",
                      args: Optional[dict] = None) -> None:
@@ -1276,6 +1432,32 @@ class Guard:
         values.update(_flatten(args))
         for path, value in values.items():
             self.last_values[f"{instrument}.{method}.{path}"] = value
+
+
+def _static_holds(clauses: List[dict], args: dict, schema: dict) -> Optional[bool]:
+    """Whether a transfer's `if` holds, as far as a run's own values say before it starts: True,
+    False, or None when a clause reads the deck (a reading, a state, a last value), which only the
+    step itself can tell. None counts as holding, the cautious reading."""
+    for clause in clauses:
+        sides = []
+        for operand in (clause["left"], clause["right"]):
+            if "value" in operand:
+                sides.append(operand["value"])
+            elif "arg" in operand:
+                value = _argument(args, schema, operand["arg"])
+                if value is _MISSING:
+                    value = None
+                if _is_reference(value):
+                    return None
+                sides.append(value)
+            else:
+                return None
+        holds = _compare(sides[0], clause["op"], sides[1])
+        if holds is False:
+            return False
+        if isinstance(holds, _Unknown):
+            return None
+    return True
 
 
 def _step_instrument(step: dict) -> str:

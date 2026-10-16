@@ -2,7 +2,9 @@
 
 import { Plus, Trash2 } from 'lucide-react';
 import { confirmDialog, type SafetyView } from '@ivoryos/shared-ui';
-import { cardClass, ghostButton, inputClass, slug, targetLabel, type SafetyConfig, type Tray } from './model';
+import {
+  VOLUME_UNITS, cardClass, ghostButton, inputClass, slug, targetLabel, type SafetyConfig, type Tray, type TrayContents,
+} from './model';
 
 const PRESETS: { label: string; tray: Tray }[] = [
   { label: '96-well plate', tray: { label: '96-well plate', rows: 8, columns: 12, naming: 'A1', order: 'row', blocked: [] } },
@@ -23,6 +25,10 @@ const NAMINGS = [
  * "position on <tray>" (Limits) then takes only those positions, and is picked on a drawing of the
  * tray instead of typed. The drawing here comes from the edge's check of the draft, so the names
  * shown are the names the edge will accept.
+ *
+ * A tray can also say what it holds (vessels of a capacity, or a stock of reagents) and who keeps the
+ * numbers: IvoryOS, or the deck's own code, read where it keeps them (edge: contents.py). Transfers
+ * then say which calls move liquid between them, and Contents shows what each position holds now.
  */
 export default function TraysEditor({ config, onChange, resolved }: {
   config: SafetyConfig;
@@ -46,6 +52,18 @@ export default function TraysEditor({ config, onChange, resolved }: {
   };
 
   const usedBy = (id: string) => config.limits.filter((l) => l.tray === id);
+
+  const setContents = (id: string, change: Partial<TrayContents> | null) => {
+    const tray = { ...config.trays[id] };
+    if (change === null) delete tray.contents;
+    else tray.contents = { ...(tray.contents || { role: 'vessels', kept_by: 'ivoryos', unit: 'mL', empty: 'vessel' }), ...change };
+    onChange({ ...config, trays: { ...config.trays, [id]: tray } });
+  };
+  const setRead = (id: string, field: keyof NonNullable<TrayContents['read']>, value: string) => {
+    const read = { from: '', ...(config.trays[id].contents?.read || {}), [field]: value };
+    if (!value && field !== 'from') delete read[field];
+    setContents(id, { read });
+  };
 
   const remove = async (id: string) => {
     const users = usedBy(id);
@@ -84,6 +102,7 @@ export default function TraysEditor({ config, onChange, resolved }: {
 
       {names.map((id) => {
         const tray = config.trays[id];
+        const held = tray.contents;
         const grid = resolved?.trays?.[id]?.grid;
         const numbered = tray.naming === '1' || tray.naming === '0';
         const users = usedBy(id);
@@ -126,6 +145,81 @@ export default function TraysEditor({ config, onChange, resolved }: {
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
+
+            {/* What it holds, and who keeps the numbers. One line; the deck's fields only when it is the deck. */}
+            <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+              <span className="w-14 shrink-0 text-[11px] font-bold uppercase tracking-wider text-gray-400">Holds</span>
+              <select value={held ? held.role : 'none'} aria-label="What it holds"
+                onChange={(e) => setContents(id, e.target.value === 'none' ? null : { role: e.target.value as TrayContents['role'] })}
+                className={`${inputClass} w-40`}>
+                <option value="none">nothing tracked</option>
+                <option value="vessels">vessels</option>
+                <option value="stock">a stock (bottles)</option>
+              </select>
+              {held?.role === 'vessels' && (
+                <>
+                  <span>of</span>
+                  <input type="number" min={0} step="any" value={held.capacity ?? ''} placeholder="any size" aria-label="Capacity of one vessel"
+                    onChange={(e) => setContents(id, { capacity: e.target.value === '' ? undefined : e.target.value })}
+                    className={`${inputClass} w-20`} />
+                  <select value={held.unit} aria-label="Unit" onChange={(e) => setContents(id, { unit: e.target.value })} className={`${inputClass} w-16`}>
+                    {VOLUME_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                  </select>
+                  <span>each; a position nobody recorded has</span>
+                  <select value={held.empty || 'vessel'} aria-label="What a position nobody recorded holds"
+                    onChange={(e) => setContents(id, { empty: e.target.value as TrayContents['empty'] })} className={`${inputClass} w-36`}>
+                    <option value="vessel">an empty vessel</option>
+                    <option value="nothing">nothing in it</option>
+                  </select>
+                  <label className="flex items-center gap-1" title="Drawing too much draws air: it spoils a sample and spills nothing, and a vial filled by hand is in no record unless someone says so. Overfilling, and pouring where there is no vessel, are always refused.">
+                    <input type="checkbox" checked={!!held.check_draws} onChange={(e) => setContents(id, { check_draws: e.target.checked || undefined })} className="accent-accent" />
+                    refuse drawing more than one holds
+                  </label>
+                </>
+              )}
+              {held && (
+                <>
+                  <span>· kept by</span>
+                  <select value={held.kept_by} aria-label="Who keeps the numbers"
+                    onChange={(e) => setContents(id, { kept_by: e.target.value as TrayContents['kept_by'] })} className={`${inputClass} w-48`}>
+                    <option value="ivoryos">IvoryOS</option>
+                    <option value="deck">the deck&rsquo;s own record</option>
+                  </select>
+                  <span>· also called</span>
+                  <input value={(held.aliases || []).join(', ')} placeholder="other names" aria-label="Other names calls use for this tray"
+                    onChange={(e) => setContents(id, { aliases: e.target.value.split(',').map((a) => a.trim()).filter(Boolean) })}
+                    className={`${inputClass} w-28`} />
+                </>
+              )}
+            </div>
+            {held?.kept_by === 'deck' && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-[3.875rem] text-xs text-gray-500 dark:text-gray-400">
+                <span>read from</span>
+                <input value={held.read?.from || ''} placeholder={`deck.trays.${id}`} aria-label="Where the deck keeps it"
+                  title="An instrument, then attributes or keys; then each position is looked up in it. A tray of one position is read as the vessel itself."
+                  onChange={(e) => setRead(id, 'from', e.target.value)} className={`${inputClass} w-52 font-mono`} />
+                {held.role === 'vessels' ? (
+                  <>
+                    <span>its fields: volume</span>
+                    <input value={held.read?.volume || ''} placeholder="total_volume" aria-label="Field holding the volume"
+                      onChange={(e) => setRead(id, 'volume', e.target.value)} className={`${inputClass} w-28 font-mono`} />
+                    <span>capacity</span>
+                    <input value={held.read?.capacity || ''} placeholder="max_volume_ml" aria-label="Field holding the capacity"
+                      onChange={(e) => setRead(id, 'capacity', e.target.value)} className={`${inputClass} w-32 font-mono`} />
+                    <span>liquids</span>
+                    <input value={held.read?.liquids || ''} placeholder="contents" aria-label="Field holding the liquids"
+                      onChange={(e) => setRead(id, 'liquids', e.target.value)} className={`${inputClass} w-24 font-mono`} />
+                    <span>in {held.unit}</span>
+                  </>
+                ) : (
+                  <>
+                    <span>its reagent&rsquo;s name</span>
+                    <input value={held.read?.liquid || ''} placeholder="solvent_name" aria-label="Field holding the reagent's name"
+                      onChange={(e) => setRead(id, 'liquid', e.target.value)} className={`${inputClass} w-28 font-mono`} />
+                  </>
+                )}
+              </div>
+            )}
 
             {grid ? (
               <div className="mt-4 overflow-x-auto">

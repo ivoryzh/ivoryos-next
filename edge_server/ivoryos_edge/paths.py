@@ -54,6 +54,9 @@ SAFETY_PATH = _in_data_dir("safety.json", os.path.join(_PACKAGE_DIR, "safety.jso
 # What the guard last knew of each deck state that no instrument can be asked for (a container on
 # the balance pan). Kept on disk because the container is still there after a restart.
 SAFETY_STATE_PATH = _in_data_dir("safety_state.json", os.path.join(_PACKAGE_DIR, "safety_state.json"))
+# What the vessels on the trays this edge keeps hold (contents.py): the liquid is still in the vial
+# after a restart, so this is kept on disk too.
+SAFETY_CONTENTS_PATH = _in_data_dir("safety_contents.json", os.path.join(_PACKAGE_DIR, "safety_contents.json"))
 
 # The introspected schema, dumped at startup for anyone who wants to diff it.
 SCHEMA_DUMP_PATH = _in_data_dir("ivoryos_schema.json", "ivoryos_schema.json")

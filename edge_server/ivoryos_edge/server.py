@@ -2190,6 +2190,28 @@ async def set_safety_state(req: Request):
     return {"states": await safety.guard.current_states()}
 
 
+@app.get("/api/safety/contents")
+def get_safety_contents():
+    """What every tray with contents holds now (contents.py). A tray the deck keeps is read from
+    the deck here, so this is asked for when a person looks, not polled."""
+    return {"trays": safety.guard.current_contents()}
+
+
+@app.post("/api/safety/contents")
+async def set_safety_contents(req: Request):
+    """A person says what a position holds ({tray, position, liquids | vacant | unknown}), or resets
+    a whole tray ({tray, reset: 'empty' | 'unknown'}). Only a tray this edge keeps can be set."""
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    try:
+        safety.guard.set_contents_by_hand(str(data.get("tray") or ""), data.get("position"), data)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"trays": safety.guard.current_contents()}
+
+
 @app.post("/api/safety/check")
 async def check_safety_draft(req: Request):
     """Validate a draft and lay out its trays without saving it, for the page being edited."""

@@ -9,10 +9,12 @@ import LimitsEditor from '@/components/safety/LimitsEditor';
 import TraysEditor from '@/components/safety/TraysEditor';
 import RulesEditor from '@/components/safety/RulesEditor';
 import StatesEditor from '@/components/safety/StatesEditor';
+import TransfersEditor from '@/components/safety/TransfersEditor';
+import ContentsView from '@/components/safety/ContentsView';
 import { emptyConfig, type Problem, type SafetyConfig, type SafetyInfo, type Schema } from '@/components/safety/model';
 import { clearRequestParam, useAssistantPage, usePageRequest } from '@/assistant';
 
-type Tab = 'limits' | 'trays' | 'states' | 'rules' | 'blocked';
+type Tab = 'limits' | 'trays' | 'transfers' | 'contents' | 'states' | 'rules' | 'blocked';
 
 /**
  * A safety proposal from the assistant (components/AssistantPanel.tsx, or an agent over MCP),
@@ -200,6 +202,8 @@ export default function SafetyPage() {
   const tabs: { key: Tab; label: string; count?: number }[] = draft ? [
     { key: 'limits', label: 'Limits', count: draft.limits.length },
     { key: 'trays', label: 'Trays', count: Object.keys(draft.trays).length },
+    { key: 'transfers', label: 'Transfers', count: (draft.transfers || []).length },
+    { key: 'contents', label: 'Contents' },
     { key: 'states', label: 'States', count: Object.keys(draft.states || {}).length },
     { key: 'rules', label: 'Rules', count: draft.rules.length },
     { key: 'blocked', label: 'Blocked', count: info?.blocked.length },
@@ -312,6 +316,11 @@ export default function SafetyPage() {
               <div className="flex min-h-0 flex-1 flex-col">
                 {tab === 'limits' && <LimitsEditor config={draft} onChange={setDraft} schema={schema} classes={info?.classes || {}} />}
                 {tab === 'trays' && <TraysEditor config={draft} onChange={setDraft} resolved={resolved} />}
+                {tab === 'transfers' && (
+                  <TransfersEditor config={draft} onChange={setDraft} schema={schema} classes={info?.classes || {}}
+                    suggested={info?.suggested_transfers || []} />
+                )}
+                {tab === 'contents' && <ContentsView unsaved={dirty} />}
                 {tab === 'states' && (
                   <StatesEditor config={draft} onChange={setDraft} schema={schema} classes={info?.classes || {}}
                     suggested={info?.suggested_states || []} savedNames={Object.keys(info?.config.states || {})} />

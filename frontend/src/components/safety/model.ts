@@ -42,6 +42,77 @@ export type Tray = {
   naming: string;
   order: string;
   blocked: string[];
+  /** What it holds, and who keeps the numbers (edge: contents.py). Absent: not tracked. */
+  contents?: TrayContents;
+};
+
+export const VOLUME_UNITS = ['µL', 'mL', 'L'];
+
+/**
+ * A tray's contents: vessels with a capacity, or a stock (a source, never drawn dry or overfilled
+ * here). Kept by this edge (a record the transfers change and a person can set), or by the deck's
+ * own code, read in place from `read.from` (an instrument, then attributes or keys).
+ */
+export type TrayContents = {
+  role: 'vessels' | 'stock';
+  kept_by: 'ivoryos' | 'deck';
+  unit: string;
+  capacity?: number | string;
+  /** What a position nobody has recorded holds: an empty vessel (a rack of vials), or nothing (a reactor slot). */
+  empty?: 'vessel' | 'nothing';
+  /** Refuse drawing more than a vessel holds. Off by default: it draws air, and a vial filled by hand is in no record. */
+  check_draws?: boolean;
+  /** A stock this edge keeps: which reagent each position holds. */
+  liquids?: Record<string, string>;
+  /** Other names calls use for this tray ('easymax' for the reactor). */
+  aliases?: string[];
+  read?: { from: string; volume?: string; capacity?: string; liquids?: string; liquid?: string };
+};
+
+export type SideSpec = { tray: Operand; position?: Operand };
+
+/**
+ * What one call moves: an amount (an argument and its unit) from a tray and position to another,
+ * or a whole vessel, which takes its contents and capacity along. Declared once per method, like a
+ * state's set_by: nothing in a signature says a method moves liquid.
+ */
+export type Transfer = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  when: { target: string; method: string };
+  moves: 'liquid' | 'vessel';
+  amount?: Operand;
+  unit?: string;
+  from?: SideSpec;
+  to?: SideSpec;
+  if: Clause[];
+};
+
+/** One position as it stands now (GET /api/safety/contents). */
+export type PositionNow = {
+  vacant?: boolean;
+  volume?: number;
+  capacity?: number;
+  liquids?: Record<string, number>;
+  unknown?: string;
+  /** A stock's reagent. */
+  liquid?: string;
+  /** Where the vessel here came from, when it is not its own place ("Extraction vials A1"). */
+  from?: string;
+  ts?: number;
+  by?: string;
+};
+
+export type TrayNow = {
+  role: 'vessels' | 'stock';
+  kept_by: 'ivoryos' | 'deck';
+  unit: string;
+  capacity?: number;
+  read?: TrayContents['read'];
+  label: string;
+  grid: string[][];
+  positions: Record<string, PositionNow>;
 };
 
 export type Operand = { arg?: string; read?: string; path?: string; last?: string; state?: string; value?: unknown };
@@ -85,6 +156,7 @@ export type SafetyConfig = {
   states: Record<string, StateSpec>;
   limits: Limit[];
   rules: Rule[];
+  transfers: Transfer[];
 };
 
 export type Problem = { level: 'error' | 'warning'; where: string; message: string };
@@ -109,6 +181,8 @@ export type SafetyInfo = {
   blocked: Blocked[];
   /** States this deck's method names imply (open_door beside close_door), ready to add. */
   suggested_states?: { name: string; state: StateSpec }[];
+  /** Transfers this deck's signatures imply (a volume, a source and a destination), ready to add. */
+  suggested_transfers?: Transfer[];
 };
 
 export type Schema = Record<string, Record<string, any>>;
@@ -116,7 +190,7 @@ export type Schema = Record<string, Record<string, any>>;
 export const CLASS_PREFIX = 'class:';
 
 export const emptyConfig = (): SafetyConfig => ({
-  format: 'ivoryos-safety/1', enabled: true, trays: {}, states: {}, limits: [], rules: [],
+  format: 'ivoryos-safety/1', enabled: true, trays: {}, states: {}, limits: [], rules: [], transfers: [],
 });
 
 /** A method's fields, nested objects opened out to dotted paths: what a limit can be set on. */

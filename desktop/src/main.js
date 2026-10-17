@@ -55,6 +55,10 @@ const CLOUD_COMING_SOON = (app.isPackaged && process.env.IVORYOS_ENABLE_CLOUD !=
 const LINK_SCHEME = 'ivoryos';
 const APP_SCHEME = 'ivoryos-app';
 const LAUNCHER_URL = `${APP_SCHEME}://ui/launcher/`;
+/** Whether a URL is the launcher page itself (any query or hash). */
+const isLauncherPage = (url) => {
+    try { return new URL(url).pathname.replace(/\/+$/, '') === '/launcher'; } catch { return false; }
+};
 
 // A separate profile for tests and side-by-side development: set before anything reads userData.
 if (process.env.IVORYOS_DESKTOP_HOME) app.setPath('userData', path.resolve(process.env.IVORYOS_DESKTOP_HOME));
@@ -351,6 +355,15 @@ function showLauncher() {
         ...(fs.existsSync(ICON) ? { icon: ICON } : {}),
     });
     keepToOrigin(launcherWindow, (url) => url.startsWith(`${APP_SCHEME}://`));
+    // The window shows the launcher page and nothing else. The build it is served from also holds
+    // every deck page, and a navigation inside it (a page left stale by a rebuild of the frontend
+    // falling back to a full load, say) once left the window on the Library page with no deck
+    // behind it and no sidebar, where Ctrl+L changed nothing and Ctrl+R reloaded the Library.
+    const backToLauncher = (_event, url) => {
+        if (String(url).startsWith(`${APP_SCHEME}://`) && !isLauncherPage(url)) launcherWindow.loadURL(LAUNCHER_URL);
+    };
+    launcherWindow.webContents.on('did-navigate', backToLauncher);
+    launcherWindow.webContents.on('did-navigate-in-page', backToLauncher);
     // A taskbar button flashing for a notification (announce) stops once the window is looked at.
     launcherWindow.on('focus', () => { if (process.platform !== 'darwin') launcherWindow.flashFrame(false); });
     addShortcuts(launcherWindow.webContents);

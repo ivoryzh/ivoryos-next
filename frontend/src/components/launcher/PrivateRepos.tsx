@@ -1,12 +1,13 @@
 "use client";
 import React, { useEffect, useState } from 'react';
 import { AlertTriangle, ExternalLink, GitBranch, Loader2, Lock, Search, Sparkles } from 'lucide-react';
-import type { DesktopApi, GitConnection, GitImport, GitProvider, GitRepo } from '@/desktop';
+import type { ArgDef, DesktopApi, GitConnection, GitImport, GitProvider, GitRepo } from '@/desktop';
 import { GitConnections } from './AccountPanel';
 import { Button, inputClass } from './ui';
 import { addTo, type DeckAccess } from './hubUi';
 
-export type InstrumentSeed = { name: string; import: string; class: string; from: string };
+/** A class picked from an imported repository, with its constructor as the code declares it. */
+export type InstrumentSeed = { name: string; import: string; class: string; from: string; init_args?: ArgDef[] | null; kwargs?: boolean };
 
 /** `SyringePump` -> `syringe_pump`: a deck name that reads like the other instruments. */
 function snake(name: string) {
@@ -35,12 +36,19 @@ export default function PrivateRepos({ api, access, pro, onUpgrade, onPicked }: 
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
   const [imported, setImported] = useState<{ repo: GitRepo; result: GitImport } | null>(null);
+  // Connecting another provider once one is connected: the provider whose form to open.
+  const [connecting, setConnecting] = useState<GitProvider | null>(null);
 
-  const reloadConnections = () => api.gitList().then(list => {
-    setConnections(list);
+  /** Keep the connections; a provider just connected is the one shown, and ends connecting. */
+  const applyConnections = (list: GitConnection[]) => {
+    const before = new Set((connections || []).filter(c => c.connected).map(c => c.provider));
     const connected = list.filter(c => c.connected);
-    setProvider(p => (p && connected.some(c => c.provider === p) ? p : connected[0]?.provider || null));
-  }).catch(() => setConnections([]));
+    const added = connected.find(c => !before.has(c.provider));
+    setConnections(list);
+    setProvider(p => (added ? added.provider : p && connected.some(c => c.provider === p) ? p : connected[0]?.provider || null));
+    if (added) setConnecting(null);
+  };
+  const reloadConnections = () => api.gitList().then(applyConnections).catch(() => setConnections([]));
   useEffect(() => { if (pro) reloadConnections(); }, [pro]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -86,7 +94,7 @@ export default function PrivateRepos({ api, access, pro, onUpgrade, onPicked }: 
                 <li key={`${c.module}.${c.class}`}>
                   <button type="button" className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-white/5" onClick={async () => {
                     const name = access.target ? await api.freeName(access.target.id, snake(c.class)).catch(() => snake(c.class)) : snake(c.class);
-                    onPicked({ name, import: c.module, class: c.class, from: repo.name });
+                    onPicked({ name, import: c.module, class: c.class, from: repo.name, init_args: c.init_args, kwargs: c.kwargs });
                   }}>
                     <span className="font-mono text-sm font-semibold">{c.class}</span>
                     <span className="ml-2 font-mono text-xs text-gray-500">{c.module}</span>
@@ -114,11 +122,11 @@ export default function PrivateRepos({ api, access, pro, onUpgrade, onPicked }: 
   }
 
   const connected = connections.filter(c => c.connected);
-  if (!connected.length) {
+  if (!connected.length || connecting) {
     return (
       <div className="max-w-2xl">
-        <GitConnections api={api} pro onUpgrade={onUpgrade} />
-        <div className="mt-3"><Button small onClick={reloadConnections}>Done</Button></div>
+        <GitConnections api={api} pro onUpgrade={onUpgrade} start={connecting ?? undefined} onChange={applyConnections} />
+        {connected.length > 0 && <div className="mt-3"><Button small tone="ghost" onClick={() => setConnecting(null)}>Back to repositories</Button></div>}
       </div>
     );
   }
@@ -129,6 +137,11 @@ export default function PrivateRepos({ api, access, pro, onUpgrade, onPicked }: 
         {connected.map(c => (
           <button key={c.provider} type="button" onClick={() => setProvider(c.provider)} className={`px-3 py-1.5 rounded-lg text-sm border ${provider === c.provider ? 'border-accent-tint bg-accent-soft text-accent-fg' : 'border-gray-200 dark:border-white/10'}`}>
             {c.label} <span className="text-xs text-gray-500">· {c.login}</span>
+          </button>
+        ))}
+        {connections.filter(c => !c.connected).map(c => (
+          <button key={c.provider} type="button" onClick={() => setConnecting(c.provider)} title={`Connect ${c.label} too`} className="px-3 py-1.5 rounded-lg text-sm border border-dashed border-gray-300 dark:border-white/20 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">
+            + {c.label}
           </button>
         ))}
         <div className="relative flex-1">

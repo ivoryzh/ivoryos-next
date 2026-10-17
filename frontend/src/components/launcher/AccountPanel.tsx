@@ -199,9 +199,15 @@ function SignedIn({ api, account, onUpgrade }: { api: DesktopApi; account: Accou
 }
 
 /** GitHub / GitLab personal access tokens, for importing private drivers (Pro). */
-export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: boolean; onUpgrade: () => void }) {
+export function GitConnections({ api, pro, onUpgrade, start, onChange }: {
+  api: DesktopApi; pro: boolean; onUpgrade: () => void;
+  /** Open with this provider's connect form already showing. */
+  start?: GitProvider;
+  /** Told the connections whenever they are loaded or change. */
+  onChange?: (list: GitConnection[]) => void;
+}) {
   const [list, setList] = useState<GitConnection[] | null>(null);
-  const [adding, setAdding] = useState<GitProvider | null>(null);
+  const [adding, setAdding] = useState<GitProvider | null>(start ?? null);
   const [token, setToken] = useState('');
   const [host, setHost] = useState('');
   const [busy, setBusy] = useState(false);
@@ -210,6 +216,7 @@ export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: 
   const [signIn, setSignIn] = useState<{ provider: GitProvider; userCode: string; verificationUri: string } | null>(null);
   const [useToken, setUseToken] = useState(false);
   useEffect(() => { api.gitList().then(setList).catch(() => setList([])); }, [api]);
+  useEffect(() => { if (list) onChange?.(list); }, [list]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startSignIn = async (provider: GitProvider) => {
     setError(null); setBusy(true);
@@ -258,7 +265,9 @@ export function GitConnections({ api, pro, onUpgrade }: { api: DesktopApi; pro: 
             </div>
           ))}
           {adding && (() => {
-            const c = list!.find(x => x.provider === adding)!;
+            // Opened on a provider (`start`) before the connections have loaded: nothing to show yet.
+            const c = list?.find(x => x.provider === adding);
+            if (!c) return null;
             if (!useToken && c.oauth) {
               return (
                 <div className="mt-2 rounded-lg border border-gray-200 dark:border-white/10 p-3 space-y-2">

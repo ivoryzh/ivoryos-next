@@ -31,3 +31,22 @@ test('a checkbox nobody touched keeps the driver default, true included', () => 
 test('only a field with no default is reported as left empty', () => {
   assert.deepEqual(emptyFields(NIMBUS, toForm(NIMBUS)), ['backend.host']);
 });
+
+// What desktop/src/scan_driver.py reads from `def __init__(self, port, address=1, label=None)`:
+// no declared types, so each is a guess the person may change.
+const UNTYPED = [
+  { name: 'port', required: true, type: 'str', type_unknown: true },
+  { name: 'address', required: false, default: 1, type: 'int', type_unknown: true },
+  { name: 'label', required: false, default: null, type: 'str', type_unknown: true },
+];
+
+test("a driver's own constructor: values follow the type chosen, and only required ones are missing", () => {
+  const form = toForm(UNTYPED);
+  assert.deepEqual(emptyFields(UNTYPED, form), ['port'], 'label defaults to None, so leaving it empty is fine');
+  form.port = '7';
+  form.address = '3';
+  assert.deepEqual(fromForm(UNTYPED, form), { port: '7', address: 3 });
+  // The person says port is a number after all.
+  const chosen = UNTYPED.map(d => (d.name === 'port' ? { ...d, type: 'int' } : d));
+  assert.deepEqual(fromForm(chosen, form), { port: 7, address: 3 });
+});

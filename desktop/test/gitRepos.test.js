@@ -74,6 +74,9 @@ test('GitLab uses its own token header and project ids', async () => {
     const got = await git.download('gitlab', '42', 'dev');
     assert.equal(calls[0].headers['PRIVATE-TOKEN'], 'glpat-x');
     assert.match(path.basename(got.file), /^gitlab-42-abcdef123456\.tar\.gz$/);
+    // Without it, Electron sends no-cors and GitLab refuses the archive with 406 (hotlinking).
+    const archiveCall = calls.find((c) => c.url.includes('/repository/archive.tar.gz'));
+    assert.equal(archiveCall.headers['Sec-Fetch-Mode'], 'navigate');
 });
 
 test('something that is not an archive is refused', async () => {

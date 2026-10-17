@@ -79,7 +79,9 @@ export type GitConnection = {
 export type GitRepo = { id: string; name: string; description: string | null; private: boolean; defaultBranch: string; updatedAt: string; url: string };
 export type DriverScan = {
   distribution?: string; version?: string; modules?: string[];
-  classes?: { module: string; class: string; doc: string }[];
+  /** `init_args`: the constructor's arguments as the code declares them, null when unreadable;
+   * `kwargs`: it also takes **kwargs (scan_driver.py constructor_args). */
+  classes?: { module: string; class: string; doc: string; init_args?: ArgDef[] | null; kwargs?: boolean }[];
   errors?: { module: string; error: string }[];
   error?: string;
 };
@@ -140,7 +142,15 @@ export type CloudPairResult =
   | { status: 'choose-workspace'; workspaces: { id: string; name: string; kind: string }[] }
   | { status: 'sign-in-needed'; code: string; approveUrl: string | null };
 
-export type ArgDef = { name: string; type?: string; default?: unknown; import_path?: string; class_name?: string; args?: ArgDef[] };
+/**
+ * One constructor argument. The Hub's are written by its contributors; one read from a driver's
+ * code (an imported repository) also says whether it is `required`, and `type_unknown` when the
+ * code declares no plain type, so the form lets the person choose it.
+ */
+export type ArgDef = {
+  name: string; type?: string; default?: unknown; import_path?: string; class_name?: string; args?: ArgDef[];
+  required?: boolean; type_unknown?: boolean;
+};
 
 export type DeckInstrument = {
   name: string;
@@ -150,6 +160,9 @@ export type DeckInstrument = {
   calls?: { method: string; args?: Record<string, unknown> }[];
   enabled?: boolean;
   hub?: { moduleId: number | string; name: string; init_args: ArgDef[]; connection: string[] };
+  /** The constructor as the driver's code declared it when it was imported (types the person
+   * chose included), so editing the instrument later shows the same form. */
+  signature?: { init_args: ArgDef[]; kwargs: boolean };
 };
 
 export type Deck = { format?: string; name?: string; packages?: string[]; paths?: string[]; instruments?: DeckInstrument[]; plugins?: string[] };

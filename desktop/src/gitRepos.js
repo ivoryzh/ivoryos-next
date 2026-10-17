@@ -37,13 +37,15 @@ const PROVIDERS = {
  * person approves it on github.com / gitlab.com, the app polls for the token). A device-flow app
  * has no secret to ship, which is what makes it usable from a desktop app; it does need registering
  * once per provider (GitHub: an OAuth App with "Enable Device Flow"; GitLab: an application,
- * non-confidential, scopes read_api + read_repository). Until an id is set here or in the
- * environment, only the token path is offered. A self-managed GitLab has its own applications, so
- * sign-in there needs IVORYOS_GITLAB_CLIENT_ID set for that server.
+ * non-confidential, "Device authorization grant" ticked, scopes read_api + read_repository +
+ * read_user, matching OAUTH_SCOPES). A client id is public, so the registered ones are built in:
+ * GitHub's is the ivoryos-ai organization's "IvoryOS" OAuth App, GitLab's an application on
+ * gitlab.com. The environment overrides them (testing another app). A self-managed GitLab has its
+ * own applications, so sign-in there needs IVORYOS_GITLAB_CLIENT_ID set for that server.
  */
 const OAUTH_CLIENT_IDS = {
-    github: process.env.IVORYOS_GITHUB_CLIENT_ID || '',
-    gitlab: process.env.IVORYOS_GITLAB_CLIENT_ID || '',
+    github: process.env.IVORYOS_GITHUB_CLIENT_ID || 'Ov23liZGMRYUEKCUjAXE',
+    gitlab: process.env.IVORYOS_GITLAB_CLIENT_ID || '0fb1b0a069000585d0c8a682144a0c151a394b7732c1dad248ed80b599eafd03',
 };
 const OAUTH_SCOPES = { github: 'repo read:user', gitlab: 'read_api read_repository read_user' };
 
@@ -304,7 +306,10 @@ class GitConnections {
             const archivePath = provider === 'github'
                 ? `/repos/${repoId}/tarball/${sha}`
                 : `/projects/${encodeURIComponent(repoId)}/repository/archive.tar.gz?sha=${sha}`;
-            const res = await this._get(provider, conn, archivePath, { raw: true });
+            // Electron's net.fetch sends Sec-Fetch-Mode: no-cors unless told otherwise, and GitLab
+            // answers that with 406 on archive downloads, taking it for a page embedding the file
+            // (Gitlab::HotlinkingDetector). "navigate" is what a person's download link sends.
+            const res = await this._get(provider, conn, archivePath, { raw: true, headers: { 'Sec-Fetch-Mode': 'navigate' } });
             const buf = Buffer.from(await res.arrayBuffer());
             if (buf.length < 20 || buf[0] !== 0x1f || buf[1] !== 0x8b) throw new GitError('The download is not a source archive.');
             fs.mkdirSync(this.downloadDir, { recursive: true });

@@ -1,7 +1,7 @@
 "use client";
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { notify } from '@ivoryos/shared-ui';
-import type { DesktopApi, DeckInstrument } from '@/desktop';
+import type { ArgDef, DesktopApi, DeckInstrument } from '@/desktop';
 import { fromForm, parseLiteral, showLiteral, toForm, type FormValues } from '@/launcherArgs';
 import ArgsForm from './ArgsForm';
 import { Button, Field, KeyValueRows, Modal, inputClass, labelClass } from './ui';
@@ -11,19 +11,24 @@ const NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 /**
  * Edit one instrument on a deck: its name, where its driver comes from, and its constructor
  * arguments -- which is where a COM port or an IP address lives. An instrument added from the Hub
- * brings the Hub's argument form with it; anything else gets name/value rows.
+ * brings the Hub's argument form with it; a class picked from an imported repository brings its
+ * constructor as the code declares it (kept on the entry as `signature`); anything else gets
+ * name/value rows. Rows are also how a constructor's **kwargs are given.
  */
 export default function InstrumentEditor({ api, profileId, entry, seed, running, onClose, onSaved }: {
   api: DesktopApi;
   profileId: string;
   entry: DeckInstrument | null; // null = a new, hand-written entry
   /** For a new entry: values to start from, e.g. the class picked from an imported repository. */
-  seed?: { name?: string; import?: string; class?: string; from?: string } | null;
+  seed?: { name?: string; import?: string; class?: string; from?: string; init_args?: ArgDef[] | null; kwargs?: boolean } | null;
   running: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const defs = useMemo(() => entry?.hub?.init_args || [], [entry]);
+  const signature = entry?.hub ? null
+    : entry?.signature || (seed?.init_args ? { init_args: seed.init_args, kwargs: !!seed.kwargs } : null);
+  // State, not derived: a type the person chooses for an argument the code leaves untyped is kept.
+  const [defs, setDefs] = useState<ArgDef[]>(() => entry?.hub?.init_args || signature?.init_args || []);
   const defNames = new Set(defs.map(d => d.name));
   const [name, setName] = useState(entry?.name || seed?.name || '');
   const [importPath, setImportPath] = useState(entry?.import || seed?.import || '');
@@ -33,6 +38,16 @@ export default function InstrumentEditor({ api, profileId, entry, seed, running,
     Object.entries(entry?.args || {}).filter(([k]) => !defNames.has(k)).map(([k, v]) => [k, showLiteral(v)]),
   ));
   const [saving, setSaving] = useState(false);
+
+  const setType = (argName: string, type: string) => {
+    const def = defs.find(d => d.name === argName);
+    setDefs(ds => ds.map(d => (d.name === argName ? { ...d, type } : d)));
+    // A checkbox holds true/false and a text box text: carry the value across only where it fits.
+    setForm(f => ({ ...f, [argName]: type === 'bool' ? def?.default === true : typeof f[argName] === 'boolean' ? '' : f[argName] }));
+  };
+  // The code says exactly what the constructor takes, so rows are for **kwargs only.
+  const rowsOffered = !signature || signature.kwargs || Object.keys(extra).length > 0;
+  const missing = defs.filter(d => d.required && d.type !== 'bool' && String(form[d.name] ?? '').trim() === '').map(d => d.name);
 
   const renamed = entry && name !== entry.name;
   const problems = [
@@ -47,6 +62,7 @@ export default function InstrumentEditor({ api, profileId, entry, seed, running,
       const args = { ...fromForm(defs, form), ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, parseLiteral(v)])) };
       const next: DeckInstrument = { ...(entry || {}), name, import: importPath.trim(), class: className.trim() } as DeckInstrument;
       if (Object.keys(args).length) next.args = args; else delete next.args;
+      if (signature) next.signature = { init_args: defs, kwargs: signature.kwargs };
       await api.saveInstrument(profileId, entry ? entry.name : null, next);
       onSaved();
       onClose();
@@ -96,24 +112,36 @@ export default function InstrumentEditor({ api, profileId, entry, seed, running,
         {defs.length > 0 && (
           <div>
             <div className={labelClass}>Settings</div>
-            <ArgsForm defs={defs} values={form} onChange={setForm} />
+            <ArgsForm defs={defs} values={form} onChange={setForm} onTypeChange={setType} />
+            {signature && (
+              <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                As the driver&apos;s constructor declares them. Where it gives no type, choose how the value is passed.
+              </p>
+            )}
           </div>
         )}
-        <div>
-          <div className={labelClass}>{defs.length ? 'Connection and other arguments' : 'Arguments'}</div>
-          <KeyValueRows
-            value={extra}
-            onChange={setExtra}
-            resetKey={entry?.name || 'new'}
-            keyPlaceholder="port"
-            valuePlaceholder="COM3"
-            keyPattern={/^[A-Za-z_][A-Za-z0-9_]*$/}
-            addLabel="Add argument"
-          />
-          <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-            Passed to the constructor. Numbers and true/false are typed; put a value in quotes to keep it as text.
+        {rowsOffered && (
+          <div>
+            <div className={labelClass}>{signature?.kwargs ? 'Other keyword arguments (**kwargs)' : defs.length ? 'Connection and other arguments' : 'Arguments'}</div>
+            <KeyValueRows
+              value={extra}
+              onChange={setExtra}
+              resetKey={entry?.name || 'new'}
+              keyPlaceholder="port"
+              valuePlaceholder="COM3"
+              keyPattern={/^[A-Za-z_][A-Za-z0-9_]*$/}
+              addLabel="Add argument"
+            />
+            <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+              Passed to the constructor. Numbers and true/false are typed; put a value in quotes to keep it as text.
+            </p>
+          </div>
+        )}
+        {missing.length > 0 && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            {className || 'The driver'} needs {missing.join(', ')}: left empty, the instrument will not load.
           </p>
-        </div>
+        )}
         {problems.length > 0 && (name || importPath || className) && (
           <ul className="text-xs text-red-600 dark:text-red-400 list-disc pl-4">{problems.map(p => <li key={p}>{p}</li>)}</ul>
         )}

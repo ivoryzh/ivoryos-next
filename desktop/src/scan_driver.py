@@ -10,14 +10,80 @@ repository's archive says nothing about its distribution name. Prints one JSON o
 Importing a module runs its top-level code, the same as the edge does when it loads the deck; a
 module that fails to import is reported, not fatal.
 """
+import enum
 import importlib
 import importlib.metadata as md
 import inspect
 import json
+import math
 import pkgutil
+import re
 import sys
+import types
+import typing
 
 SKIP = {"test", "tests", "conftest", "setup", "docs", "examples"}
+
+# The kinds of value the instrument form can type (launcherArgs.ts): anything else is the person's call.
+SCALARS = {bool: "bool", int: "int", float: "float", str: "str"}
+UNIONS = {typing.Union, types.UnionType}  # Optional[X] and X | None
+
+
+def scalar_type(annotation):
+    """'str', 'int', 'float' or 'bool' when the annotation plainly says so (Optional too), else None."""
+    if annotation is inspect.Parameter.empty:
+        return None
+    if isinstance(annotation, str):  # left as text: `from __future__ import annotations` it could not resolve
+        text = re.sub(r"^(typing\.)?Optional\[(.*)\]$", r"\2", annotation.strip())
+        text = re.sub(r"\s*\|\s*None$|^None\s*\|\s*", "", text)
+        return {name: name for name in SCALARS.values()}.get(text)
+    origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        return scalar_type(typing.get_args(annotation)[0])
+    if origin in UNIONS:
+        arms = [a for a in typing.get_args(annotation) if a is not type(None)]
+        return scalar_type(arms[0]) if len(arms) == 1 else None
+    return SCALARS.get(annotation)
+
+
+def json_safe(value):
+    return value is None or isinstance(value, (bool, int, str)) or (isinstance(value, float) and math.isfinite(value))
+
+
+def constructor_args(cls):
+    """
+    The constructor's arguments as the instrument form takes them (`ArgDef` in desktop.ts), and
+    whether it also takes **kwargs. A type the code does not plainly declare is a guess from the
+    default, marked `type_unknown` so the form lets the person choose. None when Python cannot read
+    the signature (a compiled class): the form then falls back to name/value rows.
+    """
+    try:
+        signature = inspect.signature(cls)
+    except (TypeError, ValueError):
+        return None, True
+    try:
+        hints = typing.get_type_hints(cls.__init__)
+    except Exception:
+        hints = {}
+    args, kwargs = [], False
+    for p in signature.parameters.values():
+        if p.kind is p.VAR_KEYWORD:
+            kwargs = True
+            continue
+        if p.kind in (p.VAR_POSITIONAL, p.POSITIONAL_ONLY):
+            continue  # a deck passes arguments by name, which these cannot take
+        arg = {"name": p.name, "required": p.default is p.empty}
+        if not arg["required"] and json_safe(p.default):
+            arg["default"] = p.default
+        declared = scalar_type(hints.get(p.name, p.annotation))
+        if declared:
+            arg["type"] = declared
+        else:
+            default = p.default
+            arg["type"] = next((name for t, name in SCALARS.items() if isinstance(default, t)), "str")
+            arg["type_unknown"] = True
+        args.append(arg)
+    return args, kwargs
 
 
 def find_distribution(archive_name):
@@ -68,10 +134,12 @@ def main():
         for attr, obj in vars(module).items():
             if attr.startswith("_") or not inspect.isclass(obj) or obj.__module__ != module.__name__:
                 continue
-            if issubclass(obj, BaseException):
-                continue  # an error type is never the instrument
+            if issubclass(obj, (BaseException, enum.Enum)) or getattr(obj, "_is_protocol", False):
+                continue  # an error type, a set of choices or an interface is never the instrument
             doc = (inspect.getdoc(obj) or "").strip().splitlines()
-            classes.append({"module": name, "class": attr, "doc": doc[0][:200] if doc else ""})
+            init_args, kwargs = constructor_args(obj)
+            classes.append({"module": name, "class": attr, "doc": doc[0][:200] if doc else "",
+                            "init_args": init_args, "kwargs": kwargs})
         return module
 
     modules = top_level_modules(dist)

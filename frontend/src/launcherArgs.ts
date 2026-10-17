@@ -87,12 +87,13 @@ export function showLiteral(value: unknown): string {
 }
 
 /** Text settings left empty, by dotted name: they are left out of the constructor call. One with
- * a `default` is not listed: left out, it is that default (which the field shows). */
+ * a `default` is not listed: left out, it is that default (which the field shows). Nor is one the
+ * driver's code says is optional (`required: false`), whose default may be None. */
 export function emptyFields(defs: ArgDef[], values: FormValues, prefix = ''): string[] {
   return defs.flatMap(def => {
     const v = values[def.name];
     if (def.type === 'object') return emptyFields(def.args || [], (v as FormValues) || {}, `${prefix}${def.name}.`);
-    if (def.type === 'bool' || (def.default !== undefined && def.default !== null)) return [];
+    if (def.type === 'bool' || def.required === false || (def.default !== undefined && def.default !== null)) return [];
     return v === undefined || v === null || String(v).trim() === '' ? [`${prefix}${def.name}`] : [];
   });
 }
